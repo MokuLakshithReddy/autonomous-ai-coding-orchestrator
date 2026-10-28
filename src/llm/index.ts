@@ -34,6 +34,18 @@ export const ReviewResultSchema = z.object({
   summary: z.string(),
 });
 
+export interface TokenUsageMetadata {
+  promptTokens: number;
+  candidatesTokens: number;
+  totalTokens: number;
+  measuredCost: number;
+}
+
+export function calculateGeminiCost(promptTokens: number, candidatesTokens: number): number {
+  // Gemini 2.0 Flash / Flash-Lite: $0.075 per 1M prompt tokens, $0.30 per 1M candidate tokens
+  return (promptTokens * 0.075) / 1_000_000 + (candidatesTokens * 0.30) / 1_000_000;
+}
+
 export type PlanStep = z.infer<typeof PlanStepSchema>;
 export type ExecutionPlan = z.infer<typeof ExecutionPlanSchema>;
 export type DiagnosticResult = z.infer<typeof DiagnosticResultSchema>;
@@ -42,6 +54,7 @@ export type ReviewResult = z.infer<typeof ReviewResultSchema>;
 export class LLMBrain {
   private ai: GoogleGenAI | null = null;
   private modelName: string;
+  private tokenUsage: TokenUsageMetadata = { promptTokens: 0, candidatesTokens: 0, totalTokens: 0, measuredCost: 0 };
 
   constructor() {
     this.modelName = config.geminiModel || 'gemini-flash-lite-latest';
@@ -61,6 +74,20 @@ export class LLMBrain {
 
   setModel(model: string): void {
     this.modelName = model;
+  }
+
+  getTokenUsage(): TokenUsageMetadata {
+    return { ...this.tokenUsage };
+  }
+
+  private recordUsage(usageMetadata?: any): void {
+    if (!usageMetadata) return;
+    const p = usageMetadata.promptTokenCount || 0;
+    const c = usageMetadata.candidatesTokenCount || 0;
+    this.tokenUsage.promptTokens += p;
+    this.tokenUsage.candidatesTokens += c;
+    this.tokenUsage.totalTokens += usageMetadata.totalTokenCount || (p + c);
+    this.tokenUsage.measuredCost = calculateGeminiCost(this.tokenUsage.promptTokens, this.tokenUsage.candidatesTokens);
   }
 
   async generatePlan(prompt: string, repoMeta: ProjectMetadata): Promise<ExecutionPlan> {
@@ -146,6 +173,7 @@ ${repoMeta.fileTreeSummary.slice(0, 40).join('\n')}
         }
       }
 
+      this.recordUsage(response?.usageMetadata);
       const parsed = JSON.parse(response?.text || '{}');
       return ExecutionPlanSchema.parse(parsed);
     } catch (err: any) {
@@ -232,6 +260,7 @@ ${gitDiff.slice(-3000) || '(No diff)'}
         }
       }
 
+      this.recordUsage(response?.usageMetadata);
       const parsed = JSON.parse(response?.text || '{}');
       return DiagnosticResultSchema.parse(parsed);
     } catch (err: any) {
@@ -289,13 +318,7 @@ Evaluate whether the user request has been legitimately satisfied based on the v
 Critical Rules:
 1. Do not assume completion without evidence in the diff.
 2. If tests were skipped, assertions removed, or empty functions left, mark 'isComplete': false.
-3. Output your response ONLY in valid JSON matching this exact structure:
-{
-  "isComplete": true or false,
-  "confidenceScore": 95,
-  "unresolvedIssues": [],
-  "summary": "Clear summary of whether the requirements were met and verified."
-}
+3. Output must strictly conform to JSON schema.
 `;
 
     const userContent = `
@@ -313,51 +336,19 @@ ${finalDiff.slice(-4000) || '(No diff)'}
 `;
 
     try {
-      let response: any;
-      let attempts = 0;
-      while (attempts < 3) {
-        try {
-          response = await this.ai.models.generateContent({
-            model: this.modelName,
-            contents: userContent,
-            config: {
-              systemInstruction,
-              responseMimeType: 'application/json',
-            },
-          });
-          break;
-        } catch (revErr: any) {
-          attempts++;
-          const errMsg = revErr?.message || '';
-          const isRateLimit = errMsg.includes('429') || errMsg.includes('RESOURCE_EXHAUSTED') || errMsg.includes('limit: 5');
-          const isUnavailable = errMsg.includes('503') || errMsg.includes('UNAVAILABLE') || errMsg.includes('high demand');
-          if ((isRateLimit || isUnavailable) && attempts < 3) {
-            let waitMs = 15000;
-            const match = errMsg.match(/retry in ([0-9.]+)s/i) || errMsg.match(/"retryDelay":\s*"([0-9]+)s"/i);
-            if (match) {
-              const parsedSec = parseFloat(match[1]);
-              waitMs = (parsedSec > 1000 ? Math.ceil(parsedSec) : Math.ceil(parsedSec * 1000)) + 1000;
-            }
-            waitMs = Math.min(Math.max(waitMs, 5000), 30000);
-            console.warn(`[Gemini Backoff] Review received ${isRateLimit ? '429 Rate Limit' : '503 High Demand'}. Pausing ${Math.round(waitMs / 1000)}s...`);
-            await new Promise((r) => setTimeout(r, waitMs));
-            continue;
-          }
-          throw revErr;
-        }
-      }
+      const response = await this.ai.models.generateContent({
+        model: this.modelName,
+        contents: userContent,
+        config: {
+          systemInstruction,
+          responseMimeType: 'application/json',
+        },
+      });
 
-      const parsed = JSON.parse(response?.text || '{}');
+      this.recordUsage(response?.usageMetadata);
+      const parsed = JSON.parse(response.text || '{}');
       return ReviewResultSchema.parse(parsed);
     } catch (err: any) {
-      if (!hasUnresolvedVerificationErrors && finalDiff.length > 0) {
-        return {
-          isComplete: true,
-          confidenceScore: 90,
-          unresolvedIssues: [],
-          summary: 'All requirements verified by independent test suite with verified diff evidence.',
-        };
-      }
       return {
         isComplete: false,
         confidenceScore: 40,

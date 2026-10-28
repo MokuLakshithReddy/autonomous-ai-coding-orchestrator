@@ -43,6 +43,8 @@ export class OrchestrationEngine extends EventEmitter {
     }
   >();
 
+  public lastBrain?: LLMBrain;
+
   constructor(options?: { allowedWorkspaces?: string[]; allowUnrestricted?: boolean }) {
     super();
     this.allowedWorkspaces = options?.allowedWorkspaces;
@@ -204,6 +206,7 @@ export class OrchestrationEngine extends EventEmitter {
 
     const inspector = new RepoInspector(params.workspacePath);
     const brain = new LLMBrain();
+    this.lastBrain = brain;
 
     // P0 FIX: Strict isolation enforcement - NEVER silently fall back to user working tree!
     let executionPath: string;
@@ -548,6 +551,13 @@ export class OrchestrationEngine extends EventEmitter {
         currentInstruction = `${step.instruction}\n\nCORRECTIVE REPAIR INSTRUCTIONS:\n${diagnostic.correctiveInstructions}`;
         executionResult = await agent.executeStep(currentInstruction, targetFiles, abortController.signal);
 
+        await stepRepo.update(stepRec.id, {
+          outputLog: executionResult.logs,
+          toolsUsedJson: JSON.stringify(executionResult.toolsUsed),
+          diffSummary: executionResult.diffSummary,
+          exitCode: executionResult.exitCode,
+        });
+
         // Reverification
         await this.transitionTaskState(taskId, stateMachine, 'verifying', `Re-verifying step "${step.title}" after repair`);
         verification = await verifier.verify(
@@ -607,9 +617,19 @@ export class OrchestrationEngine extends EventEmitter {
       }
 
       // Step passed!
+      const wasAgentDeclared = executionResult.agentResolution === 'declared_completion' || executionResult.success;
+      const resolutionMode = wasAgentDeclared
+        ? 'agent_declared_completion'
+        : 'independently_verified_after_agent_stopped';
+
       await stepRepo.update(stepRec.id, {
         status: 'COMPLETED',
         completedAt: new Date().toISOString(),
+        outputLog: `${executionResult.logs}\n\n[Orchestrator Resolution]: ${
+          wasAgentDeclared
+            ? 'Step completed cleanly by agent declaration.'
+            : 'Notice: Agent stopped without declaring completion (exhausted iterations), but Orchestrator independently verified that test suite passed cleanly with verified git diff evidence.'
+        }`,
       });
 
       await verificationRepo.record({
@@ -629,8 +649,10 @@ export class OrchestrationEngine extends EventEmitter {
         taskId,
         stepId: stepRec.id,
         type: 'VERIFICATION_PASSED',
-        message: `Step "${step.title}" independently verified!`,
-        data: verification,
+        message: wasAgentDeclared
+          ? `Step "${step.title}" independently verified (Agent declared completion).`
+          : `Step "${step.title}" independently verified (Notice: Agent stopped without declaring completion; independent tests confirmed repair).`,
+        data: { verification, resolutionMode },
       });
 
       // Post-step checkpoint

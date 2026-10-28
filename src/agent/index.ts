@@ -2,6 +2,7 @@ import { GoogleGenAI } from '@google/genai';
 import { AgentToolbox, type CommandResult, type ApprovalCallback } from './tools.js';
 import { config } from '../config/index.js';
 import { RepoInspector } from '../repo/inspector.js';
+import { type TokenUsageMetadata, calculateGeminiCost } from '../llm/index.js';
 
 export interface StepExecutionResult {
   agentName: string;
@@ -11,6 +12,7 @@ export interface StepExecutionResult {
   diffSummary?: string;
   exitCode: number;
   failureReason?: string;
+  agentResolution?: 'declared_completion' | 'exhausted_iterations' | 'execution_error';
 }
 
 export interface CodingAgent {
@@ -30,7 +32,7 @@ export interface GenAIClient {
       model: string;
       contents: string;
       config?: { responseMimeType?: string };
-    }): Promise<{ text?: string | null }>;
+    }): Promise<{ text?: string | null; usageMetadata?: any }>;
   };
 }
 
@@ -41,6 +43,7 @@ export class BuiltInAutonomousAgent implements CodingAgent {
   private ai: GenAIClient | GoogleGenAI | null = null;
   private modelName: string;
   private onRequestApproval?: ApprovalCallback;
+  private tokenUsage: TokenUsageMetadata = { promptTokens: 0, candidatesTokens: 0, totalTokens: 0, measuredCost: 0 };
 
   constructor(
     workspacePath: string,
@@ -56,6 +59,20 @@ export class BuiltInAutonomousAgent implements CodingAgent {
     } else if (config.geminiApiKey) {
       this.ai = new GoogleGenAI({ apiKey: config.geminiApiKey });
     }
+  }
+
+  getTokenUsage(): TokenUsageMetadata {
+    return { ...this.tokenUsage };
+  }
+
+  private recordUsage(usageMetadata?: any): void {
+    if (!usageMetadata) return;
+    const p = usageMetadata.promptTokenCount || 0;
+    const c = usageMetadata.candidatesTokenCount || 0;
+    this.tokenUsage.promptTokens += p;
+    this.tokenUsage.candidatesTokens += c;
+    this.tokenUsage.totalTokens += usageMetadata.totalTokenCount || (p + c);
+    this.tokenUsage.measuredCost = calculateGeminiCost(this.tokenUsage.promptTokens, this.tokenUsage.candidatesTokens);
   }
 
   setWorkspacePath(workspacePath: string): void {
@@ -115,6 +132,7 @@ export class BuiltInAutonomousAgent implements CodingAgent {
     let completedCleanly = false;
     let encounteredError = false;
     let failureReason: string | undefined;
+    const recentActions: Array<{ iter: number; action: string; summary?: string; commandOutput?: string }> = [];
 
     while (iteration < maxIterations) {
       if (abortSignal?.aborted) {
@@ -134,7 +152,7 @@ export class BuiltInAutonomousAgent implements CodingAgent {
         try {
           const allFiles = await this.toolbox.listFiles();
           filesToInspect = allFiles.filter((f) => !f.endsWith('/')).slice(0, 8);
-        } catch {}
+        } catch { }
       }
 
       for (const tf of filesToInspect) {
@@ -152,8 +170,12 @@ Target Files: ${targetFiles.join(', ') || 'Any relevant files in repository'}
 
 File Contexts:
 ${Object.entries(fileContexts)
-  .map(([f, content]) => `=== ${f} ===\n${content.slice(0, 3000)}`)
-  .join('\n\n')}
+          .map(([f, content]) => `=== ${f} ===\n${content.slice(0, 3000)}`)
+          .join('\n\n')}
+${recentActions.length > 0 ? `
+Recent Actions & Execution Results:
+${recentActions.slice(-3).map(a => `- Iteration ${a.iter} [${a.action}]: ${a.summary || ''}${a.commandOutput ? '\n  Output:\n' + a.commandOutput.slice(-500) : ''}`).join('\n')}
+` : ''}
 
 Decide on the next action to take. You can choose ONE action:
 1. "writeFile": Create or overwrite a file with complete content.
@@ -162,7 +184,7 @@ Decide on the next action to take. You can choose ONE action:
 4. "complete": Finish the step and declare work complete.
 
 Rules:
-- Once the fix is written and verified by running the test, return action: "complete" immediately. Do NOT repeatedly run tests in a loop.
+- If a test command was executed and passed with exit code 0 (all tests passed), the repair is successful! Return action: "complete" immediately. Do NOT run the test repeatedly in a loop.
 - When writing files with "writeFile", always provide the complete file content.
 
 Output your response ONLY in valid JSON matching this schema:
@@ -188,6 +210,7 @@ Output your response ONLY in valid JSON matching this schema:
                 responseMimeType: 'application/json',
               },
             });
+            this.recordUsage(response?.usageMetadata);
             break;
           } catch (modelErr: any) {
             modelAttempts++;
@@ -236,6 +259,11 @@ Output your response ONLY in valid JSON matching this schema:
           logs.push(`[Action] Writing file: ${actionJson.filePath}`);
           await this.toolbox.writeFile(actionJson.filePath, actionJson.fileContent);
           toolsUsed.push(`writeFile:${actionJson.filePath}`);
+          recentActions.push({
+            iter: iteration,
+            action: 'writeFile',
+            summary: `Wrote file ${actionJson.filePath}`,
+          });
         } else if (actionJson.action === 'readFile') {
           if (!actionJson.filePath) {
             encounteredError = true;
@@ -248,6 +276,11 @@ Output your response ONLY in valid JSON matching this schema:
             const content = await this.toolbox.readFile(actionJson.filePath);
             logs.push(`[Read Content from ${actionJson.filePath}]:\n${content.slice(0, 2000)}`);
             toolsUsed.push(`readFile:${actionJson.filePath}`);
+            recentActions.push({
+              iter: iteration,
+              action: 'readFile',
+              summary: `Inspected ${actionJson.filePath}`,
+            });
           } catch (readErr: any) {
             logs.push(`[Warning] Could not read ${actionJson.filePath}: ${readErr.message}`);
           }
@@ -264,10 +297,15 @@ Output your response ONLY in valid JSON matching this schema:
           logs.push(`[Command Output]:\n${res.stdout}`);
           if (res.stderr) logs.push(`[Command Stderr]:\n${res.stderr}`);
 
+          recentActions.push({
+            iter: iteration,
+            action: 'executeCommand',
+            summary: `Ran ${actionJson.command} (exit ${res.exitCode})`,
+            commandOutput: `${res.stdout}${res.stderr ? '\n' + res.stderr : ''}`.trim(),
+          });
+
           if (res.exitCode !== 0) {
             logs.push(`[Warning] Command exited with non-zero code ${res.exitCode}`);
-            // Non-zero command exit does not necessarily abort the loop if the agent can self-correct in next iteration,
-            // but if iteration finishes without complete, it fails.
           }
         } else {
           encounteredError = true;
@@ -281,6 +319,16 @@ Output your response ONLY in valid JSON matching this schema:
         logs.push(`[Error in Agent Loop]: ${err?.message}`);
         break;
       }
+    }
+
+    // Determine specific agent resolution outcome
+    let agentResolution: 'declared_completion' | 'exhausted_iterations' | 'execution_error' = 'declared_completion';
+    if (completedCleanly && !encounteredError) {
+      agentResolution = 'declared_completion';
+    } else if (!failureReason || failureReason.includes('exhausted max iterations')) {
+      agentResolution = 'exhausted_iterations';
+    } else {
+      agentResolution = 'execution_error';
     }
 
     // P0.1 FIX: If loop terminated without clean complete action or with an unhandled error, mark success = false!
@@ -302,6 +350,7 @@ Output your response ONLY in valid JSON matching this schema:
       diffSummary: diff.slice(0, 2000),
       exitCode: success ? 0 : 1,
       failureReason,
+      agentResolution,
     };
   }
 }

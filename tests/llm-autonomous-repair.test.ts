@@ -125,7 +125,7 @@ try {
     'completed',
     `Live LLM task must achieve COMPLETED status; current: ${latestTask.status}`
   );
-  
+
   // Find the final relevant verification record for this task
   const taskVerifs = verifs.filter((v) => v.taskId === task.id);
   assert.ok(taskVerifs.length > 0, 'Task must have produced verification records');
@@ -210,7 +210,7 @@ try {
   // Cleanup
   try {
     await fs.rm(tmpBase, { recursive: true, force: true });
-  } catch {}
+  } catch { }
 
   console.log('\n====================================================================');
   console.log('   LIVE LLM AUTONOMOUS REPAIR INTEGRATION TEST PASSED!              ');
