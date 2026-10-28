@@ -1,148 +1,410 @@
 # Autonomous AI Coding Orchestrator
 
-An enterprise-grade, local-first closed-loop engineering system connecting a Large Language Model (**The Brain**) with an autonomous coding agent (**The Engineer**) and an independent verification engine (**The Verifier**).
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+[![Node.js](https://img.shields.io/badge/Node.js-v20%2B%20%7C%20v24-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
+[![Fastify](https://img.shields.io/badge/Fastify-v5.x-000000?logo=fastify&logoColor=white)](https://fastify.dev/)
+[![SQLite](https://img.shields.io/badge/LibSQL%20%2F%20SQLite-003B57?logo=sqlite&logoColor=white)](https://turso.tech/libsql)
+[![Vite](https://img.shields.io/badge/Vite-6.x-646CFF?logo=vite&logoColor=white)](https://vitejs.dev/)
+[![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)](https://react.dev/)
+[![Gemini 3.8 / 2.5](https://img.shields.io/badge/Brain-Google%20Gemini-4285F4?logo=google&logoColor=white)](https://ai.google.dev/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+An enterprise-grade, local-first closed-loop engineering platform that connects an LLM (**The Brain**) with a coding agent (**The Engineer**) and an independent verification engine (**The Verifier**), coordinated by a deterministic state machine (**The Orchestrator**).
 
 ---
 
-## 🏛 Architecture Overview
+## 📑 Table of Contents
+
+- [Architectural Philosophy](#-architectural-philosophy)
+- [System Architecture](#-system-architecture)
+- [The Closed-Loop Lifecycle & State Machine](#-the-closed-loop-lifecycle--state-machine)
+- [Subsystem Deep Dive](#-subsystem-deep-dive)
+  - [1. The Brain (`src/llm`)](#1-the-brain-srcllm)
+  - [2. The Engineer (`src/agent`)](#2-the-engineer-srcagent)
+  - [3. The Independent Verifier (`src/verifier`)](#3-the-independent-verifier-srcverifier)
+  - [4. The State Engine & Ledger (`src/orchestrator` & `src/db`)](#4-the-state-engine--ledger-srcorchestrator--srcdb)
+  - [5. Repository & Checkpoint Service (`src/repo`)](#5-repository--checkpoint-service-srcrepo)
+- [Extensibility & Custom Adapters](#-extensibility--custom-adapters)
+  - [Implementing a Custom Coding Agent](#implementing-a-custom-coding-agent)
+  - [Plugging in Alternative LLM Providers](#plugging-in-alternative-llm-providers)
+- [Developer Setup & Local Development](#-developer-setup--local-development)
+- [REST & WebSocket API Specification](#-rest--websocket-api-specification)
+  - [REST Endpoints](#rest-endpoints)
+  - [WebSocket Realtime Event Stream](#websocket-realtime-event-stream)
+- [CLI Reference](#-cli-reference)
+- [Programmatic Library Usage](#-programmatic-library-usage)
+- [Security Model & Invariants](#-security-model--invariants)
+- [Contributing & Testing](#-contributing--testing)
+- [License](#-license)
+
+---
+
+## 💡 Architectural Philosophy
+
+Most AI coding assistants suffer from the **Confirmation Bias Loop**:
+1. An LLM makes edits.
+2. The LLM is asked *"Did you finish?"*.
+3. The LLM hallucinate or assumes success without rigorous empirical validation.
+4. Broken builds, skipped tests (`test.skip`), or syntax errors slip into production.
+
+The **Autonomous AI Coding Orchestrator** decouples **Intent** from **Execution** and **Empirical Validation**:
+- **Cognition ≠ Execution**: The Brain (`LLMBrain`) plans milestones and performs Root Cause Analysis (RCA), but never writes directly to disk.
+- **Execution ≠ Verification**: The Agent (`BuiltInAutonomousAgent`) executes edits and tools, but its self-reported success is **untrusted data**.
+- **Empirical Ground Truth**: The Verifier (`IndependentVerifier`) executes builds, test suites, and git diff audits outside the agent's context. A step is only marked `COMPLETED` when exit codes equal `0` and diff invariants hold.
+
+---
+
+## 🏛 System Architecture
 
 ```
-                      +-----------------------------+
-                      |      User Task / Mission    |
-                      +--------------+--------------+
-                                     |
-                                     v
-                      +-----------------------------+
-                      |     Orchestration Engine    |
-                      |   (State Machine & Ledger)  |
-                      +--------------+--------------+
-                                     |
-              +----------------------+----------------------+
-              |                                             |
-              v                                             v
-+---------------------------+                 +---------------------------+
-|    The Brain (LLM)        |                 |   The Engineer (Agent)    |
-| - Requirement Analysis    |                 | - Built-in Autonomous     |
-| - Milestone Decomposition |                 |   Tool-Calling Runner     |
-| - Root Cause Analysis     |                 | - File Operations & Diffs |
-| - Corrective Repair Plans |                 | - CLI Adapters (Aider)    |
-+-------------+-------------+                 +-------------+-------------+
-              ^                                             |
-              |               Failed Check Evidence         v
-              |          +----------------------------------+
-              |          |
-+-------------+----------+--+                 +---------------------------+
-|   Independent Verifier    |                 |   Target Codebase & Repo  |
-| - Native Build Checks     | <============== | - Git Snapshots & Commits |
-| - Automated Test Runners  |                 | - Diffs & Sandboxed Run   |
-| - Git Diff Audit & Safety |                 +---------------------------+
-+---------------------------+
+                             +-------------------------------+
+                             |    Developer / CLI / Web UI   |
+                             +---------------+---------------+
+                                             | HTTP / WS
+                                             v
+                             +-------------------------------+
+                             |      Fastify Server Gateway   |
+                             |  - REST Dispatcher            |
+                             |  - WebSocket Event Pool       |
+                             +---------------+---------------+
+                                             |
+                                             v
++-----------------------------------------------------------------------------------------+
+|                                    ORCHESTRATION ENGINE                                 |
+|                                                                                         |
+|   +-----------------------+     +-------------------------+     +-------------------+   |
+|   | SQLite Durable Ledger | <-> | State Machine & Retries | <-> | Human Gatekeeper  |   |
+|   | (Tasks/Steps/Reports) |     | (Timeout & Loop Guards) |     | (Sensitive Steps) |   |
+|   +-----------------------+     +-------------------------+     +-------------------+   |
++-------------------+----------------------------+----------------------------+-----------+
+                    |                            |                            |
+                    v                            v                            v
+      +---------------------------+ +---------------------------+ +-----------------------+
+      |      THE BRAIN (LLM)      | |   THE ENGINEER (AGENT)    | | INDEPENDENT VERIFIER  |
+      | - Plan Decomposer         | | - Tool Loop (read/write)  | | - Native Build Runner |
+      | - Diagnostic RCA Engine   | | - Regex & AST Search      | | - Test Suite Runner   |
+      | - Objective Reviewer      | | - Sandbox Shell Exec      | | - Diff Invariant Audit|
+      +---------------------------+ +---------------------------+ +-----------------------+
+                    ^                            |                            |
+                    |      Failure Diagnostics   | Actual Modifications       |
+                    +----------------------------+----------------------------+
+                                                 |
+                                                 v
+                                   +---------------------------+
+                                   |    Target Repository      |
+                                   |  - Git Checkpoint Commits |
+                                   |  - Isolated File Trees    |
+                                   +---------------------------+
 ```
 
 ---
 
-## 🚀 Key Features
+## 🔄 The Closed-Loop Lifecycle & State Machine
 
-1. **Closed-Loop Implementation & Self-Repair**
-   - Automatically executes: **User Request -> Repo Inspection -> LLM Planning -> Agent Execution -> Independent Verification -> Failure Diagnosis -> Automatic Repair -> Reverification -> Completion**.
-   - Does not trust the agent's self-assessment; tasks are only completed when independent compiler, test, and git diff verifications pass.
+```mermaid
+stateDiagram-v2
+    [*] --> INITIALIZING
+    INITIALIZING --> PLANNING: Inspect Workspace & Detect Ecosystem
+    PLANNING --> DISPATCHING: Formulate Milestones & Acceptance Criteria
+    
+    state "Step Loop" as StepLoop {
+        DISPATCHING --> AWAITING_APPROVAL: Is Sensitive Action?
+        AWAITING_APPROVAL --> EXECUTING: Approved by Operator
+        AWAITING_APPROVAL --> SKIPPED: Rejected by Operator
+        DISPATCHING --> EXECUTING: Safe Action
+        
+        EXECUTING --> VERIFYING: Pre-Commit Checkpoint & Agent Dispatched
+        
+        state Evaluation <<choice>>
+        VERIFYING --> Evaluation
+        
+        Evaluation --> DIAGNOSING: Build/Test/Diff Failed (Retries Left)
+        DIAGNOSING --> REPAIRING: Root Cause Analysis & Repair Dispatch
+        REPAIRING --> VERIFYING: Re-execute & Re-verify
+        
+        Evaluation --> TASK_FAILED: Retries Exhausted
+        Evaluation --> STEP_COMPLETED: Exit Code 0 & Clean Diff
+    }
 
-2. **The Brain (Google Gemini)**
-   - Formulates step-by-step milestones with explicit acceptance criteria.
-   - Performs Root Cause Analysis (RCA) on failed compiler outputs, test traces, and git diffs.
-   - Generates targeted corrective repair instructions.
-
-3. **The Engineer (Built-in Autonomous Agent)**
-   - Sandboxed tool suite: `readFile`, `writeFile`, `replaceInFile`, `deleteFile`, `listFiles`, `searchCode` (regex/ripgrep), and `executeCommand`.
-   - Pluggable adapter interface supporting external CLI agents (e.g. Aider).
-
-4. **Independent Verification Engine**
-   - Automatically discovers project ecosystem (`Node/npm`, `Python/pytest`, `Rust/cargo`, `Go`).
-   - Runs test suites, builds, and linters independently.
-   - Audits Git diffs for test-skipping patterns (`test.skip`) and sensitive file modifications (`.env`).
-
-5. **Persistent Memory & SQLite Task Ledger**
-   - Durable SQLite database (`file:orchestrator.db`) tracking tasks, steps, verifications, git commit checkpoints, and approval gates.
-   - Ability to rollback to any step snapshot.
-
-6. **Interactive Web Control Dashboard**
-   - High-aesthetic real-time web UI built with Vite and React.
-   - Real-time WebSocket streaming of terminal logs and lifecycle transitions.
-   - State progress visualization, milestone inspector, and git diff viewer.
-   - Human approval gate for sensitive operations.
-
-7. **Terminal CLI**
-   - Run autonomous missions directly from the terminal or in CI/CD scripts.
+    STEP_COMPLETED --> StepLoop: Next Step Remaining
+    STEP_COMPLETED --> OUTCOME_REVIEW: All Steps Satisfied
+    OUTCOME_REVIEW --> COMPLETED: Final Quality Audit Passed
+    TASK_FAILED --> [*]
+    COMPLETED --> [*]
+```
 
 ---
 
-## 🛠 Quick Start
+## 🔬 Subsystem Deep Dive
 
-### 1. Prerequisites
-- **Node.js** v20+ / v24+
-- **Git**
-- *(Optional)* Google Gemini API Key
+### 1. The Brain (`src/llm`)
+- **Engine**: Powered by Google Gemini (`@google/genai`) using Gemini 3.8 / 2.5 Flash / Pro.
+- **Contract Schemas**:
+  - `generatePlan()`: Ingests repository metadata, language ecosystem, detected build/test commands, and user prompt. Outputs structured JSON conforming to `ExecutionPlan`.
+  - `diagnoseFailure()`: Takes failure evidence (terminal stderr, test trace, git diff), performs Root Cause Analysis (RCA), and outputs targeted repair directives without hallucinations.
+  - `reviewOutcome()`: Audits final diff against the original acceptance criteria and produces an empirical confidence score (0-100).
 
-### 2. Configuration
-Copy the template and provide your Gemini API Key:
+### 2. The Engineer (`src/agent`)
+- **Interface**: `CodingAgent` contract requiring `executeStep(instruction, targetFiles)`.
+- **BuiltInAutonomousAgent**: Iterative tool-calling runtime with local safety boundaries:
+  - `readFile(path)`: Safe read within workspace bounds.
+  - `writeFile(path, content)`: Creates parent directories and writes atomic content.
+  - `replaceInFile(path, target, replacement)`: Surgical string replacement.
+  - `deleteFile(path)`: Controlled file deletion.
+  - `listFiles(relDir)`: Non-recursive and recursive file tree scanner.
+  - `searchCode(regexQuery)`: Ripgrep-style in-memory file search.
+  - `executeCommand(cmd, timeoutMs)`: Spawned subprocess under PowerShell / Bash with timeout handling.
+
+### 3. The Independent Verifier (`src/verifier`)
+- **Build Verifier**: Runs auto-detected compilation pipelines (`npm run build`, `cargo build`, `go build`).
+- **Test Runner**: Runs test suites (`npm test`, `pytest`, `cargo test`) and captures exit codes and stack traces.
+- **Diff & Invariant Auditor**:
+  - Detects banned test bypassing (e.g., `test.skip`, `it.skip`, `@pytest.mark.skip`).
+  - Guards protected files from unauthorized tampering (`.env`, private keys, protected configs).
+
+### 4. The State Engine & Ledger (`src/orchestrator` & `src/db`)
+- **Durable Persistence**: Backed by LibSQL (`file:orchestrator.db`). Survives process restarts and crashes.
+- **Tables**:
+  - `tasks`: Root record containing state, retry budgets, prompt, and final review summary.
+  - `steps`: Atomic steps with execution logs, tools invoked, and diff snapshots.
+  - `verifications`: Complete verification logs, status per check, and RCA diagnostics.
+  - `checkpoints`: Git commit hashes before and after every step for rollback support.
+  - `approvals`: Suspended actions awaiting human interaction.
+
+### 5. Repository & Checkpoint Service (`src/repo`)
+- Powered by `simple-git`.
+- Automatically initializes git repositories if none exist.
+- Performs atomic checkpoint commits:
+  - `pre-step-<index>: <step_title>`
+  - `post-step-<index>: <step_title>`
+- Supports one-click hard rollback: `inspector.rollbackToCommit(commitHash)`.
+
+---
+
+## 🔌 Extensibility & Custom Adapters
+
+### Implementing a Custom Coding Agent
+You can replace or wrap the built-in agent with external CLI agents like **Aider**, **Claude Code**, or a custom sandbox:
+
+```typescript
+import { type CodingAgent, type StepExecutionResult } from './src/agent/index.js';
+
+export class CustomDockerAgent implements CodingAgent {
+  name = 'CustomDockerAgent';
+
+  async executeStep(instruction: string, targetFiles: string[] = []): Promise<StepExecutionResult> {
+    // 1. Dispatch instruction into an isolated container
+    // 2. Collect stdout/stderr and modified file diffs
+    return {
+      agentName: this.name,
+      success: true,
+      logs: 'Executed inside Docker container',
+      toolsUsed: ['docker:run'],
+      exitCode: 0,
+    };
+  }
+}
+
+// Pass to the orchestrator:
+await orchestrator.runTask({
+  prompt: 'Add JWT authentication',
+  workspacePath: '/path/to/project',
+  customAgent: new CustomDockerAgent(),
+});
+```
+
+### Plugging in Alternative LLM Providers
+The LLM Brain is structured around standard schemas. To plug in Anthropic Claude, OpenAI, or local Ollama instances, implement the planner and diagnostic interfaces in `src/llm/index.ts`.
+
+---
+
+## 🛠 Developer Setup & Local Development
+
+### Prerequisites
+- Node.js `v20.x` or `v24.x`
+- Git `2.40+`
+- PowerShell (Windows) or Bash (macOS/Linux)
+
+### 1. Clone & Install Dependencies
+```bash
+git clone https://github.com/MokuLakshithReddy/autonomous-ai-coding-orchestrator.git
+cd autonomous-ai-coding-orchestrator
+
+# Install backend dependencies
+npm install
+
+# Install web dashboard dependencies
+cd web
+npm install
+cd ..
+```
+
+### 2. Environment Configuration
+Create your `.env` file:
 ```bash
 cp .env.example .env
 ```
-Edit `.env`:
+Fill in your configuration:
 ```env
+# Google Gemini API Key (Get one from https://aistudio.google.com/)
 GEMINI_API_KEY=your_gemini_api_key_here
 GEMINI_MODEL=gemini-2.5-flash
+
+# Orchestrator Server Settings
 PORT=4000
+HOST=127.0.0.1
+DATABASE_URL=file:orchestrator.db
 MAX_RETRY_BUDGET=3
+STEP_TIMEOUT_SECONDS=300
+AUTO_REPAIR_ENABLED=true
+REQUIRE_APPROVAL_FOR_DESTRUCTIVE=true
 ```
 
-### 3. Start the Server & Web Control Dashboard
+### 3. Running in Development Mode
+Run backend and frontend concurrently with hot-reloading:
+
 ```bash
+# Terminal 1: Backend Watch Mode
+npm run dev
+
+# Terminal 2: Web Dashboard Dev Server
+cd web
+npm run dev
+```
+
+### 4. Production Build & Execution
+```bash
+# Compile backend TypeScript and build Vite production bundle
+npm run build
+cd web && npm run build && cd ..
+
+# Start the unified server (serves API, WebSockets, and Web UI on port 4000)
 npm start
 ```
-Open **`http://localhost:4000`** in your browser.
+Navigate to **`http://localhost:4000`** in your browser.
 
-### 4. Run via Terminal CLI
+---
+
+## 📡 REST & WebSocket API Specification
+
+### REST Endpoints
+
+| Method | Endpoint | Description | Payload Example |
+| :--- | :--- | :--- | :--- |
+| `GET` | `/api/system/status` | System health & LLM model status | — |
+| `POST` | `/api/config/gemini` | Dynamically update API key/model | `{ "apiKey": "...", "model": "gemini-2.5-flash" }` |
+| `POST` | `/api/repo/inspect` | Inspect ecosystem & detection suites | `{ "workspacePath": "C:/projects/app" }` |
+| `GET` | `/api/tasks` | List historical and active tasks | — |
+| `POST` | `/api/tasks` | Dispatch a new autonomous task | `{ "prompt": "...", "workspacePath": "...", "maxRetries": 3 }` |
+| `GET` | `/api/tasks/:id` | Fetch task details, steps, verifications | — |
+| `POST` | `/api/tasks/:id/cancel` | Cancel an in-flight task | — |
+| `POST` | `/api/approvals/:id/respond`| Human approval response | `{ "status": "APPROVED" \| "REJECTED" }` |
+
+### WebSocket Realtime Event Stream
+Connect to `ws://localhost:4000/ws` to receive live JSON event streams:
+
+```typescript
+interface OrchestratorEvent {
+  id: string;
+  taskId: string;
+  stepId?: string;
+  type: 
+    | 'TASK_CREATED'
+    | 'REPO_INSPECTED'
+    | 'PLAN_GENERATED'
+    | 'STEP_STARTED'
+    | 'APPROVAL_REQUIRED'
+    | 'APPROVAL_RESOLVED'
+    | 'STEP_EXECUTED'
+    | 'STEP_VERIFYING'
+    | 'VERIFICATION_PASSED'
+    | 'VERIFICATION_FAILED'
+    | 'DIAGNOSING_ERROR'
+    | 'REPAIR_ATTEMPT'
+    | 'STEP_COMPLETED'
+    | 'TASK_COMPLETED'
+    | 'TASK_FAILED'
+    | 'TASK_BLOCKED';
+  message: string;
+  data?: any;
+  timestamp: string;
+}
+```
+
+---
+
+## 💻 CLI Reference
+
+The CLI provides full autonomous execution capabilities directly in your terminal:
+
 ```bash
-# Run an autonomous task in the current workspace:
-npm run cli -- run -p "Implement user authentication middleware and verify tests pass"
+# Run an autonomous task in the current directory:
+npm run cli -- run -p "Implement health check endpoint and verify tests"
 
-# Inspect the current repository metadata and detected verification suites:
-npm run cli -- inspect
+# Run in an external repository workspace with custom retry budget:
+npm run cli -- run -p "Fix JWT expiration bug" -w "C:/workspace/my-api" -r 5
+
+# Inspect repository ecosystem and detected verification suites:
+npm run cli -- inspect -w "."
+
+# Start the API and WebSocket server on a custom port:
+npm run cli -- serve -p 8080 -h 0.0.0.0
 ```
 
 ---
 
-## 📁 Repository Layout
+## 📦 Programmatic Library Usage
 
-```
-oRCHESTRATOR/
-├── src/
-│   ├── config/              # Zod environment validation & policy configurations
-│   ├── db/                  # LibSQL / SQLite durable ledger & repository schemas
-│   ├── llm/                 # Gemini Brain: Planning, RCA Diagnostics & Review prompts
-│   ├── agent/               # Autonomous Coding Agent: tool suite & sandbox execution
-│   ├── repo/                # Git inspector, automatic checkpoints & commit rollbacks
-│   ├── verifier/            # Independent verification engine (builds, tests, diff audits)
-│   ├── orchestrator/        # Closed-loop state machine, repair loop & approval gates
-│   ├── server/              # Fastify REST API & real-time WebSocket event broadcaster
-│   ├── cli/                 # Commander.js interactive terminal CLI
-│   └── index.ts             # Server and engine root entrypoint
-├── web/                     # Modern React + Vite Web Control Dashboard
-│   ├── src/
-│   │   ├── App.tsx          # Real-time dashboard with task list, stepper, logs & diffs
-│   │   ├── index.css        # Rich dark glassmorphic styling system
-│   │   └── main.tsx
-│   └── vite.config.ts       # Reverse proxy configuration
-├── dist/                    # Compiled backend distribution
-└── orchestrator.db          # Durable SQLite task & verification database
+You can import the orchestrator directly as a TypeScript library:
+
+```typescript
+import { OrchestrationEngine, RepoInspector } from './src/index.js';
+
+const engine = new OrchestrationEngine();
+
+// Subscribe to live events
+engine.on('event', (event) => {
+  console.log(`[${event.type}] ${event.message}`);
+});
+
+// Run an autonomous task programmatically
+const task = await engine.runTask({
+  prompt: 'Build a rate limiting middleware with unit tests',
+  workspacePath: process.cwd(),
+  maxRetries: 3,
+});
 ```
 
 ---
 
-## 🔒 Security & User Control
+## 🛡 Security Model & Invariants
 
-- **Workspace Path Sandboxing**: Agent cannot access or modify files outside authorized workspaces.
-- **Command Blacklist**: Destructive commands (`rm -rf /`, `format`, `shutdown`, `git push --force`) are intercepted and blocked.
-- **Human Approval Gate**: Sensitive actions pause the orchestrator, alert the operator via WebSocket and UI, and require explicit approval before execution.
-- **Git Checkpoints**: Automatic commits before and after every step allow one-click rollback if regressions occur.
+| Guard | Mechanism | Failure Action |
+| :--- | :--- | :--- |
+| **Path Sandboxing** | `AgentToolbox.resolveSafePath()` checks against `path.resolve(workspacePath)` | Throws `Security Exception`, blocks write |
+| **Command Blacklist** | Regex interceptor blocks `rm -rf /`, `format`, `shutdown`, `git push --force` | Rejects subprocess spawn immediately |
+| **Protected Branches** | Git service blocks direct pushes to `main`, `master`, `production` | Enforces feature branch creation |
+| **Secret Protection** | Verifier flags modifications to `.env`, credentials, or private keys | Fails verification immediately |
+| **Infinite Loop Guard**| Max retry budget + step execution timeouts (default 300s) | Halts step, triggers `TASK_BLOCKED` state |
+| **Human-in-the-Loop** | Sensitive milestones marked `isSensitive` pause execution | Waits for operator approval via UI / API |
+
+---
+
+## 🧪 Contributing & Testing
+
+1. Fork the repository.
+2. Create your feature branch (`git checkout -b feat/docker-sandbox`).
+3. Ensure typecheck and tests pass:
+   ```bash
+   npm run build
+   npm test
+   ```
+4. Commit your changes (`git commit -m "feat: add docker sandbox agent adapter"`).
+5. Push to the branch (`git push origin feat/docker-sandbox`).
+6. Open a Pull Request.
+
+---
+
+## 📄 License
+
+This project is licensed under the [MIT License](LICENSE) — see the [LICENSE](LICENSE) file for details.
