@@ -146,6 +146,11 @@ try {
 
   // 4b. Primary acceptance criterion: target repository test suite passes on the task branch
   const taskBranch = `task/${task.id.slice(0, 8)}`;
+  try {
+    const worktreeDir = path.join(repoDir, '.orchestrator_worktrees', task.id);
+    await git.raw(['worktree', 'remove', '--force', worktreeDir]).catch(() => {});
+    await git.raw(['worktree', 'prune']).catch(() => {});
+  } catch {}
   await git.checkout(taskBranch);
 
   const { execSync } = await import('node:child_process');

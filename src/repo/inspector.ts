@@ -384,10 +384,14 @@ export class RepoInspector {
     try {
       if (await this.isGitRepository()) {
         await this.git.raw(['worktree', 'remove', '--force', worktreeDir]);
+        await this.git.raw(['worktree', 'prune']).catch(() => {});
       }
     } catch {
       try {
         await fs.rm(worktreeDir, { recursive: true, force: true });
+        if (await this.isGitRepository()) {
+          await this.git.raw(['worktree', 'prune']).catch(() => {});
+        }
       } catch {}
     }
   }

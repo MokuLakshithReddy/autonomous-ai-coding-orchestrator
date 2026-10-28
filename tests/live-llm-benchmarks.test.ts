@@ -186,6 +186,11 @@ console.log('Public interval merger tests passed');
     if (isCompleted1) {
       try {
         const taskBranch1 = `task/${task1.id.slice(0, 8)}`;
+        try {
+          const wtDir = path.join(b1Dir, '.orchestrator_worktrees', task1.id);
+          await git1.raw(['worktree', 'remove', '--force', wtDir]).catch(() => {});
+          await git1.raw(['worktree', 'prune']).catch(() => {});
+        } catch {}
         await git1.checkout(taskBranch1);
         const { mergeIntervals } = await import(`file://${path.join(b1Dir, 'merger.js')}?v=${Date.now()}`);
         assert.deepStrictEqual(mergeIntervals([]), [], 'Empty input');
@@ -313,6 +318,11 @@ console.log('Public pricing test passed');
     if (isCompleted2) {
       try {
         const taskBranch2 = `task/${task2.id.slice(0, 8)}`;
+        try {
+          const wtDir = path.join(b2Dir, '.orchestrator_worktrees', task2.id);
+          await git2.raw(['worktree', 'remove', '--force', wtDir]).catch(() => {});
+          await git2.raw(['worktree', 'prune']).catch(() => {});
+        } catch {}
         await git2.checkout(taskBranch2);
         const { calculateTotal } = await import(`file://${path.join(b2Dir, 'pricing.js')}?v=${Date.now()}`);
         assert.strictEqual(calculateTotal([{ price: 50, quantity: 2 }], undefined), 100, 'Standard subtotal without coupon');
@@ -465,6 +475,11 @@ console.log('Public user service test passed');
     if (isCompleted3) {
       try {
         const taskBranch3 = `task/${task3.id.slice(0, 8)}`;
+        try {
+          const wtDir = path.join(b3Dir, '.orchestrator_worktrees', task3.id);
+          await git3.raw(['worktree', 'remove', '--force', wtDir]).catch(() => {});
+          await git3.raw(['worktree', 'prune']).catch(() => {});
+        } catch {}
         await git3.checkout(taskBranch3);
         const { UserService } = await import(`file://${path.join(b3Dir, 'src', 'service.js')}?v=${Date.now()}`);
         const serviceInstance = new UserService();
@@ -595,6 +610,11 @@ console.log('Public crypto module test passed');
     if (isCompleted4) {
       try {
         const taskBranch4 = `task/${task4.id.slice(0, 8)}`;
+        try {
+          const wtDir = path.join(b4Dir, '.orchestrator_worktrees', task4.id);
+          await git4.raw(['worktree', 'remove', '--force', wtDir]).catch(() => {});
+          await git4.raw(['worktree', 'prune']).catch(() => {});
+        } catch {}
         await git4.checkout(taskBranch4);
         const pkgContent = JSON.parse(await fs.readFile(path.join(b4Dir, 'package.json'), 'utf-8'));
         assert.strictEqual(pkgContent.type, 'module', 'package.json must declare type: module');
