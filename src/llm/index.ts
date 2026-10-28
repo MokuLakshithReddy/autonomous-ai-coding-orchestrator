@@ -1,36 +1,43 @@
 import { GoogleGenAI } from '@google/genai';
+import { z } from 'zod';
 import { config } from '../config/index.js';
 import type { ProjectMetadata } from '../repo/inspector.js';
 
-export interface PlanStep {
-  index: number;
-  title: string;
-  instruction: string;
-  targetFiles?: string[];
-  verificationCommand?: string;
-  isSensitive?: boolean;
-}
+export const PlanStepSchema = z.object({
+  index: z.number(),
+  title: z.string(),
+  instruction: z.string(),
+  targetFiles: z.array(z.string()).default([]),
+  verificationCommand: z.string().optional(),
+  dependencies: z.array(z.number()).default([]),
+  isSensitive: z.boolean().default(false),
+});
 
-export interface ExecutionPlan {
-  summary: string;
-  analysis: string;
-  acceptanceCriteria: string[];
-  steps: PlanStep[];
-}
+export const ExecutionPlanSchema = z.object({
+  summary: z.string(),
+  analysis: z.string(),
+  acceptanceCriteria: z.array(z.string()).min(1),
+  steps: z.array(PlanStepSchema).min(1),
+});
 
-export interface DiagnosticResult {
-  rootCause: string;
-  identifiedGaps: string[];
-  correctiveInstructions: string;
-  shouldRetry: boolean;
-}
+export const DiagnosticResultSchema = z.object({
+  rootCause: z.string(),
+  identifiedGaps: z.array(z.string()),
+  correctiveInstructions: z.string(),
+  shouldRetry: z.boolean(),
+});
 
-export interface ReviewResult {
-  isComplete: boolean;
-  confidenceScore: number;
-  unresolvedIssues: string[];
-  summary: string;
-}
+export const ReviewResultSchema = z.object({
+  isComplete: z.boolean(),
+  confidenceScore: z.number().min(0).max(100),
+  unresolvedIssues: z.array(z.string()),
+  summary: z.string(),
+});
+
+export type PlanStep = z.infer<typeof PlanStepSchema>;
+export type ExecutionPlan = z.infer<typeof ExecutionPlanSchema>;
+export type DiagnosticResult = z.infer<typeof DiagnosticResultSchema>;
+export type ReviewResult = z.infer<typeof ReviewResultSchema>;
 
 export class LLMBrain {
   private ai: GoogleGenAI | null = null;
@@ -63,30 +70,13 @@ export class LLMBrain {
 
     const systemInstruction = `
 You are the Brain of an Autonomous AI Coding Orchestrator.
-Your role is to understand the user's software development goal, inspect the repository context, and generate a precise, actionable, step-by-step implementation plan for an autonomous coding agent.
+Your goal is to understand requirements, inspect repository state, and generate a validated, structured execution plan.
 
 Rules:
-1. Break down complex tasks into atomic steps.
-2. Formulate clear, non-negotiable Acceptance Criteria that can be independently verified with code, tests, or builds.
-3. If an action could be destructive (e.g. database wipe, deleting key configs, production push), flag 'isSensitive': true.
-4. Always respond in valid JSON format matching the schema.
-
-JSON Output Schema:
-{
-  "summary": "Short 1-2 sentence overview of the strategy",
-  "analysis": "Detailed understanding of the project, architecture, and constraints",
-  "acceptanceCriteria": ["criterion 1", "criterion 2"],
-  "steps": [
-    {
-      "index": 1,
-      "title": "Short title",
-      "instruction": "Concrete detailed instruction for the coding agent",
-      "targetFiles": ["src/example.ts"],
-      "verificationCommand": "npm test or build check",
-      "isSensitive": false
-    }
-  ]
-}
+1. Break down complex tasks into atomic milestones with explicit dependencies.
+2. Define non-negotiable Acceptance Criteria that can be independently verified with builds, tests, or diff inspection.
+3. If an action could delete files, alter security configs, or affect production, set 'isSensitive': true.
+4. Output must strictly conform to the JSON schema.
 `;
 
     const userContent = `
@@ -115,10 +105,10 @@ ${repoMeta.fileTreeSummary.slice(0, 40).join('\n')}
         },
       });
 
-      const text = response.text || '{}';
-      return JSON.parse(text) as ExecutionPlan;
+      const parsed = JSON.parse(response.text || '{}');
+      return ExecutionPlanSchema.parse(parsed);
     } catch (err: any) {
-      console.warn('Gemini Plan Generation failed or returned malformed JSON, falling back:', err?.message);
+      console.warn('Gemini Plan Generation failed schema validation, using validated fallback plan:', err?.message);
       return this.generateFallbackPlan(prompt, repoMeta);
     }
   }
@@ -131,30 +121,23 @@ ${repoMeta.fileTreeSummary.slice(0, 40).join('\n')}
   ): Promise<DiagnosticResult> {
     if (!this.ai) {
       return {
-        rootCause: 'Automatic diagnosis unavailable without GEMINI_API_KEY. Review logs.',
-        identifiedGaps: ['Review terminal output logs and verification diagnostics manually.'],
-        correctiveInstructions: `Examine the error output:\n${outputLogs}\nFix the failing syntax or broken logic.`,
+        rootCause: 'Automatic diagnosis unavailable without GEMINI_API_KEY.',
+        identifiedGaps: ['Review terminal error logs and verification output manually.'],
+        correctiveInstructions: `Examine the error output:\n${outputLogs.slice(-1000)}\nFix the failing syntax or broken logic.`,
         shouldRetry: true,
       };
     }
 
     const systemInstruction = `
-You are the Diagnostic Engine of an Autonomous AI Coding Orchestrator.
+You are the Root Cause Analysis (RCA) Diagnostic Engine of an Autonomous AI Coding Orchestrator.
 A step in the coding plan failed verification or execution.
-Your job is to perform a Root Cause Analysis (RCA) and generate targeted, actionable repair instructions for the coding agent.
+Your job is to diagnose the root cause and generate targeted, actionable repair instructions.
 
 Rules:
-1. Do not hallucinate or guess. Pinpoint exact files, line numbers, or missing imports from the error logs.
+1. Ground your diagnosis exclusively in the provided error logs, stack traces, and diff evidence. Do not guess.
 2. Provide concrete corrective instructions that address the specific error.
-3. Indicate if this failure is safely recoverable ('shouldRetry': true) or if human intervention is required ('shouldRetry': false).
-
-JSON Output Schema:
-{
-  "rootCause": "Exact root cause analysis",
-  "identifiedGaps": ["gap 1", "gap 2"],
-  "correctiveInstructions": "Detailed instructions on what to change/create/fix",
-  "shouldRetry": true
-}
+3. If the error is an unrecoverable environmental blocker, set 'shouldRetry': false.
+4. Output must strictly conform to the JSON schema.
 `;
 
     const userContent = `
@@ -183,45 +166,57 @@ ${gitDiff.slice(-3000) || '(No diff)'}
         },
       });
 
-      const text = response.text || '{}';
-      return JSON.parse(text) as DiagnosticResult;
+      const parsed = JSON.parse(response.text || '{}');
+      return DiagnosticResultSchema.parse(parsed);
     } catch (err: any) {
-      console.warn('Gemini Diagnosis failed:', err?.message);
       return {
-        rootCause: `Diagnostic analysis encounter error: ${err?.message}`,
-        identifiedGaps: ['Check logs for stack trace'],
+        rootCause: `Diagnostic analysis error: ${err?.message}`,
+        identifiedGaps: ['Check terminal stderr for stack trace'],
         correctiveInstructions: `Please review error logs:\n${outputLogs.slice(-500)}`,
         shouldRetry: true,
       };
     }
   }
 
+  /**
+   * Truthful Reviewer: Evaluates completion based strictly on verified evidence.
+   * NEVER infers completion from high confidence scores alone or auto-approves when offline.
+   */
   async reviewOutcome(
     prompt: string,
     plan: ExecutionPlan,
     verificationSummaries: string[],
-    finalDiff: string
+    finalDiff: string,
+    hasUnresolvedVerificationErrors: boolean
   ): Promise<ReviewResult> {
-    if (!this.ai) {
+    // Truthful Gate: If verifications failed, the task CANNOT be marked complete
+    if (hasUnresolvedVerificationErrors) {
       return {
-        isComplete: true,
-        confidenceScore: 85,
-        unresolvedIssues: [],
-        summary: 'All execution steps finished and verification checks passed.',
+        isComplete: false,
+        confidenceScore: 0,
+        unresolvedIssues: ['Independent verification suite reported failing checks or unverified acceptance criteria.'],
+        summary: 'Task cannot be declared complete due to failing verification checks.',
+      };
+    }
+
+    if (!this.ai) {
+      // Truthful: When reviewer is offline, require explicit human confirmation instead of auto-passing!
+      return {
+        isComplete: false,
+        confidenceScore: 50,
+        unresolvedIssues: ['Automated LLM Reviewer is offline. Human verification required.'],
+        summary: 'All execution checks passed exit-code verification, but automated LLM review was unavailable.',
       };
     }
 
     const systemInstruction = `
 You are the Quality Reviewer for the Autonomous AI Coding Orchestrator.
-Evaluate whether the original user request has been legitimately satisfied based on the verified evidence, test runs, and final Git diff.
+Evaluate whether the user request has been legitimately satisfied based on the verified evidence, test runs, and final Git diff.
 
-Output in JSON:
-{
-  "isComplete": true | false,
-  "confidenceScore": 0-100,
-  "unresolvedIssues": ["issue 1"],
-  "summary": "Clear, professional summary of what was accomplished"
-}
+Critical Rules:
+1. Do not assume completion without evidence in the diff.
+2. If tests were skipped, assertions removed, or empty functions left, mark 'isComplete': false.
+3. Output must strictly conform to JSON schema.
 `;
 
     const userContent = `
@@ -248,14 +243,14 @@ ${finalDiff.slice(-4000) || '(No diff)'}
         },
       });
 
-      const text = response.text || '{}';
-      return JSON.parse(text) as ReviewResult;
+      const parsed = JSON.parse(response.text || '{}');
+      return ReviewResultSchema.parse(parsed);
     } catch (err: any) {
       return {
-        isComplete: true,
-        confidenceScore: 80,
-        unresolvedIssues: [],
-        summary: `Task completed. Verified via execution suite. (${err?.message})`,
+        isComplete: false,
+        confidenceScore: 40,
+        unresolvedIssues: [`Reviewer encountered schema error: ${err?.message}`],
+        summary: 'Review could not be completed cleanly.',
       };
     }
   }
@@ -267,6 +262,7 @@ ${finalDiff.slice(-4000) || '(No diff)'}
         title: 'Inspect & Set Up Environment',
         instruction: `Analyze existing codebase files and prepare any missing configurations or dependencies for: ${prompt}`,
         targetFiles: [],
+        dependencies: [],
         isSensitive: false,
       },
       {
@@ -274,24 +270,27 @@ ${finalDiff.slice(-4000) || '(No diff)'}
         title: 'Implement Core Feature / Fix',
         instruction: `Implement the requested software development task: ${prompt}. Ensure clean modular code and correct exports.`,
         targetFiles: [],
+        dependencies: [1],
         isSensitive: false,
       },
       {
         index: 3,
         title: 'Run Tests & Self-Verification',
         instruction: `Execute project tests or builds (${repoMeta.testCmd || repoMeta.buildCmd || 'verification check'}) and verify there are no syntax or runtime regressions.`,
+        targetFiles: [],
         verificationCommand: repoMeta.testCmd || repoMeta.buildCmd,
+        dependencies: [2],
         isSensitive: false,
       },
     ];
 
     return {
       summary: `Automated plan for: ${prompt}`,
-      analysis: `Detected ${repoMeta.ecosystems.join(', ')} ecosystem. Configured fallback step pipeline with built-in agent.`,
+      analysis: `Detected ${repoMeta.ecosystems.join(', ')} ecosystem. Configured structured step pipeline.`,
       acceptanceCriteria: [
         'Implementation fulfills requested functional requirements',
-        repoMeta.buildCmd ? 'Build succeeds with exit code 0' : 'No compilation errors',
-        repoMeta.testCmd ? 'Unit tests pass cleanly' : 'Runtime checks pass',
+        repoMeta.buildCmd ? 'Build succeeds with exit code 0' : 'Code compiles without syntax errors',
+        repoMeta.testCmd ? 'Unit tests pass cleanly' : 'Modified files verified without placeholder stubs',
       ],
       steps,
     };

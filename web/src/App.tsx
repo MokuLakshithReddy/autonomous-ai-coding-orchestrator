@@ -359,14 +359,15 @@ export default function App() {
 
               {/* State Transition Flow */}
               <div className="state-stepper">
-                {['INITIALIZING', 'PLANNING', 'EXECUTING', 'VERIFYING', 'COMPLETED'].map((st, i, arr) => {
-                  const isCurrent = selectedTask.status === st;
-                  const isDone = ['COMPLETED'].includes(selectedTask.status) || (selectedTask.status !== 'FAILED' && i < 3);
+                {['discovering', 'planning', 'ready', 'executing', 'verifying', 'completed'].map((st, i, arr) => {
+                  const currentNorm = selectedTask.status.toLowerCase();
+                  const isCurrent = currentNorm === st;
+                  const isDone = ['completed'].includes(currentNorm) || (currentNorm !== 'failed' && currentNorm !== 'blocked' && i < arr.indexOf(currentNorm));
                   return (
                     <React.Fragment key={st}>
                       <div className={`step-node ${isCurrent ? 'active' : ''} ${isDone ? 'completed' : ''}`}>
                         {isDone ? <CheckCircle2 size={13} /> : <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'currentColor' }} />}
-                        <span>{st}</span>
+                        <span style={{ textTransform: 'uppercase' }}>{st}</span>
                       </div>
                       {i < arr.length - 1 && <div className="step-connector" />}
                     </React.Fragment>

@@ -1,16 +1,19 @@
 import { createClient, type Client } from '@libsql/client';
 import { config } from '../config/index.js';
+import type { TaskState } from '../core/state-machine.js';
 
 export interface TaskRecord {
   id: string;
   title: string;
   prompt: string;
   workspacePath: string;
-  status: 'PENDING' | 'PLANNING' | 'EXECUTING' | 'VERIFYING' | 'DIAGNOSING' | 'REPAIRING' | 'AWAITING_APPROVAL' | 'COMPLETED' | 'FAILED' | 'BLOCKED';
+  status: TaskState;
   retryCount: number;
   maxRetries: number;
+  attemptId: string;
   planJson?: string;
   summary?: string;
+  budgetsJson?: string;
   createdAt: string;
   updatedAt: string;
   completedAt?: string;
@@ -28,6 +31,7 @@ export interface StepRecord {
   outputLog?: string;
   diffSummary?: string;
   exitCode?: number;
+  durationMs?: number;
   createdAt: string;
   completedAt?: string;
 }
@@ -36,10 +40,10 @@ export interface VerificationRecord {
   id: string;
   taskId: string;
   stepId?: string;
-  status: 'PASSED' | 'FAILED' | 'SKIPPED';
-  buildStatus: 'PASSED' | 'FAILED' | 'SKIPPED';
-  testStatus: 'PASSED' | 'FAILED' | 'SKIPPED';
-  lintStatus: 'PASSED' | 'FAILED' | 'SKIPPED';
+  status: 'PASSED' | 'FAILED' | 'SKIPPED' | 'INCONCLUSIVE';
+  buildStatus: 'PASSED' | 'FAILED' | 'SKIPPED' | 'NOT_CONFIGURED';
+  testStatus: 'PASSED' | 'FAILED' | 'SKIPPED' | 'NOT_CONFIGURED' | 'NOT_RUN';
+  lintStatus: 'PASSED' | 'FAILED' | 'SKIPPED' | 'NOT_CONFIGURED';
   diffInspection: string;
   detailsJson: string;
   diagnostics?: string;
@@ -49,7 +53,9 @@ export interface VerificationRecord {
 export interface CheckpointRecord {
   id: string;
   taskId: string;
+  attemptId?: string;
   stepId?: string;
+  baseCommit?: string;
   commitHash?: string;
   branchName?: string;
   snapshotDescription: string;
@@ -62,10 +68,26 @@ export interface ApprovalRecord {
   taskId: string;
   stepId?: string;
   actionType: string;
+  targetResource?: string;
+  parametersJson?: string;
   details: string;
-  status: 'PENDING' | 'APPROVED' | 'REJECTED';
+  status: 'PENDING' | 'APPROVED' | 'REJECTED' | 'EXPIRED' | 'CANCELLED';
+  requestedBy?: string;
+  approvedBy?: string;
+  expiresAt?: string;
   createdAt: string;
   respondedAt?: string;
+}
+
+export interface TaskEventRecord {
+  id: string;
+  taskId: string;
+  eventType: string;
+  fromState?: TaskState;
+  toState?: TaskState;
+  message: string;
+  dataJson?: string;
+  timestamp: string;
 }
 
 let clientInstance: Client | null = null;
@@ -91,8 +113,10 @@ export async function initDatabase(): Promise<void> {
       status TEXT NOT NULL,
       retryCount INTEGER NOT NULL DEFAULT 0,
       maxRetries INTEGER NOT NULL DEFAULT 3,
+      attemptId TEXT NOT NULL DEFAULT 'initial',
       planJson TEXT,
       summary TEXT,
+      budgetsJson TEXT,
       createdAt TEXT NOT NULL,
       updatedAt TEXT NOT NULL,
       completedAt TEXT
@@ -112,6 +136,7 @@ export async function initDatabase(): Promise<void> {
       outputLog TEXT,
       diffSummary TEXT,
       exitCode INTEGER,
+      durationMs INTEGER,
       createdAt TEXT NOT NULL,
       completedAt TEXT,
       FOREIGN KEY (taskId) REFERENCES tasks(id) ON DELETE CASCADE
@@ -139,7 +164,9 @@ export async function initDatabase(): Promise<void> {
     CREATE TABLE IF NOT EXISTS checkpoints (
       id TEXT PRIMARY KEY,
       taskId TEXT NOT NULL,
+      attemptId TEXT,
       stepId TEXT,
+      baseCommit TEXT,
       commitHash TEXT,
       branchName TEXT,
       snapshotDescription TEXT NOT NULL,
@@ -155,22 +182,47 @@ export async function initDatabase(): Promise<void> {
       taskId TEXT NOT NULL,
       stepId TEXT,
       actionType TEXT NOT NULL,
+      targetResource TEXT,
+      parametersJson TEXT,
       details TEXT NOT NULL,
       status TEXT NOT NULL,
+      requestedBy TEXT,
+      approvedBy TEXT,
+      expiresAt TEXT,
       createdAt TEXT NOT NULL,
       respondedAt TEXT,
       FOREIGN KEY (taskId) REFERENCES tasks(id) ON DELETE CASCADE
     )
   `);
+
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS task_events (
+      id TEXT PRIMARY KEY,
+      taskId TEXT NOT NULL,
+      eventType TEXT NOT NULL,
+      fromState TEXT,
+      toState TEXT,
+      message TEXT NOT NULL,
+      dataJson TEXT,
+      timestamp TEXT NOT NULL,
+      FOREIGN KEY (taskId) REFERENCES tasks(id) ON DELETE CASCADE
+    )
+  `);
+
+  // Indexes for performance
+  await db.execute(`CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)`);
+  await db.execute(`CREATE INDEX IF NOT EXISTS idx_steps_task ON steps(taskId)`);
+  await db.execute(`CREATE INDEX IF NOT EXISTS idx_verifications_task ON verifications(taskId)`);
+  await db.execute(`CREATE INDEX IF NOT EXISTS idx_approvals_task ON approvals(taskId, status)`);
+  await db.execute(`CREATE INDEX IF NOT EXISTS idx_events_task ON task_events(taskId)`);
 }
 
-// Database helper operations
 export const taskRepo = {
   async create(task: TaskRecord): Promise<void> {
     const db = getDb();
     await db.execute({
-      sql: `INSERT INTO tasks (id, title, prompt, workspacePath, status, retryCount, maxRetries, planJson, summary, createdAt, updatedAt)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      sql: `INSERT INTO tasks (id, title, prompt, workspacePath, status, retryCount, maxRetries, attemptId, planJson, summary, budgetsJson, createdAt, updatedAt)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       args: [
         task.id,
         task.title,
@@ -179,18 +231,20 @@ export const taskRepo = {
         task.status,
         task.retryCount,
         task.maxRetries,
+        task.attemptId,
         task.planJson ?? null,
         task.summary ?? null,
+        task.budgetsJson ?? null,
         task.createdAt,
         task.updatedAt,
       ],
     });
   },
 
-  async updateStatus(id: string, status: TaskRecord['status'], summary?: string): Promise<void> {
+  async updateStatus(id: string, status: TaskState, summary?: string): Promise<void> {
     const db = getDb();
     const now = new Date().toISOString();
-    const isDone = status === 'COMPLETED' || status === 'FAILED' || status === 'BLOCKED';
+    const isDone = ['completed', 'partially_completed', 'failed', 'cancelled'].includes(status);
     await db.execute({
       sql: `UPDATE tasks SET status = ?, summary = COALESCE(?, summary), updatedAt = ?, completedAt = CASE WHEN ? = 1 THEN ? ELSE completedAt END WHERE id = ?`,
       args: [status, summary ?? null, now, isDone ? 1 : 0, now, id],
@@ -229,11 +283,13 @@ export const taskRepo = {
       title: String(row.title),
       prompt: String(row.prompt),
       workspacePath: String(row.workspacePath),
-      status: row.status as TaskRecord['status'],
+      status: row.status as TaskState,
       retryCount: Number(row.retryCount),
       maxRetries: Number(row.maxRetries),
+      attemptId: String(row.attemptId || 'initial'),
       planJson: row.planJson ? String(row.planJson) : undefined,
       summary: row.summary ? String(row.summary) : undefined,
+      budgetsJson: row.budgetsJson ? String(row.budgetsJson) : undefined,
       createdAt: String(row.createdAt),
       updatedAt: String(row.updatedAt),
       completedAt: row.completedAt ? String(row.completedAt) : undefined,
@@ -251,11 +307,13 @@ export const taskRepo = {
       title: String(row.title),
       prompt: String(row.prompt),
       workspacePath: String(row.workspacePath),
-      status: row.status as TaskRecord['status'],
+      status: row.status as TaskState,
       retryCount: Number(row.retryCount),
       maxRetries: Number(row.maxRetries),
+      attemptId: String(row.attemptId || 'initial'),
       planJson: row.planJson ? String(row.planJson) : undefined,
       summary: row.summary ? String(row.summary) : undefined,
+      budgetsJson: row.budgetsJson ? String(row.budgetsJson) : undefined,
       createdAt: String(row.createdAt),
       updatedAt: String(row.updatedAt),
       completedAt: row.completedAt ? String(row.completedAt) : undefined,
@@ -267,8 +325,8 @@ export const stepRepo = {
   async create(step: StepRecord): Promise<void> {
     const db = getDb();
     await db.execute({
-      sql: `INSERT INTO steps (id, taskId, stepIndex, title, instruction, status, agent, toolsUsedJson, outputLog, diffSummary, exitCode, createdAt)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      sql: `INSERT INTO steps (id, taskId, stepIndex, title, instruction, status, agent, toolsUsedJson, outputLog, diffSummary, exitCode, durationMs, createdAt)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       args: [
         step.id,
         step.taskId,
@@ -281,6 +339,7 @@ export const stepRepo = {
         step.outputLog ?? null,
         step.diffSummary ?? null,
         step.exitCode ?? null,
+        step.durationMs ?? null,
         step.createdAt,
       ],
     });
@@ -310,6 +369,10 @@ export const stepRepo = {
     if (updates.exitCode !== undefined) {
       sets.push('exitCode = ?');
       args.push(updates.exitCode);
+    }
+    if (updates.durationMs !== undefined) {
+      sets.push('durationMs = ?');
+      args.push(updates.durationMs);
     }
     if (updates.completedAt !== undefined) {
       sets.push('completedAt = ?');
@@ -343,6 +406,7 @@ export const stepRepo = {
       outputLog: row.outputLog ? String(row.outputLog) : undefined,
       diffSummary: row.diffSummary ? String(row.diffSummary) : undefined,
       exitCode: row.exitCode !== null ? Number(row.exitCode) : undefined,
+      durationMs: row.durationMs !== null ? Number(row.durationMs) : undefined,
       createdAt: String(row.createdAt),
       completedAt: row.completedAt ? String(row.completedAt) : undefined,
     }));
@@ -397,18 +461,55 @@ export const approvalRepo = {
   async create(a: ApprovalRecord): Promise<void> {
     const db = getDb();
     await db.execute({
-      sql: `INSERT INTO approvals (id, taskId, stepId, actionType, details, status, createdAt)
-            VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      args: [a.id, a.taskId, a.stepId ?? null, a.actionType, a.details, a.status, a.createdAt],
+      sql: `INSERT INTO approvals (id, taskId, stepId, actionType, targetResource, parametersJson, details, status, requestedBy, expiresAt, createdAt)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      args: [
+        a.id,
+        a.taskId,
+        a.stepId ?? null,
+        a.actionType,
+        a.targetResource ?? null,
+        a.parametersJson ?? null,
+        a.details,
+        a.status,
+        a.requestedBy ?? null,
+        a.expiresAt ?? null,
+        a.createdAt,
+      ],
     });
   },
 
-  async respond(id: string, status: 'APPROVED' | 'REJECTED'): Promise<void> {
+  async getById(id: string): Promise<ApprovalRecord | null> {
+    const db = getDb();
+    const res = await db.execute({
+      sql: `SELECT * FROM approvals WHERE id = ?`,
+      args: [id],
+    });
+    if (res.rows.length === 0) return null;
+    const row = res.rows[0];
+    return {
+      id: String(row.id),
+      taskId: String(row.taskId),
+      stepId: row.stepId ? String(row.stepId) : undefined,
+      actionType: String(row.actionType),
+      targetResource: row.targetResource ? String(row.targetResource) : undefined,
+      parametersJson: row.parametersJson ? String(row.parametersJson) : undefined,
+      details: String(row.details),
+      status: row.status as ApprovalRecord['status'],
+      requestedBy: row.requestedBy ? String(row.requestedBy) : undefined,
+      approvedBy: row.approvedBy ? String(row.approvedBy) : undefined,
+      expiresAt: row.expiresAt ? String(row.expiresAt) : undefined,
+      createdAt: String(row.createdAt),
+      respondedAt: row.respondedAt ? String(row.respondedAt) : undefined,
+    };
+  },
+
+  async respond(id: string, status: 'APPROVED' | 'REJECTED' | 'EXPIRED' | 'CANCELLED', approver = 'operator'): Promise<void> {
     const db = getDb();
     const now = new Date().toISOString();
     await db.execute({
-      sql: `UPDATE approvals SET status = ?, respondedAt = ? WHERE id = ?`,
-      args: [status, now, id],
+      sql: `UPDATE approvals SET status = ?, approvedBy = ?, respondedAt = ? WHERE id = ?`,
+      args: [status, approver, now, id],
     });
   },
 
@@ -423,10 +524,95 @@ export const approvalRepo = {
       taskId: String(row.taskId),
       stepId: row.stepId ? String(row.stepId) : undefined,
       actionType: String(row.actionType),
+      targetResource: row.targetResource ? String(row.targetResource) : undefined,
+      parametersJson: row.parametersJson ? String(row.parametersJson) : undefined,
       details: String(row.details),
       status: row.status as ApprovalRecord['status'],
+      requestedBy: row.requestedBy ? String(row.requestedBy) : undefined,
+      approvedBy: row.approvedBy ? String(row.approvedBy) : undefined,
+      expiresAt: row.expiresAt ? String(row.expiresAt) : undefined,
       createdAt: String(row.createdAt),
       respondedAt: row.respondedAt ? String(row.respondedAt) : undefined,
+    }));
+  },
+};
+
+export const eventRepo = {
+  async append(event: TaskEventRecord): Promise<void> {
+    const db = getDb();
+    await db.execute({
+      sql: `INSERT INTO task_events (id, taskId, eventType, fromState, toState, message, dataJson, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      args: [
+        event.id,
+        event.taskId,
+        event.eventType,
+        event.fromState ?? null,
+        event.toState ?? null,
+        event.message,
+        event.dataJson ?? null,
+        event.timestamp,
+      ],
+    });
+  },
+
+  async listForTask(taskId: string): Promise<TaskEventRecord[]> {
+    const db = getDb();
+    const res = await db.execute({
+      sql: `SELECT * FROM task_events WHERE taskId = ? ORDER BY timestamp ASC`,
+      args: [taskId],
+    });
+    return res.rows.map((row) => ({
+      id: String(row.id),
+      taskId: String(row.taskId),
+      eventType: String(row.eventType),
+      fromState: row.fromState ? (row.fromState as TaskState) : undefined,
+      toState: row.toState ? (row.toState as TaskState) : undefined,
+      message: String(row.message),
+      dataJson: row.dataJson ? String(row.dataJson) : undefined,
+      timestamp: String(row.timestamp),
+    }));
+  },
+};
+
+export const checkpointRepo = {
+  async record(c: CheckpointRecord): Promise<void> {
+    const db = getDb();
+    await db.execute({
+      sql: `INSERT INTO checkpoints (id, taskId, attemptId, stepId, baseCommit, commitHash, branchName, snapshotDescription, diffContent, createdAt)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      args: [
+        c.id,
+        c.taskId,
+        c.attemptId ?? null,
+        c.stepId ?? null,
+        c.baseCommit ?? null,
+        c.commitHash ?? null,
+        c.branchName ?? null,
+        c.snapshotDescription,
+        c.diffContent ?? null,
+        c.createdAt,
+      ],
+    });
+  },
+
+  async listForTask(taskId: string): Promise<CheckpointRecord[]> {
+    const db = getDb();
+    const res = await db.execute({
+      sql: `SELECT * FROM checkpoints WHERE taskId = ? ORDER BY createdAt DESC`,
+      args: [taskId],
+    });
+    return res.rows.map((row) => ({
+      id: String(row.id),
+      taskId: String(row.taskId),
+      attemptId: row.attemptId ? String(row.attemptId) : undefined,
+      stepId: row.stepId ? String(row.stepId) : undefined,
+      baseCommit: row.baseCommit ? String(row.baseCommit) : undefined,
+      commitHash: row.commitHash ? String(row.commitHash) : undefined,
+      branchName: row.branchName ? String(row.branchName) : undefined,
+      snapshotDescription: String(row.snapshotDescription),
+      diffContent: row.diffContent ? String(row.diffContent) : undefined,
+      createdAt: String(row.createdAt),
     }));
   },
 };

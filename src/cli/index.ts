@@ -98,6 +98,14 @@ program
           console.log(`\n${time} ${chalk.bold.green('🎉 MISSION COMPLETE:')} ${e.message}\n`);
           process.exit(0);
           break;
+        case 'TASK_PARTIALLY_COMPLETED':
+          console.log(`\n${time} ${chalk.bold.yellow('⚠️ TASK PARTIALLY COMPLETED:')} ${e.message}\n`);
+          process.exit(2);
+          break;
+        case 'TASK_NEEDS_REVIEW':
+          console.log(`\n${time} ${chalk.bold.blue('👀 TASK REQUIRES HUMAN REVIEW:')} ${e.message}\n`);
+          process.exit(3);
+          break;
         case 'TASK_FAILED':
           console.log(`\n${time} ${chalk.bold.red('❌ MISSION FAILED:')} ${e.message}\n`);
           process.exit(1);
@@ -105,6 +113,10 @@ program
         case 'TASK_BLOCKED':
           console.log(`\n${time} ${chalk.bold.red('⛔ TASK BLOCKED:')} ${e.message}\n`);
           process.exit(1);
+          break;
+        case 'APPROVAL_REQUIRED':
+          console.log(`\n${time} ${chalk.bold.yellow('🔒 APPROVAL REQUIRED:')} ${e.message}`);
+          console.log(chalk.yellow(`   Review and approve via Web Dashboard or API: POST /api/approvals/${e.data?.approvalId}/respond`));
           break;
       }
     });

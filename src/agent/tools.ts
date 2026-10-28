@@ -1,27 +1,27 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import treeKill from 'tree-kill';
+import { SecurityPolicyEngine } from '../security/policy.js';
 
 export interface CommandResult {
   stdout: string;
   stderr: string;
   exitCode: number;
   durationMs: number;
+  timedOut?: boolean;
 }
 
 export class AgentToolbox {
   private workspacePath: string;
+  private maxOutputBytes = 500 * 1024; // 500 KB output limit per command
 
   constructor(workspacePath: string) {
     this.workspacePath = path.resolve(workspacePath);
   }
 
   resolveSafePath(targetRelPath: string): string {
-    const resolved = path.resolve(this.workspacePath, targetRelPath);
-    if (!resolved.startsWith(this.workspacePath)) {
-      throw new Error(`Security Exception: Access denied outside workspace boundary (${targetRelPath})`);
-    }
-    return resolved;
+    return SecurityPolicyEngine.assertPathContainment(targetRelPath, this.workspacePath);
   }
 
   async readFile(filePath: string): Promise<string> {
@@ -103,19 +103,24 @@ export class AgentToolbox {
     return matches;
   }
 
-  async executeCommand(commandStr: string, timeoutMs = 60000): Promise<CommandResult> {
+  async executeCommand(
+    commandStr: string,
+    timeoutMs = 60000,
+    customEnv: Record<string, string> = {}
+  ): Promise<CommandResult> {
     this.assertCommandSafety(commandStr);
 
     const startTime = Date.now();
+    const sanitizedEnv = SecurityPolicyEngine.getSanitizedProcessEnv(customEnv);
+
     return new Promise((resolve) => {
-      // Use powershell.exe or cmd.exe on Windows
       const isWin = process.platform === 'win32';
       const shell = isWin ? 'powershell.exe' : '/bin/bash';
       const shellArgs = isWin ? ['-NoProfile', '-Command', commandStr] : ['-c', commandStr];
 
       const child = spawn(shell, shellArgs, {
         cwd: this.workspacePath,
-        env: { ...process.env, CI: 'true' },
+        env: sanitizedEnv,
         windowsHide: true,
       });
 
@@ -125,34 +130,52 @@ export class AgentToolbox {
 
       const timer = setTimeout(() => {
         timedOut = true;
-        child.kill();
+        if (child.pid) {
+          try {
+            treeKill(child.pid, 'SIGKILL');
+          } catch {
+            child.kill('SIGKILL');
+          }
+        }
       }, timeoutMs);
 
       child.stdout.on('data', (data) => {
-        stdout += data.toString();
+        if (stdout.length < this.maxOutputBytes) {
+          stdout += data.toString();
+        } else if (!stdout.endsWith('\n... [Output truncated: buffer exceeded 500KB]')) {
+          stdout += '\n... [Output truncated: buffer exceeded 500KB]';
+        }
       });
 
       child.stderr.on('data', (data) => {
-        stderr += data.toString();
+        if (stderr.length < this.maxOutputBytes) {
+          stderr += data.toString();
+        } else if (!stderr.endsWith('\n... [Output truncated: buffer exceeded 500KB]')) {
+          stderr += '\n... [Output truncated: buffer exceeded 500KB]';
+        }
       });
 
       child.on('close', (code) => {
         clearTimeout(timer);
         resolve({
-          stdout,
-          stderr: timedOut ? `${stderr}\nCommand timed out after ${timeoutMs}ms` : stderr,
+          stdout: SecurityPolicyEngine.redactSensitiveData(stdout),
+          stderr: SecurityPolicyEngine.redactSensitiveData(
+            timedOut ? `${stderr}\nExecution timeout reached after ${timeoutMs}ms.` : stderr
+          ),
           exitCode: timedOut ? 124 : (code ?? 1),
           durationMs: Date.now() - startTime,
+          timedOut,
         });
       });
 
       child.on('error', (err) => {
         clearTimeout(timer);
         resolve({
-          stdout,
-          stderr: `Spawn error: ${err.message}`,
+          stdout: SecurityPolicyEngine.redactSensitiveData(stdout),
+          stderr: SecurityPolicyEngine.redactSensitiveData(`Subprocess spawn error: ${err.message}`),
           exitCode: 1,
           durationMs: Date.now() - startTime,
+          timedOut: false,
         });
       });
     });

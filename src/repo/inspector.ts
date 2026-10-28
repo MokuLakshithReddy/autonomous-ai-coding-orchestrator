@@ -16,9 +16,17 @@ export interface ProjectMetadata {
   fileTreeSummary: string[];
 }
 
+export interface GitBaseline {
+  baseCommit: string;
+  branch: string;
+  dirtyFilesAtStart: string[];
+  isClean: boolean;
+}
+
 export class RepoInspector {
   private workspacePath: string;
   private git: SimpleGit;
+  private baseline: GitBaseline | null = null;
 
   constructor(workspacePath: string) {
     this.workspacePath = path.resolve(workspacePath);
@@ -31,6 +39,32 @@ export class RepoInspector {
     } catch {
       return false;
     }
+  }
+
+  async captureBaseline(): Promise<GitBaseline | null> {
+    if (!(await this.isGitRepository())) return null;
+
+    try {
+      const status = await this.git.status();
+      const log = await this.git.log({ maxCount: 1 });
+      const baseCommit = log.latest ? log.latest.hash : 'initial';
+      const branch = status.current || 'HEAD';
+      const dirtyFilesAtStart = status.files.map((f) => f.path);
+
+      this.baseline = {
+        baseCommit,
+        branch,
+        dirtyFilesAtStart,
+        isClean: status.isClean(),
+      };
+      return this.baseline;
+    } catch {
+      return null;
+    }
+  }
+
+  getBaseline(): GitBaseline | null {
+    return this.baseline;
   }
 
   async getGitStatus(): Promise<StatusResult | null> {
@@ -51,35 +85,63 @@ export class RepoInspector {
     }
   }
 
-  async getStagedDiff(): Promise<string> {
+  async getDiffAgainstBase(): Promise<string> {
     try {
-      if (!(await this.isGitRepository())) return '';
-      return await this.git.diff(['--staged']);
+      if (!(await this.isGitRepository()) || !this.baseline?.baseCommit || this.baseline.baseCommit === 'initial') {
+        return await this.getDiff();
+      }
+      return await this.git.diff([this.baseline.baseCommit]);
     } catch {
-      return '';
+      return await this.getDiff();
     }
   }
 
-  async createCheckpointCommit(message: string): Promise<string | null> {
+  /**
+   * Safe checkpoint: stages only the specified task-owned files instead of blind `git add .`
+   */
+  async createTaskCheckpoint(taskOwnedFiles: string[], message: string): Promise<string | null> {
     try {
       if (!(await this.isGitRepository())) return null;
-      await this.git.add('.');
+
+      if (taskOwnedFiles.length > 0) {
+        // Stage only task owned files
+        for (const file of taskOwnedFiles) {
+          try {
+            await this.git.add(file);
+          } catch {}
+        }
+      } else {
+        // If no explicit files specified, stage modified tracked files without untracked user files
+        await this.git.add(['-u']);
+      }
+
       const commitResult = await this.git.commit(message, undefined, { '--allow-empty': null });
       return commitResult.commit;
     } catch (err) {
-      console.error('Failed to create git checkpoint:', err);
+      console.error('Failed to create safe git checkpoint:', err);
       return null;
     }
   }
 
-  async rollbackToCommit(commitHash: string): Promise<boolean> {
+  /**
+   * Safe targeted restoration: Restores ONLY task-owned files from a checkpoint.
+   * NEVER runs broad `git reset --hard` or `git clean -fd` against unrelated user work!
+   */
+  async restoreTaskFiles(taskFiles: string[], commitHash: string): Promise<boolean> {
     try {
       if (!(await this.isGitRepository())) return false;
-      await this.git.reset(['--hard', commitHash]);
-      await this.git.clean('f', ['-d']);
+      if (!taskFiles || taskFiles.length === 0) return false;
+
+      for (const file of taskFiles) {
+        try {
+          await this.git.checkout([commitHash, '--', file]);
+        } catch (err) {
+          console.warn(`Could not checkout ${file} from ${commitHash}:`, err);
+        }
+      }
       return true;
     } catch (err) {
-      console.error('Failed to rollback git state:', err);
+      console.error('Failed to restore task files safely:', err);
       return false;
     }
   }
@@ -102,9 +164,7 @@ export class RepoInspector {
         if (log.latest) {
           latestCommit = log.latest.hash;
         }
-      } catch {
-        // Ignore git inspect error if not initialized
-      }
+      } catch {}
     }
 
     const ecosystems: ProjectMetadata['ecosystems'] = [];
@@ -113,7 +173,7 @@ export class RepoInspector {
     let testCmd: string | undefined;
     let lintCmd: string | undefined;
 
-    // Check NodeJS ecosystem
+    // Detect Node.js
     const packageJsonPath = path.join(this.workspacePath, 'package.json');
     try {
       const pkgContent = await fs.readFile(packageJsonPath, 'utf8');
@@ -128,11 +188,9 @@ export class RepoInspector {
         }
         if (pkg.scripts.lint) lintCmd = 'npm.cmd run lint';
       }
-    } catch {
-      // Not a nodejs project or error reading package.json
-    }
+    } catch {}
 
-    // Check Python ecosystem
+    // Detect Python
     try {
       const hasPyproject = await fs.access(path.join(this.workspacePath, 'pyproject.toml')).then(() => true).catch(() => false);
       const hasRequirements = await fs.access(path.join(this.workspacePath, 'requirements.txt')).then(() => true).catch(() => false);
@@ -143,7 +201,7 @@ export class RepoInspector {
       }
     } catch {}
 
-    // Check Rust ecosystem
+    // Detect Rust
     try {
       const hasCargo = await fs.access(path.join(this.workspacePath, 'Cargo.toml')).then(() => true).catch(() => false);
       if (hasCargo) {
@@ -198,9 +256,7 @@ export class RepoInspector {
           break;
         }
       }
-    } catch {
-      // Ignore reading error
-    }
+    } catch {}
     return results;
   }
 }

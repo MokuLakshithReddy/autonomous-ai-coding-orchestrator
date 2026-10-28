@@ -9,7 +9,7 @@
     "start": "tsx src/index.ts",
     "build": "tsc",
     "cli": "tsx src/cli/index.ts",
-    "test": "echo \"Ready for orchestrator tests\""
+    "test": "tsx tests/p0-truthful-completion.test.ts"
   },
   "keywords": [
     "ai",
@@ -36,6 +36,7 @@
     "dotenv": "^18.0.9",
     "fastify": "^5.12.7",
     "simple-git": "^4.0.2",
+    "tree-kill": "^1.2.2",
     "ws": "^8.22.0",
     "zod": "^4.6.7"
   }

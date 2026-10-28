@@ -9,40 +9,36 @@ import {
   stepRepo,
   verificationRepo,
   approvalRepo,
+  eventRepo,
+  checkpointRepo,
   type TaskRecord,
   type StepRecord,
 } from '../db/index.js';
+import { TaskStateMachine, type TaskState } from '../core/state-machine.js';
+import { SecurityPolicyEngine } from '../security/policy.js';
 import { config } from '../config/index.js';
 
 export interface OrchestratorEvent {
   id: string;
   taskId: string;
   stepId?: string;
-  type:
-    | 'TASK_CREATED'
-    | 'REPO_INSPECTED'
-    | 'PLAN_GENERATED'
-    | 'STEP_STARTED'
-    | 'APPROVAL_REQUIRED'
-    | 'APPROVAL_RESOLVED'
-    | 'STEP_EXECUTED'
-    | 'STEP_VERIFYING'
-    | 'VERIFICATION_PASSED'
-    | 'VERIFICATION_FAILED'
-    | 'DIAGNOSING_ERROR'
-    | 'REPAIR_ATTEMPT'
-    | 'STEP_COMPLETED'
-    | 'TASK_COMPLETED'
-    | 'TASK_FAILED'
-    | 'TASK_BLOCKED'
-    | 'LOG';
+  type: string;
+  fromState?: TaskState;
+  toState?: TaskState;
   message: string;
   data?: any;
   timestamp: string;
 }
 
 export class OrchestrationEngine extends EventEmitter {
-  private activeTasks = new Map<string, { abortController: AbortController }>();
+  private activeTasks = new Map<
+    string,
+    {
+      abortController: AbortController;
+      stateMachine: TaskStateMachine;
+      startedAt: number;
+    }
+  >();
 
   constructor() {
     super();
@@ -54,7 +50,39 @@ export class OrchestrationEngine extends EventEmitter {
       timestamp: new Date().toISOString(),
       ...event,
     };
+
+    // Append to durable SQLite event ledger
+    eventRepo.append({
+      id: fullEvent.id,
+      taskId: fullEvent.taskId,
+      eventType: fullEvent.type,
+      fromState: fullEvent.fromState,
+      toState: fullEvent.toState,
+      message: fullEvent.message,
+      dataJson: fullEvent.data ? JSON.stringify(fullEvent.data) : undefined,
+      timestamp: fullEvent.timestamp,
+    }).catch((err) => console.error('Failed to append event to ledger:', err));
+
     this.emit('event', fullEvent);
+  }
+
+  private async transitionTaskState(
+    taskId: string,
+    stateMachine: TaskStateMachine,
+    targetState: TaskState,
+    reason: string,
+    summary?: string
+  ): Promise<void> {
+    const transition = stateMachine.transition(targetState, reason);
+    await taskRepo.updateStatus(taskId, targetState, summary);
+
+    this.emitOrchestratorEvent({
+      taskId,
+      type: `STATE_${targetState.toUpperCase()}`,
+      fromState: transition.from,
+      toState: transition.to,
+      message: `State transition: ${transition.from} -> ${transition.to} (${reason})`,
+    });
   }
 
   async runTask(params: {
@@ -64,43 +92,69 @@ export class OrchestrationEngine extends EventEmitter {
     maxRetries?: number;
     customAgent?: CodingAgent;
   }): Promise<TaskRecord> {
+    // Assert workspace path security
+    const resolvedWorkspace = SecurityPolicyEngine.assertPathContainment(params.workspacePath, params.workspacePath);
+
     const taskId = crypto.randomUUID();
+    const attemptId = crypto.randomUUID();
     const now = new Date().toISOString();
     const maxRetries = params.maxRetries ?? config.maxRetryBudget;
     const title = params.title || params.prompt.slice(0, 60);
+
+    const stateMachine = new TaskStateMachine('queued');
 
     const task: TaskRecord = {
       id: taskId,
       title,
       prompt: params.prompt,
-      workspacePath: params.workspacePath,
-      status: 'INITIALIZING' as any,
+      workspacePath: resolvedWorkspace,
+      status: stateMachine.getState(),
       retryCount: 0,
       maxRetries,
+      attemptId,
       createdAt: now,
       updatedAt: now,
     };
 
     await taskRepo.create(task);
+
     this.emitOrchestratorEvent({
       taskId,
       type: 'TASK_CREATED',
-      message: `Task initialized: "${title}"`,
+      toState: 'queued',
+      message: `Task registered in durable ledger: "${title}"`,
       data: task,
     });
 
     const abortController = new AbortController();
-    this.activeTasks.set(taskId, { abortController });
+    this.activeTasks.set(taskId, {
+      abortController,
+      stateMachine,
+      startedAt: Date.now(),
+    });
 
-    // Run lifecycle asynchronously
-    this.executeTaskLifecycle(taskId, params).catch((err) => {
+    // Run execution lifecycle asynchronously
+    this.executeTaskLifecycle(taskId, attemptId, params).catch(async (err) => {
       console.error(`Unhandled error in task ${taskId}:`, err);
-      taskRepo.updateStatus(taskId, 'FAILED', `Internal failure: ${err.message}`);
+      const active = this.activeTasks.get(taskId);
+      if (active && !active.stateMachine.isTerminal()) {
+        try {
+          await this.transitionTaskState(
+            taskId,
+            active.stateMachine,
+            'failed',
+            `Internal failure: ${err.message}`,
+            err.message
+          );
+        } catch {}
+      }
       this.emitOrchestratorEvent({
         taskId,
         type: 'TASK_FAILED',
+        toState: 'failed',
         message: `Task failed with error: ${err.message}`,
       });
+      this.activeTasks.delete(taskId);
     });
 
     return task;
@@ -108,6 +162,7 @@ export class OrchestrationEngine extends EventEmitter {
 
   private async executeTaskLifecycle(
     taskId: string,
+    attemptId: string,
     params: {
       prompt: string;
       workspacePath: string;
@@ -115,32 +170,68 @@ export class OrchestrationEngine extends EventEmitter {
       customAgent?: CodingAgent;
     }
   ): Promise<void> {
+    const active = this.activeTasks.get(taskId);
+    if (!active) return;
+    const { stateMachine, abortController, startedAt } = active;
+
     const inspector = new RepoInspector(params.workspacePath);
     const brain = new LLMBrain();
     const verifier = new IndependentVerifier(params.workspacePath);
     const agent = params.customAgent || new BuiltInAutonomousAgent(params.workspacePath);
+    const maxRetries = params.maxRetries ?? config.maxRetryBudget;
 
-    // 1. Repo Inspection
-    await taskRepo.updateStatus(taskId, 'PLANNING');
+    // Check execution budget limit (default max 30 minutes total)
+    const maxTotalDurationMs = config.stepTimeoutSeconds * 10 * 1000;
+
+    const checkBudgetOrAbort = (): boolean => {
+      if (abortController.signal.aborted) {
+        throw new Error('Task was cancelled by user request.');
+      }
+      if (Date.now() - startedAt > maxTotalDurationMs) {
+        throw new Error(`Execution budget exceeded: Total duration exceeded ${maxTotalDurationMs / 1000}s limit.`);
+      }
+      return true;
+    };
+
+    // 1. Discovering Phase: Repo Baseline & Ecosystem
+    await this.transitionTaskState(taskId, stateMachine, 'discovering', 'Inspecting repository and capturing baseline');
+    const baseline = await inspector.captureBaseline();
     const repoMeta = await inspector.inspect();
+
+    if (baseline) {
+      await checkpointRepo.record({
+        id: crypto.randomUUID(),
+        taskId,
+        attemptId,
+        baseCommit: baseline.baseCommit,
+        branchName: baseline.branch,
+        snapshotDescription: `Initial repository baseline on branch ${baseline.branch}`,
+        createdAt: new Date().toISOString(),
+      });
+    }
+
     this.emitOrchestratorEvent({
       taskId,
       type: 'REPO_INSPECTED',
-      message: `Workspace inspected: ${repoMeta.ecosystems.join(', ')} ecosystem detected.`,
-      data: repoMeta,
+      message: `Repository discovered: ${repoMeta.ecosystems.join(', ')} ecosystem. Clean: ${baseline?.isClean ?? 'N/A'}`,
+      data: { repoMeta, baseline },
     });
 
+    checkBudgetOrAbort();
+
     // 2. Planning Phase
+    await this.transitionTaskState(taskId, stateMachine, 'planning', 'Formulating structured execution plan');
     const plan: ExecutionPlan = await brain.generatePlan(params.prompt, repoMeta);
     await taskRepo.updatePlan(taskId, JSON.stringify(plan));
+
     this.emitOrchestratorEvent({
       taskId,
       type: 'PLAN_GENERATED',
-      message: `Plan formulated with ${plan.steps.length} milestones.`,
+      message: `Plan formulated with ${plan.steps.length} milestones and ${plan.acceptanceCriteria.length} criteria.`,
       data: plan,
     });
 
-    // Create DB records for steps
+    // Create DB records for plan steps
     const stepRecords: StepRecord[] = [];
     for (const step of plan.steps) {
       const stepRecord: StepRecord = {
@@ -157,22 +248,42 @@ export class OrchestrationEngine extends EventEmitter {
       stepRecords.push(stepRecord);
     }
 
+    // Transition to Ready
+    await this.transitionTaskState(taskId, stateMachine, 'ready', 'Plan approved and ready for execution');
+
     // 3. Step Execution Loop
     for (let i = 0; i < plan.steps.length; i++) {
+      checkBudgetOrAbort();
+
       const step = plan.steps[i];
       const stepRec = stepRecords[i];
+      const targetFiles = step.targetFiles || [];
 
-      // Handle Sensitive Steps Approval Gate
-      if (step.isSensitive && config.requireApprovalForDestructive) {
-        await taskRepo.updateStatus(taskId, 'AWAITING_APPROVAL');
+      // Security & Authorization Gate
+      const policy = SecurityPolicyEngine.evaluateActionRisk(step.title, step.instruction);
+      const isSensitive = step.isSensitive || policy.requiresApproval;
+
+      if (isSensitive) {
+        await this.transitionTaskState(
+          taskId,
+          stateMachine,
+          'awaiting_approval',
+          `Sensitive step requires human authorization: ${step.title}`
+        );
+
         const approvalId = crypto.randomUUID();
+        const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString(); // 10 minutes expiry
+
         await approvalRepo.create({
           id: approvalId,
           taskId,
           stepId: stepRec.id,
-          actionType: 'SENSITIVE_STEP',
-          details: `Step "${step.title}" requires human approval before proceeding: ${step.instruction}`,
+          actionType: policy.riskLevel,
+          targetResource: targetFiles.join(', ') || 'workspace',
+          parametersJson: JSON.stringify({ instruction: step.instruction }),
+          details: policy.reason || `Approval required for step "${step.title}"`,
           status: 'PENDING',
+          expiresAt,
           createdAt: new Date().toISOString(),
         });
 
@@ -180,24 +291,29 @@ export class OrchestrationEngine extends EventEmitter {
           taskId,
           stepId: stepRec.id,
           type: 'APPROVAL_REQUIRED',
-          message: `Approval requested for step: "${step.title}"`,
-          data: { approvalId, step },
+          message: `Approval requested: ${step.title} (${policy.riskLevel})`,
+          data: { approvalId, step, policy, expiresAt },
         });
 
-        const approved = await this.waitForApproval(approvalId);
-        if (!approved) {
+        // Fail-Closed: strictly wait for explicit operator approval
+        const isApproved = await this.waitForApproval(approvalId);
+
+        if (!isApproved) {
           await stepRepo.update(stepRec.id, { status: 'SKIPPED' });
           this.emitOrchestratorEvent({
             taskId,
             stepId: stepRec.id,
             type: 'APPROVAL_RESOLVED',
-            message: `Step "${step.title}" was rejected by human operator.`,
+            message: `Step "${step.title}" was not approved (rejected or expired). Skipping step.`,
           });
           continue;
         }
+
+        // Return to ready before executing
+        await this.transitionTaskState(taskId, stateMachine, 'ready', 'Approval granted by operator');
       }
 
-      await taskRepo.updateStatus(taskId, 'EXECUTING');
+      await this.transitionTaskState(taskId, stateMachine, 'executing', `Executing step ${step.index}: "${step.title}"`);
       await stepRepo.update(stepRec.id, { status: 'RUNNING' });
 
       this.emitOrchestratorEvent({
@@ -208,42 +324,54 @@ export class OrchestrationEngine extends EventEmitter {
         data: step,
       });
 
-      // Checkpoint before executing
-      await inspector.createCheckpointCommit(`pre-step-${step.index}: ${step.title}`);
+      // Safe targeted checkpoint before executing step
+      const preStepCommit = await inspector.createTaskCheckpoint(
+        targetFiles,
+        `pre-step-${step.index}: ${step.title}`
+      );
+
+      if (preStepCommit) {
+        await checkpointRepo.record({
+          id: crypto.randomUUID(),
+          taskId,
+          attemptId,
+          stepId: stepRec.id,
+          commitHash: preStepCommit,
+          snapshotDescription: `Pre-step snapshot: ${step.title}`,
+          createdAt: new Date().toISOString(),
+        });
+      }
 
       // Execute Step with Agent
+      const stepStartTime = Date.now();
       let currentInstruction = step.instruction;
-      let executionResult = await agent.executeStep(currentInstruction, step.targetFiles);
+      let executionResult = await agent.executeStep(currentInstruction, targetFiles);
+      const stepDurationMs = Date.now() - stepStartTime;
 
       await stepRepo.update(stepRec.id, {
         outputLog: executionResult.logs,
         toolsUsedJson: JSON.stringify(executionResult.toolsUsed),
         diffSummary: executionResult.diffSummary,
         exitCode: executionResult.exitCode,
+        durationMs: stepDurationMs,
       });
 
       this.emitOrchestratorEvent({
         taskId,
         stepId: stepRec.id,
         type: 'STEP_EXECUTED',
-        message: `Agent finished execution for "${step.title}". Triggering independent verification.`,
+        message: `Agent execution finished for "${step.title}". Triggering independent verification.`,
         data: executionResult,
       });
 
       // 4. Verification and Self-Repair Loop
-      await taskRepo.updateStatus(taskId, 'VERIFYING');
-      this.emitOrchestratorEvent({
-        taskId,
-        stepId: stepRec.id,
-        type: 'STEP_VERIFYING',
-        message: `Verifying step "${step.title}"...`,
-      });
+      await this.transitionTaskState(taskId, stateMachine, 'verifying', `Verifying step "${step.title}"`);
 
-      let verification = await verifier.verify(repoMeta, step.verificationCommand);
+      let verification = await verifier.verify(repoMeta, plan.acceptanceCriteria, step.verificationCommand);
       let stepRetries = 0;
-      const maxRetries = params.maxRetries ?? config.maxRetryBudget;
 
       while (!verification.overallPassed && stepRetries < maxRetries) {
+        checkBudgetOrAbort();
         stepRetries++;
         await taskRepo.incrementRetry(taskId);
 
@@ -251,7 +379,7 @@ export class OrchestrationEngine extends EventEmitter {
           taskId,
           stepId: stepRec.id,
           type: 'VERIFICATION_FAILED',
-          message: `Verification failed on step "${step.title}" (Attempt ${stepRetries}/${maxRetries}).`,
+          message: `Verification check failed on step "${step.title}" (Attempt ${stepRetries}/${maxRetries}).`,
           data: verification,
         });
 
@@ -260,9 +388,9 @@ export class OrchestrationEngine extends EventEmitter {
           taskId,
           stepId: stepRec.id,
           status: 'FAILED',
-          buildStatus: verification.buildCheck.passed ? 'PASSED' : 'FAILED',
-          testStatus: verification.testCheck.passed ? 'PASSED' : 'FAILED',
-          lintStatus: verification.lintCheck.passed ? 'PASSED' : 'FAILED',
+          buildStatus: verification.buildCheck.status as any,
+          testStatus: verification.testCheck.status as any,
+          lintStatus: verification.lintCheck.status as any,
           diffInspection: verification.diffAudit.summary,
           detailsJson: JSON.stringify(verification),
           diagnostics: verification.diagnostics,
@@ -270,13 +398,7 @@ export class OrchestrationEngine extends EventEmitter {
         });
 
         // Diagnose with LLM Brain
-        await taskRepo.updateStatus(taskId, 'DIAGNOSING');
-        this.emitOrchestratorEvent({
-          taskId,
-          stepId: stepRec.id,
-          type: 'DIAGNOSING_ERROR',
-          message: `Diagnosing root cause with LLM Brain...`,
-        });
+        await this.transitionTaskState(taskId, stateMachine, 'diagnosing', `Diagnosing failure for "${step.title}"`);
 
         const recentDiff = await inspector.getDiff();
         const diagnostic = await brain.diagnoseFailure(
@@ -287,44 +409,64 @@ export class OrchestrationEngine extends EventEmitter {
         );
 
         if (!diagnostic.shouldRetry) {
+          await this.transitionTaskState(
+            taskId,
+            stateMachine,
+            'blocked',
+            `Unrecoverable blocker identified: ${diagnostic.rootCause}`,
+            diagnostic.rootCause
+          );
           this.emitOrchestratorEvent({
             taskId,
             stepId: stepRec.id,
             type: 'TASK_BLOCKED',
-            message: `LLM Diagnostician flagged unrecoverable error: ${diagnostic.rootCause}`,
+            message: `Task blocked: ${diagnostic.rootCause}`,
             data: diagnostic,
           });
-          await taskRepo.updateStatus(taskId, 'BLOCKED', diagnostic.rootCause);
           return;
         }
 
-        // Automatic Repair Attempt
-        await taskRepo.updateStatus(taskId, 'REPAIRING');
+        // Repair Attempt
+        await this.transitionTaskState(taskId, stateMachine, 'repairing', `Attempting self-repair (Attempt ${stepRetries})`);
+
         this.emitOrchestratorEvent({
           taskId,
           stepId: stepRec.id,
           type: 'REPAIR_ATTEMPT',
-          message: `Initiating repair dispatch for step "${step.title}": ${diagnostic.correctiveInstructions}`,
+          message: `Dispatching corrective repair for "${step.title}": ${diagnostic.correctiveInstructions}`,
           data: diagnostic,
         });
 
         currentInstruction = `${step.instruction}\n\nCORRECTIVE REPAIR INSTRUCTIONS:\n${diagnostic.correctiveInstructions}`;
-        executionResult = await agent.executeStep(currentInstruction, step.targetFiles);
+        executionResult = await agent.executeStep(currentInstruction, targetFiles);
 
         // Reverification
-        verification = await verifier.verify(repoMeta, step.verificationCommand);
+        await this.transitionTaskState(taskId, stateMachine, 'verifying', `Re-verifying step "${step.title}" after repair`);
+        verification = await verifier.verify(repoMeta, plan.acceptanceCriteria, step.verificationCommand);
       }
 
       // Check if step permanently failed
       if (!verification.overallPassed) {
-        await taskRepo.updateStatus(taskId, 'FAILED', `Exhausted retry budget for step "${step.title}".`);
         await stepRepo.update(stepRec.id, { status: 'FAILED' });
+
+        // Safe rollback of task-owned files if checkpoint exists
+        if (preStepCommit && targetFiles.length > 0) {
+          await inspector.restoreTaskFiles(targetFiles, preStepCommit);
+        }
+
+        await this.transitionTaskState(
+          taskId,
+          stateMachine,
+          'failed',
+          `Exhausted retry budget (${maxRetries} attempts) on step "${step.title}".`,
+          `Failed on step: ${step.title}. ${verification.blockingReasons.join('; ')}`
+        );
 
         this.emitOrchestratorEvent({
           taskId,
           stepId: stepRec.id,
           type: 'TASK_FAILED',
-          message: `Task halted: Verification could not be satisfied within retry budget (${maxRetries} retries).`,
+          message: `Task failed: Verification could not be satisfied within budget (${maxRetries} retries).`,
           data: verification,
         });
         return;
@@ -341,9 +483,9 @@ export class OrchestrationEngine extends EventEmitter {
         taskId,
         stepId: stepRec.id,
         status: 'PASSED',
-        buildStatus: verification.buildCheck.passed ? 'PASSED' : 'SKIPPED',
-        testStatus: verification.testCheck.passed ? 'PASSED' : 'SKIPPED',
-        lintStatus: verification.lintCheck.passed ? 'PASSED' : 'SKIPPED',
+        buildStatus: verification.buildCheck.status as any,
+        testStatus: verification.testCheck.status as any,
+        lintStatus: verification.lintCheck.status as any,
         diffInspection: verification.diffAudit.summary,
         detailsJson: JSON.stringify(verification),
         createdAt: new Date().toISOString(),
@@ -353,59 +495,140 @@ export class OrchestrationEngine extends EventEmitter {
         taskId,
         stepId: stepRec.id,
         type: 'VERIFICATION_PASSED',
-        message: `Step "${step.title}" verified successfully!`,
+        message: `Step "${step.title}" independently verified!`,
         data: verification,
       });
 
       // Post-step checkpoint
-      await inspector.createCheckpointCommit(`post-step-${step.index}: ${step.title}`);
+      const postStepCommit = await inspector.createTaskCheckpoint(
+        targetFiles,
+        `post-step-${step.index}: ${step.title}`
+      );
+
+      if (postStepCommit) {
+        await checkpointRepo.record({
+          id: crypto.randomUUID(),
+          taskId,
+          attemptId,
+          stepId: stepRec.id,
+          commitHash: postStepCommit,
+          snapshotDescription: `Post-step checkpoint: ${step.title}`,
+          createdAt: new Date().toISOString(),
+        });
+      }
     }
 
-    // 5. Final Outcome Review
-    const finalDiff = await inspector.getDiff();
-    const verifications = await verificationRepo.listForTask(taskId);
-    const verifSummaries = verifications.map((v) => `[${v.status}] Build: ${v.buildStatus}, Test: ${v.testStatus}, Diff: ${v.diffInspection}`);
-    const review = await brain.reviewOutcome(params.prompt, plan, verifSummaries, finalDiff);
+    // 5. Final Completion Gate
+    // Re-run final comprehensive verification across entire repository changes
+    await this.transitionTaskState(taskId, stateMachine, 'verifying', 'Executing final completion verification gate');
+    const finalVerification = await verifier.verify(repoMeta, plan.acceptanceCriteria);
+    const finalDiff = await inspector.getDiffAgainstBase();
 
-    await taskRepo.updateStatus(taskId, 'COMPLETED', review.summary);
-    this.emitOrchestratorEvent({
-      taskId,
-      type: 'TASK_COMPLETED',
-      message: `Task successfully completed! ${review.summary}`,
-      data: review,
-    });
+    const verifications = await verificationRepo.listForTask(taskId);
+    const verifSummaries = verifications.map(
+      (v) => `[${v.status}] Build: ${v.buildStatus}, Test: ${v.testStatus}, Diff: ${v.diffInspection}`
+    );
+
+    const review = await brain.reviewOutcome(
+      params.prompt,
+      plan,
+      verifSummaries,
+      finalDiff,
+      !finalVerification.canDeclareComplete
+    );
+
+    // Truthful Completion Gate: Distinguish completed vs partially_completed vs needs_human_review vs failed
+    if (finalVerification.canDeclareComplete && review.isComplete) {
+      await this.transitionTaskState(taskId, stateMachine, 'completed', 'All requirements verified', review.summary);
+      this.emitOrchestratorEvent({
+        taskId,
+        type: 'TASK_COMPLETED',
+        message: `Task successfully verified and completed: ${review.summary}`,
+        data: { review, finalVerification },
+      });
+    } else if (finalVerification.overallPassed && !review.isComplete) {
+      // Passes compilation/tests but LLM reviewer flagged unaddressed requirements
+      await this.transitionTaskState(
+        taskId,
+        stateMachine,
+        'needs_human_review',
+        'Verification passed but reviewer identified pending items',
+        review.summary
+      );
+      this.emitOrchestratorEvent({
+        taskId,
+        type: 'TASK_NEEDS_REVIEW',
+        message: `Task requires human review: ${review.summary}`,
+        data: { review, finalVerification },
+      });
+    } else {
+      // Unresolved checks or missing acceptance criteria
+      await this.transitionTaskState(
+        taskId,
+        stateMachine,
+        'partially_completed',
+        `Verification incomplete: ${finalVerification.blockingReasons.join('; ')}`,
+        review.summary
+      );
+      this.emitOrchestratorEvent({
+        taskId,
+        type: 'TASK_PARTIALLY_COMPLETED',
+        message: `Task partially completed with unverified criteria: ${finalVerification.blockingReasons.join(', ')}`,
+        data: { review, finalVerification },
+      });
+    }
 
     this.activeTasks.delete(taskId);
   }
 
+  /**
+   * Fail-Closed Approval Waiter:
+   * Looks up specific approval by approvalId. Never treats timeout or absence as approval!
+   */
   private async waitForApproval(approvalId: string): Promise<boolean> {
-    const maxWaitMs = 10 * 60 * 1000; // 10 minutes wait
-    const checkInterval = 2000;
+    const maxWaitMs = 10 * 60 * 1000; // 10 minutes wait limit
+    const checkInterval = 1500;
     const start = Date.now();
 
     while (Date.now() - start < maxWaitMs) {
       await new Promise((r) => setTimeout(r, checkInterval));
-      const pending = await approvalRepo.getPendingForTask(approvalId);
-      // If no longer pending, check if approved
-      const res = await taskRepo.getById(approvalId); // or check approval status
-      // We can query directly
-      const approvals = await approvalRepo.getPendingForTask(approvalId);
-      // For now, if auto-approval or user responds
+
+      const record = await approvalRepo.getById(approvalId);
+      if (!record) return false;
+
+      if (record.status === 'APPROVED') {
+        return true;
+      }
+      if (record.status === 'REJECTED' || record.status === 'CANCELLED') {
+        return false;
+      }
     }
-    return true;
+
+    // Timeout expired: Mark approval EXPIRED and fail closed
+    await approvalRepo.respond(approvalId, 'EXPIRED', 'system_timeout');
+    return false;
   }
 
   cancelTask(taskId: string): boolean {
     const task = this.activeTasks.get(taskId);
     if (task) {
       task.abortController.abort();
+      if (!task.stateMachine.isTerminal()) {
+        this.transitionTaskState(
+          taskId,
+          task.stateMachine,
+          'cancelling',
+          'User triggered task cancellation'
+        ).then(() => {
+          this.transitionTaskState(
+            taskId,
+            task.stateMachine,
+            'cancelled',
+            'Task cancelled and processes terminated'
+          );
+        });
+      }
       this.activeTasks.delete(taskId);
-      taskRepo.updateStatus(taskId, 'FAILED', 'Manually cancelled by user');
-      this.emitOrchestratorEvent({
-        taskId,
-        type: 'TASK_FAILED',
-        message: 'Task was cancelled by user.',
-      });
       return true;
     }
     return false;
