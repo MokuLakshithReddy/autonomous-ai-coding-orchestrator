@@ -12,6 +12,7 @@
     "test": "tsx tests/p0-truthful-completion.test.ts && tsx tests/e2e-production-readiness.test.ts && tsx tests/autonomous-repair-loop.test.ts",
     "test:e2e": "tsx tests/e2e-production-readiness.test.ts",
     "test:agent": "tsx tests/autonomous-repair-loop.test.ts",
+    "test:benchmarks": "tsx tests/autonomous-repair-benchmarks.test.ts",
     "test:llm": "tsx tests/llm-autonomous-repair.test.ts"
   },
   "keywords": [

@@ -712,6 +712,127 @@ async function runTests() {
 
   console.log('   ✓ Truthful persistence verified: model claims rejected on test failures, DB failures fail safe to FAILED.');
 
+  // Test 14: Verification-Time File Mutation (Workspace Integrity Violation)
+  console.log('\n14. Testing Workspace Integrity Violation during Verification...');
+  const test14Base = path.join(os.tmpdir(), `test14-integrity-${Date.now()}`);
+  await fs.mkdir(test14Base, { recursive: true });
+  const t14Git = simpleGit(test14Base);
+  await t14Git.init();
+  await t14Git.addConfig('user.name', 'Tester');
+  await t14Git.addConfig('user.email', 'test@test.local');
+  await fs.writeFile(
+    path.join(test14Base, 'package.json'),
+    JSON.stringify({ name: 'integrity-test', scripts: { test: 'node -e "console.log(\'✓ 1 test passed\'); process.exit(0)"' } }, null, 2)
+  );
+  await t14Git.add('.');
+  await t14Git.commit('Initial passing commit');
+
+  try {
+    const testEngine14 = new OrchestrationEngine({ allowedWorkspaces: [test14Base] });
+    
+    // Custom verifier interceptor that mutates workspace during verification
+    let verifierMutated = false;
+    const origVerifierVerify = IndependentVerifier.prototype.verify;
+    (IndependentVerifier.prototype as any).verify = async function(...args: any[]) {
+      const res = await origVerifierVerify.apply(this, args);
+      // Mutate workspace during verification
+      if (!verifierMutated) {
+        verifierMutated = true;
+        await fs.writeFile(path.join(this.workspacePath, 'untracked_sneak_mutation.txt'), 'sneak mutation');
+      }
+      return res;
+    };
+
+    try {
+      const task14 = await testEngine14.runTask({
+        prompt: 'Task where workspace mutates during verification',
+        workspacePath: test14Base,
+        maxRetries: 0,
+        customAgent: {
+          name: 'ModifyingAgent',
+          async executeStep() {
+            const ws = (this as any).workspacePath || test14Base;
+            await fs.writeFile(path.join(ws, 'feature.js'), 'export const active = true;\n');
+            return {
+              agentName: 'ModifyingAgent',
+              success: true,
+              logs: 'Feature implemented',
+              toolsUsed: ['writeFile'],
+              exitCode: 0,
+            };
+          },
+        },
+      });
+
+      const startWait14 = Date.now();
+      let task14Rec = await taskRepo.getById(task14.id);
+      while (task14Rec && !['completed', 'failed', 'blocked', 'cancelled', 'partially_completed', 'needs_human_review'].includes(task14Rec.status.toLowerCase())) {
+        if (Date.now() - startWait14 > 25000) break;
+        await new Promise((r) => setTimeout(r, 200));
+        task14Rec = await taskRepo.getById(task14.id);
+      }
+
+      assert.ok(task14Rec, 'Task record 14 must exist');
+      assert.notStrictEqual(
+        task14Rec.status.toLowerCase(),
+        'completed',
+        'Workspace that mutated during verification must NEVER be marked COMPLETED'
+      );
+      
+      const t14Verifs = await verificationRepo.listForTask(task14.id);
+      assert.ok(t14Verifs.length > 0, 'Verification records must exist in durable ledger');
+      const final14Verif = t14Verifs[t14Verifs.length - 1];
+      assert.strictEqual(final14Verif.status, 'FAILED', 'Verification status must be FAILED on integrity mismatch');
+      const details = JSON.parse(final14Verif.detailsJson);
+      assert.ok(
+        details.blockingReasons.some((r: string) => r.includes('Workspace integrity violation') || r.includes('mutated')),
+        'Blocking reasons must report workspace integrity violation'
+      );
+      console.log('   ✓ Workspace integrity verified: uncommitted/untracked file changes during verification fail closed.');
+    } finally {
+      IndependentVerifier.prototype.verify = origVerifierVerify;
+    }
+  } finally {
+    try {
+      await fs.rm(test14Base, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    } catch {}
+  }
+
+  // Test 15: Invalid Credentials Fail Closed (P0)
+  console.log('\n15. Testing Invalid Credentials Fail-Closed Behavior...');
+  const invalidCredAgent = new BuiltInAutonomousAgent(process.cwd());
+  (invalidCredAgent as any).ai = {
+    models: {
+      generateContent: async () => {
+        const err: any = new Error('API_KEY_INVALID: API key not valid. Please pass a valid API key.');
+        err.status = 400;
+        throw err;
+      },
+    },
+  };
+
+  const credResult = await invalidCredAgent.executeStep('Attempt work with invalid credentials');
+  assert.strictEqual(credResult.success, false, 'Execution must fail when credentials are invalid');
+  assert.notStrictEqual(credResult.exitCode, 0, 'Exit code must be non-zero for credential errors');
+  assert.ok(
+    credResult.failureReason?.includes('API_KEY_INVALID') || credResult.logs?.includes('API_KEY_INVALID'),
+    'Failure diagnostic must surface the credential error cleanly'
+  );
+  console.log('   ✓ Invalid credentials fail closed truthfully with clear diagnostics.');
+
+  // Test 16: Secret-Setting CLI Rejects Command-Line Credentials
+  console.log('\n16. Testing Secret-Setting CLI Hardening (Credential Exposure Prevention)...');
+  const setSecretCmd = await new AgentToolbox(process.cwd(), async () => true).executeCommand(
+    'node node_modules/tsx/dist/cli.mjs scripts/set-secret.ts DUMMY_KEY insecure_cli_value',
+    15000
+  );
+  assert.notStrictEqual(setSecretCmd.exitCode, 0, 'set-secret.ts must reject secret values passed in CLI arguments');
+  assert.ok(
+    setSecretCmd.stderr.includes('SECURITY ERROR') || setSecretCmd.stderr.includes('Do not pass secret values'),
+    'set-secret.ts must output clear security error'
+  );
+  console.log('   ✓ Secret-setting script safely rejects secret values in CLI arguments.');
+
   console.log('\n=== ALL P0/P1 CORRECTNESS, SAFETY & VERIFICATION TESTS PASSED! ===\n');
 }
 

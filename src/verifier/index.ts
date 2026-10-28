@@ -344,11 +344,11 @@ export class IndependentVerifier {
       lintCheck,
       criteriaResults,
       diffAudit: {
-        filesChanged,
+        filesChanged: allCumulativeFiles,
         hasSuspiciousDeletions,
         hasForbiddenModifications,
         hasPlaceholderStubs,
-        summary: diffNotes.length > 0 ? diffNotes.join('; ') : `Audited ${filesChanged.length} changed files cleanly.`,
+        summary: diffNotes.length > 0 ? diffNotes.join('; ') : `Audited ${allCumulativeFiles.length} changed files cleanly.`,
       },
       diagnostics: diagnosticsList.join('\n\n'),
       blockingReasons,

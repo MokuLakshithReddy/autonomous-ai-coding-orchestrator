@@ -232,7 +232,7 @@ export class OrchestrationEngine extends EventEmitter {
     if (params.customAgent) {
       if (typeof (params.customAgent as any).setWorkspacePath === 'function') {
         (params.customAgent as any).setWorkspacePath(executionPath);
-      } else if ('workspacePath' in (params.customAgent as any)) {
+      } else {
         (params.customAgent as any).workspacePath = executionPath;
       }
     }
@@ -440,12 +440,21 @@ export class OrchestrationEngine extends EventEmitter {
       await this.transitionTaskState(taskId, stateMachine, 'verifying', `Verifying step "${step.title}"`);
 
       // P1.1: Verify against baseline commit so committed changes are tracked!
+      const preStepVerifFingerprint = await taskInspector.getWorkspaceFingerprint();
       let verification = await verifier.verify(
         repoMeta,
         plan.acceptanceCriteria,
         step.verificationCommand,
         baseline?.baseCommit
       );
+      const postStepVerifFingerprint = await taskInspector.getWorkspaceFingerprint();
+      if (preStepVerifFingerprint !== postStepVerifFingerprint) {
+        verification.isVerified = false;
+        verification.status = 'FAILED';
+        verification.blockingReasons.push(
+          `Workspace integrity violation: Workspace mutated during step verification (fingerprint mismatch: ${preStepVerifFingerprint.slice(0, 8)} -> ${postStepVerifFingerprint.slice(0, 8)}).`
+        );
+      }
 
       let stepRetries = 0;
 
@@ -538,6 +547,23 @@ export class OrchestrationEngine extends EventEmitter {
       if (!executionResult.success || !verification.isVerified) {
         await stepRepo.update(stepRec.id, { status: 'FAILED' });
 
+        // P0 FIX: Ensure permanent step failure is faithfully persisted to verification ledger
+        try {
+          await verificationRepo.record({
+            id: crypto.randomUUID(),
+            taskId,
+            stepId: stepRec.id,
+            status: 'FAILED',
+            buildStatus: verification.buildCheck.status as any,
+            testStatus: verification.testCheck.status as any,
+            lintStatus: verification.lintCheck.status as any,
+            diffInspection: verification.diffAudit.summary,
+            detailsJson: JSON.stringify(verification),
+            diagnostics: `${executionResult.failureReason || ''}\n${verification.diagnostics}`,
+            createdAt: new Date().toISOString(),
+          });
+        } catch {}
+
         // Safe rollback of task-owned files if checkpoint exists
         if (preStepCommit && targetFiles.length > 0) {
           await taskInspector.restoreTaskFiles(targetFiles, preStepCommit);
@@ -628,8 +654,8 @@ export class OrchestrationEngine extends EventEmitter {
     // Re-verify against original baseline commit
     await this.transitionTaskState(taskId, stateMachine, 'verifying', 'Executing final completion verification gate');
     
-    // P0 FIX: Capture pre-verification workspace commit state to guarantee verified workspace matches final workspace
-    const preVerificationHead = await taskInspector.getCurrentCommitHash();
+    // P0 FIX: Capture pre-verification workspace fingerprint (HEAD commit + working tree + staged + untracked files)
+    const preVerificationFingerprint = await taskInspector.getWorkspaceFingerprint();
     
     const finalVerification = await verifier.verify(
       repoMeta,
@@ -638,13 +664,13 @@ export class OrchestrationEngine extends EventEmitter {
       baseline?.baseCommit
     );
     
-    // P0 FIX: Ensure final workspace has not mutated during verification
-    const postVerificationHead = await taskInspector.getCurrentCommitHash();
-    if (preVerificationHead && postVerificationHead && preVerificationHead !== postVerificationHead) {
+    // P0 FIX: Ensure full workspace state (tracked & untracked files, working diffs, commit) has not mutated during verification
+    const postVerificationFingerprint = await taskInspector.getWorkspaceFingerprint();
+    if (preVerificationFingerprint !== postVerificationFingerprint) {
       finalVerification.isVerified = false;
       finalVerification.status = 'FAILED';
       finalVerification.blockingReasons.push(
-        `Workspace integrity violation: Workspace HEAD mutated during verification (${preVerificationHead} -> ${postVerificationHead}).`
+        `Workspace integrity violation: Workspace mutated during verification (fingerprint mismatch: ${preVerificationFingerprint.slice(0, 8)} -> ${postVerificationFingerprint.slice(0, 8)}).`
       );
     }
 
