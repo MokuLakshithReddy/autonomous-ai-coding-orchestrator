@@ -167,24 +167,21 @@ export class OrchestrationEngine extends EventEmitter {
     // Run execution lifecycle asynchronously
     this.executeTaskLifecycle(taskId, attemptId, params).catch(async (err) => {
       console.error(`Unhandled error in task ${taskId}:`, err);
-      const active = this.activeTasks.get(taskId);
-      if (active && !active.stateMachine.isTerminal()) {
-        try {
-          await this.transitionTaskState(
-            taskId,
-            active.stateMachine,
-            'failed',
-            `Internal failure: ${err.message}`,
-            err.message
-          );
-        } catch {}
+      try {
+        await taskRepo.updateStatus(taskId, 'failed', `Internal failure: ${err.message}`);
+      } catch (dbErr: any) {
+        console.error(`[Fatal DB Error] Could not update task status for ${taskId}:`, dbErr);
       }
-      await this.emitOrchestratorEvent({
-        taskId,
-        type: 'TASK_FAILED',
-        toState: 'failed',
-        message: `Task failed with error: ${err.message}`,
-      });
+      try {
+        await this.emitOrchestratorEvent({
+          taskId,
+          type: 'TASK_FAILED',
+          toState: 'failed',
+          message: `Task failed with error: ${err.message}`,
+        });
+      } catch (eventErr: any) {
+        console.error(`[Event Ledger Fallback Error] Could not emit failure event for ${taskId}:`, eventErr);
+      }
       this.activeTasks.delete(taskId);
     });
 
@@ -786,6 +783,27 @@ export class OrchestrationEngine extends EventEmitter {
       });
     }
 
+    } catch (lifecycleErr: any) {
+      if (!stateMachine.isTerminal()) {
+        try {
+          await this.transitionTaskState(
+            taskId,
+            stateMachine,
+            'failed',
+            `Internal failure: ${lifecycleErr.message}`,
+            lifecycleErr.message
+          );
+        } catch (transErr: any) {
+          // If transitionTaskState threw (e.g. event ledger persistence failed),
+          // ensure SQLite task record is directly updated to terminal 'failed' so it is never stuck!
+          try {
+            await taskRepo.updateStatus(taskId, 'failed', `Critical failure: ${lifecycleErr.message}`);
+          } catch (dbErr: any) {
+            console.error(`[Fatal DB Error] Could not update task status for ${taskId}:`, dbErr);
+          }
+        }
+      }
+      throw lifecycleErr;
     } finally {
       // P1 FIX: Guaranteed resource cleanup in finally block
       if (taskWorktreePath) {

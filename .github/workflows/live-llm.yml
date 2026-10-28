@@ -49,5 +49,7 @@ jobs:
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           REQUIRE_LLM: 'true'
-        run: npm run test:llm
+        run: |
+          npm run test:llm
+          npm run test:benchmarks:live
 

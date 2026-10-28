@@ -100,10 +100,11 @@ export class RepoInspector {
    * P0 FIX: Exhaustive Workspace State Fingerprinting.
    * Guarantees that ANY file modification during verification is detected:
    * 1. Tracked Files: HEAD commit + git status + working diff + staged diff.
-   * 2. Untracked Files: Enumerated with '-uall'; file content SHA-256, size, mtime, and symlink targets hashed.
-   *    (Detects content mutations in existing untracked files without relying on git status changes).
-   * 3. Ignored Files: Evaluated against EPHEMERAL_IGNORED_PATTERNS; non-ephemeral ignored files
-   *    (e.g., custom .env, config, user data) are content-hashed.
+   * 2. Untracked Files & Directories: Discovered via NUL-delimited (-z) status;
+   *    preserves literal paths with spaces, quotes, and special characters;
+   *    content SHA-256, size, mtime, and symlink targets hashed recursively.
+   * 3. Ignored Files & Directories: Non-ephemeral ignored paths are recursively hashed;
+   *    detects file mutations deep inside ignored directories without status line changes.
    * 4. Symlinks: Resolved with readlink to prevent symlink retargeting attacks.
    * 5. Non-Git Fallback: Full directory tree hash with symlink and content verification.
    */
@@ -111,7 +112,8 @@ export class RepoInspector {
     if (await this.isGitRepository()) {
       try {
         const headCommit = (await this.getCurrentCommitHash()) || 'NO_HEAD';
-        const porcelain = await this.git.raw(['status', '--porcelain=v1', '-uall']);
+        // Use -z to guarantee unquoted, literal filenames with spaces, quotes, and special characters
+        const porcelain = await this.git.raw(['status', '--porcelain=v1', '-z', '-uall', '--ignored=matching']);
         const workingDiff = await this.git.diff();
         const stagedDiff = await this.git.diff(['--cached']);
 
@@ -121,41 +123,37 @@ export class RepoInspector {
         hasher.update(`WORKING_DIFF:\n${workingDiff}\n`);
         hasher.update(`STAGED_DIFF:\n${stagedDiff}\n`);
 
-        // 1. Content-hash all untracked files individually
-        const untrackedFiles: string[] = [];
-        for (const line of porcelain.split('\n')) {
-          if (line.startsWith('?? ')) {
-            const rawPath = line.slice(3).trim().replace(/^"|"$/g, '');
-            if (rawPath) untrackedFiles.push(rawPath);
-          }
-        }
-        untrackedFiles.sort();
+        const records = porcelain.split('\0').filter(Boolean);
+        const untrackedPaths: string[] = [];
+        const nonEphemeralIgnoredPaths: string[] = [];
 
-        for (const relPath of untrackedFiles) {
-          const fullPath = path.join(this.workspacePath, relPath);
-          await this.hashFileOrSymlink(fullPath, `UNTRACKED:${relPath}`, hasher);
-        }
-
-        // 2. Hash non-ephemeral ignored files
-        try {
-          const ignoredOutput = await this.git.raw(['status', '--porcelain=v1', '--ignored=matching', '-uall']);
-          const nonEphemeralIgnored: string[] = [];
-          for (const line of ignoredOutput.split('\n')) {
-            if (line.startsWith('!! ')) {
-              const rawPath = line.slice(3).trim().replace(/^"|"$/g, '');
-              const norm = rawPath.replace(/\\/g, '/');
-              const isEphemeral = RepoInspector.EPHEMERAL_IGNORED_PATTERNS.some((pat) => pat.test(norm));
-              if (!isEphemeral && norm) {
-                nonEphemeralIgnored.push(rawPath);
-              }
+        for (const record of records) {
+          if (record.startsWith('?? ')) {
+            const rawPath = record.slice(3).replace(/\/+$/, '');
+            if (rawPath) untrackedPaths.push(rawPath);
+          } else if (record.startsWith('!! ')) {
+            const rawPath = record.slice(3).replace(/\/+$/, '');
+            const norm = rawPath.replace(/\\/g, '/');
+            const isEphemeral = RepoInspector.EPHEMERAL_IGNORED_PATTERNS.some(
+              (pat) => pat.test(norm) || pat.test(path.basename(norm))
+            );
+            if (!isEphemeral && norm) {
+              nonEphemeralIgnoredPaths.push(rawPath);
             }
           }
-          nonEphemeralIgnored.sort();
-          for (const relPath of nonEphemeralIgnored) {
-            const fullPath = path.join(this.workspacePath, relPath);
-            await this.hashFileOrSymlink(fullPath, `IGNORED:${relPath}`, hasher);
-          }
-        } catch {}
+        }
+
+        untrackedPaths.sort();
+        for (const relPath of untrackedPaths) {
+          const fullPath = path.join(this.workspacePath, relPath);
+          await this.hashPathRecursively(fullPath, `UNTRACKED:${relPath}`, hasher);
+        }
+
+        nonEphemeralIgnoredPaths.sort();
+        for (const relPath of nonEphemeralIgnoredPaths) {
+          const fullPath = path.join(this.workspacePath, relPath);
+          await this.hashPathRecursively(fullPath, `IGNORED:${relPath}`, hasher);
+        }
 
         return hasher.digest('hex');
       } catch {}
@@ -165,7 +163,11 @@ export class RepoInspector {
     return await this.computeDirectoryTreeHash(this.workspacePath);
   }
 
-  private async hashFileOrSymlink(fullPath: string, label: string, hasher: crypto.Hash): Promise<void> {
+  /**
+   * Recursively hashes files, symlinks, and directories.
+   * Traverses into ignored directories and content-hashes all files within them.
+   */
+  private async hashPathRecursively(fullPath: string, label: string, hasher: crypto.Hash): Promise<void> {
     try {
       const lstat = await fs.lstat(fullPath);
       if (lstat.isSymbolicLink()) {
@@ -175,6 +177,25 @@ export class RepoInspector {
         hasher.update(`FILE:${label}:${lstat.size}:${lstat.mtimeMs}\n`);
         const content = await fs.readFile(fullPath);
         hasher.update(crypto.createHash('sha256').update(content).digest('hex'));
+      } else if (lstat.isDirectory()) {
+        const norm = label.replace(/\\/g, '/');
+        const dirName = path.basename(fullPath);
+        if (
+          dirName === '.git' ||
+          dirName === '.orchestrator_sandboxes' ||
+          dirName === '.orchestrator_worktrees' ||
+          RepoInspector.EPHEMERAL_IGNORED_PATTERNS.some((pat) => pat.test(norm) || pat.test(dirName))
+        ) {
+          return;
+        }
+        hasher.update(`DIR:${label}\n`);
+        const entries = await fs.readdir(fullPath, { withFileTypes: true });
+        entries.sort((a, b) => a.name.localeCompare(b.name));
+        for (const entry of entries) {
+          const childFull = path.join(fullPath, entry.name);
+          const childLabel = `${label}/${entry.name}`;
+          await this.hashPathRecursively(childFull, childLabel, hasher);
+        }
       }
     } catch {
       hasher.update(`MISSING:${label}\n`);
@@ -197,7 +218,7 @@ export class RepoInspector {
           hash.update(`DIR:${rel}\n`);
           await walk(full);
         } else {
-          await this.hashFileOrSymlink(full, rel, hash);
+          await this.hashPathRecursively(full, rel, hash);
         }
       }
     };

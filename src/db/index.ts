@@ -283,35 +283,55 @@ export async function initDatabase(): Promise<void> {
 export const taskRepo = {
   async create(task: TaskRecord): Promise<void> {
     const db = getDb();
-    await db.execute({
-      sql: `INSERT INTO tasks (id, title, prompt, workspacePath, status, retryCount, maxRetries, attemptId, planJson, summary, budgetsJson, createdAt, updatedAt)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      args: [
-        task.id,
-        task.title,
-        task.prompt,
-        task.workspacePath,
-        task.status,
-        task.retryCount,
-        task.maxRetries,
-        task.attemptId,
-        task.planJson ?? null,
-        task.summary ?? null,
-        task.budgetsJson ?? null,
-        task.createdAt,
-        task.updatedAt,
-      ],
-    });
+    let attempts = 0;
+    while (true) {
+      try {
+        await db.execute({
+          sql: `INSERT INTO tasks (id, title, prompt, workspacePath, status, retryCount, maxRetries, attemptId, planJson, summary, budgetsJson, createdAt, updatedAt)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          args: [
+            task.id,
+            task.title,
+            task.prompt,
+            task.workspacePath,
+            task.status,
+            task.retryCount,
+            task.maxRetries,
+            task.attemptId,
+            task.planJson ?? null,
+            task.summary ?? null,
+            task.budgetsJson ?? null,
+            task.createdAt,
+            task.updatedAt,
+          ],
+        });
+        break;
+      } catch (err) {
+        attempts++;
+        if (attempts >= 3) throw err;
+        await new Promise((r) => setTimeout(r, 50 * attempts));
+      }
+    }
   },
 
   async updateStatus(id: string, status: TaskState, summary?: string): Promise<void> {
     const db = getDb();
     const now = new Date().toISOString();
     const isDone = ['completed', 'partially_completed', 'failed', 'cancelled'].includes(status);
-    await db.execute({
-      sql: `UPDATE tasks SET status = ?, summary = COALESCE(?, summary), updatedAt = ?, completedAt = CASE WHEN ? = 1 THEN ? ELSE completedAt END WHERE id = ?`,
-      args: [status, summary ?? null, now, isDone ? 1 : 0, now, id],
-    });
+    let attempts = 0;
+    while (true) {
+      try {
+        await db.execute({
+          sql: `UPDATE tasks SET status = ?, summary = COALESCE(?, summary), updatedAt = ?, completedAt = CASE WHEN ? = 1 THEN ? ELSE completedAt END WHERE id = ?`,
+          args: [status, summary ?? null, now, isDone ? 1 : 0, now, id],
+        });
+        break;
+      } catch (err) {
+        attempts++;
+        if (attempts >= 3) throw err;
+        await new Promise((r) => setTimeout(r, 50 * attempts));
+      }
+    }
   },
 
   async updatePlan(id: string, planJson: string): Promise<void> {

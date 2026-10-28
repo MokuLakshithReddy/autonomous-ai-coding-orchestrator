@@ -8,7 +8,7 @@ import { SecurityPolicyEngine } from '../src/security/policy.js';
 import { IndependentVerifier } from '../src/verifier/index.js';
 import { AgentToolbox } from '../src/agent/tools.js';
 import { BuiltInAutonomousAgent } from '../src/agent/index.js';
-import { taskRepo, verificationRepo, initDatabase } from '../src/db/index.js';
+import { taskRepo, verificationRepo, eventRepo, initDatabase } from '../src/db/index.js';
 
 async function runTests() {
   await initDatabase();
@@ -943,6 +943,158 @@ async function runTests() {
     });
   }, 'emitOrchestratorEvent must successfully await database ledger write');
   console.log('   ✓ Orchestrator event ledger write confirmed awaited and durable.');
+
+  // Test 21: Recursive Ignored Directory Fingerprinting & Unusual Paths (P0)
+  console.log('\n21. Testing Recursive Ignored Directory Fingerprinting & Unusual Paths (P0)...');
+  const test21Base = path.join(os.tmpdir(), `test21-ignored-dir-${Date.now()}`);
+  await fs.mkdir(test21Base, { recursive: true });
+  const t21Git = simpleGit(test21Base);
+  await t21Git.init();
+  await t21Git.addConfig('user.name', 'Tester');
+  await t21Git.addConfig('user.email', 'test@test.local');
+  await fs.writeFile(path.join(test21Base, '.gitignore'), 'custom_secret_dir/\n*.log\n');
+  await t21Git.add('.');
+  await t21Git.commit('Initial commit with .gitignore');
+
+  // Create an ignored directory with nested files
+  const ignoredDir = path.join(test21Base, 'custom_secret_dir');
+  const nestedIgnoredDir = path.join(ignoredDir, 'nested space dir');
+  await fs.mkdir(nestedIgnoredDir, { recursive: true });
+  const secretKeyFile = path.join(nestedIgnoredDir, 'private.key');
+  await fs.writeFile(secretKeyFile, 'ORIGINAL_PRIVATE_KEY_HASH_V1');
+
+  // Create files with spaces, single quotes, and unusual characters
+  const spaceFile = path.join(test21Base, 'path with space and [bracket].txt');
+  await fs.writeFile(spaceFile, 'initial space content');
+  const quoteFile = path.join(test21Base, "path'with'quote.txt");
+  await fs.writeFile(quoteFile, 'initial quote content');
+
+  const inspector21 = new (await import('../src/repo/inspector.js')).RepoInspector(test21Base);
+  const fpDir1 = await inspector21.getWorkspaceFingerprint();
+
+  // Mutate file DEEP inside already-ignored directory
+  await fs.writeFile(secretKeyFile, 'TAMPERED_PRIVATE_KEY_HASH_V2');
+  const fpDir2 = await inspector21.getWorkspaceFingerprint();
+
+  assert.notStrictEqual(
+    fpDir1,
+    fpDir2,
+    'getWorkspaceFingerprint must recursively detect file changes inside ignored directories!'
+  );
+
+  // Mutate file with spaces and brackets
+  await fs.writeFile(spaceFile, 'tampered space content v2');
+  const fpDir3 = await inspector21.getWorkspaceFingerprint();
+
+  assert.notStrictEqual(
+    fpDir2,
+    fpDir3,
+    'getWorkspaceFingerprint must detect mutations in files containing spaces and unusual characters!'
+  );
+
+  // Mutate file with quotes
+  await fs.writeFile(quoteFile, 'tampered quote content v2');
+  const fpDir4 = await inspector21.getWorkspaceFingerprint();
+
+  assert.notStrictEqual(
+    fpDir3,
+    fpDir4,
+    'getWorkspaceFingerprint must detect mutations in files containing quote characters!'
+  );
+
+  await fs.rm(test21Base, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  console.log('   ✓ Recursive ignored directories and unusual character paths reliably fingerprinted.');
+
+  // Test 22: End-to-End Failure Handling on Persistence Failures (P1)
+  console.log('\n22. Testing End-to-End Persistence Failure Handling (P1)...');
+  
+  // 22a: Failure at task creation fails closed immediately
+  const originalTaskCreate = taskRepo.create;
+  try {
+    taskRepo.create = async () => {
+      throw new Error('SIMULATED_SQLITE_CREATION_FAILURE: disk I/O error');
+    };
+    const brokenEngine = new OrchestrationEngine({ allowedWorkspaces: [process.cwd()] });
+    await assert.rejects(
+      async () => {
+        await brokenEngine.runTask({
+          prompt: 'Task doomed to fail at creation',
+          workspacePath: process.cwd(),
+        });
+      },
+      /SIMULATED_SQLITE_CREATION_FAILURE/,
+      'runTask must fail closed when task creation cannot be persisted'
+    );
+  } finally {
+    taskRepo.create = originalTaskCreate;
+  }
+
+  // 22b: Database failure during execution must mark task as failed and NOT create unhandled rejections
+  const test22Repo = path.join(os.tmpdir(), `test22-db-failure-${Date.now()}`);
+  await fs.mkdir(test22Repo, { recursive: true });
+  const t22Git = simpleGit(test22Repo);
+  await t22Git.init();
+  await t22Git.addConfig('user.name', 'Tester');
+  await t22Git.addConfig('user.email', 'test@test.local');
+  await fs.writeFile(path.join(test22Repo, 'README.md'), '# Test\n');
+  await t22Git.add('.');
+  await t22Git.commit('init');
+
+  const engine22 = new OrchestrationEngine({ allowedWorkspaces: [test22Repo] });
+  let unhandledRejectionCaught: any = null;
+  const onUnhandled = (err: any) => {
+    unhandledRejectionCaught = err;
+  };
+  process.on('unhandledRejection', onUnhandled);
+
+  try {
+    // Inject event persistence failure on state transition
+    const originalEventAppend = eventRepo.append;
+    try {
+      let callCount = 0;
+      eventRepo.append = async (evt: any) => {
+        callCount++;
+        // Allow initial creation event, but fail on subsequent transitions
+        if (callCount > 1) {
+          throw new Error('SIMULATED_LEDGER_FATAL_FAILURE');
+        }
+        return originalEventAppend(evt);
+      };
+
+      const doomedTask = await engine22.runTask({
+        prompt: 'Task doomed to hit event persistence failure during execution',
+        workspacePath: test22Repo,
+        maxRetries: 0,
+      });
+
+      // Wait for task to transition and handle error
+      const waitStart = Date.now();
+      let doomedRec = await taskRepo.getById(doomedTask.id);
+      while (doomedRec && !['completed', 'failed', 'blocked', 'cancelled'].includes(doomedRec.status.toLowerCase())) {
+        if (Date.now() - waitStart > 10000) break;
+        await new Promise((r) => setTimeout(r, 200));
+        doomedRec = await taskRepo.getById(doomedTask.id);
+      }
+
+      assert.ok(doomedRec, 'Task record must exist in DB');
+      assert.strictEqual(
+        doomedRec.status.toLowerCase(),
+        'failed',
+        'Task experiencing fatal persistence failure during execution must reach terminal FAILED status!'
+      );
+      assert.strictEqual(
+        unhandledRejectionCaught,
+        null,
+        'Database persistence failure must NOT produce unhandled promise rejections!'
+      );
+    } finally {
+      eventRepo.append = originalEventAppend;
+    }
+  } finally {
+    process.removeListener('unhandledRejection', onUnhandled);
+    await fs.rm(test22Repo, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+  console.log('   ✓ Persistence failures gracefully contained: tasks reach terminal failed state without unhandled rejections.');
 
   console.log('\n=== ALL P0/P1 CORRECTNESS, SAFETY & VERIFICATION TESTS PASSED! ===\n');
 }

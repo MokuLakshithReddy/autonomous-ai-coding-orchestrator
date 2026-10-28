@@ -38,10 +38,16 @@ export function validateSecretName(name: string): void {
   }
 }
 
+export interface HttpTransport {
+  get: typeof https.get;
+  request: typeof https.request;
+}
+
 export async function setGitHubSecret(
   secretName: string,
   secretValue: string,
-  customToken?: string
+  customToken?: string,
+  options?: { transport?: HttpTransport }
 ): Promise<boolean> {
   const token = customToken || process.env.GITHUB_TOKEN || process.env.GH_TOKEN || '';
   if (!token) {
@@ -55,9 +61,11 @@ export async function setGitHubSecret(
     throw new Error('Secret value cannot be empty.');
   }
 
+  const httpClient = options?.transport || https;
+
   // 2. Fetch repository public key
   const pubKeyData = await new Promise<{ key_id: string; key: string }>((resolve, reject) => {
-    const req = https.get(
+    const req = httpClient.get(
       {
         hostname: 'api.github.com',
         path: `/repos/${owner}/${repo}/actions/secrets/public-key`,
@@ -109,7 +117,7 @@ export async function setGitHubSecret(
   });
 
   return new Promise<boolean>((resolve, reject) => {
-    const req = https.request(
+    const req = httpClient.request(
       {
         hostname: 'api.github.com',
         path: `/repos/${owner}/${repo}/actions/secrets/${encodeURIComponent(secretName.trim())}`,
