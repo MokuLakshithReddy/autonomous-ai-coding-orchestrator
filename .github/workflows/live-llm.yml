@@ -53,3 +53,12 @@ jobs:
           npm run test:llm
           npm run test:benchmarks:live
 
+      - name: Archive Benchmark Evaluation Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-llm-benchmark-report
+          path: |
+            benchmark-report.json
+            benchmark-report.md
+

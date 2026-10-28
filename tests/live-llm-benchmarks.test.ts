@@ -11,14 +11,46 @@ import { config } from '../src/config/index.js';
 interface BenchmarkResult {
   name: string;
   category: string;
-  status: 'PASSED' | 'FAILED' | 'SKIPPED';
+  benchmarkResult: 'PASSED' | 'FAILED';
+  finalTaskStatus: string;
+  agentResolution: 'Declared Complete' | 'Exhausted Iterations' | 'Execution Error' | 'Did Not Declare';
+  verificationOutcome: 'PASSED' | 'FAILED' | 'INCONCLUSIVE';
   attempts: number;
   durationMs: number;
   costReport: string;
   tokensUsed: number;
   hiddenTestsPassed: number;
   totalHiddenTests: number;
-  resolutionMode: string;
+}
+
+async function extractExecutionAudit(taskId: string, fallbackStatus?: string): Promise<{
+  finalTaskStatus: string;
+  agentResolution: 'Declared Complete' | 'Exhausted Iterations' | 'Execution Error' | 'Did Not Declare';
+  verificationOutcome: 'PASSED' | 'FAILED' | 'INCONCLUSIVE';
+}> {
+  const taskRec = await taskRepo.getById(taskId);
+  const finalTaskStatus = (taskRec?.status || fallbackStatus || 'UNKNOWN').toUpperCase();
+
+  const verifs = await verificationRepo.listForTask(taskId);
+  const lastVerif = verifs[verifs.length - 1];
+  const verificationOutcome = (lastVerif?.status || (finalTaskStatus === 'COMPLETED' ? 'PASSED' : 'FAILED')).toUpperCase() as any;
+
+  const steps = await stepRepo.listForTask(taskId);
+  let agentResolution: 'Declared Complete' | 'Exhausted Iterations' | 'Execution Error' | 'Did Not Declare' = 'Did Not Declare';
+  for (const s of steps) {
+    if (s.outputLog?.includes('[Agent] Step declared complete')) {
+      agentResolution = 'Declared Complete';
+      break;
+    } else if (s.outputLog?.includes('exhausted max iterations')) {
+      agentResolution = 'Exhausted Iterations';
+    } else if (s.outputLog?.includes('[Error]') || s.outputLog?.includes('Execution failed')) {
+      if (agentResolution !== 'Exhausted Iterations') {
+        agentResolution = 'Execution Error';
+      }
+    }
+  }
+
+  return { finalTaskStatus, agentResolution, verificationOutcome };
 }
 
 function getMeasuredCostAndTokens(
@@ -172,26 +204,26 @@ console.log('Public interval merger tests passed');
     }
 
     const cost1 = getMeasuredCostAndTokens(agent1, engine1);
-    const steps1 = await stepRepo.listForTask(task1.id);
-    const resMode1 = steps1.some((s) => s.outputLog?.includes('independently verified that'))
-      ? 'Independently Verified'
-      : 'Agent Declared';
+    const audit1 = await extractExecutionAudit(task1.id, task1Rec?.status);
+    const benchPass1 = isCompleted1 && audit1.verificationOutcome === 'PASSED' && hiddenTestsPassed1 === 5;
 
     results.push({
       name: 'Interval Merger Algorithm',
       category: 'Algorithmic Synthesis',
-      status: isCompleted1 && hiddenTestsPassed1 === 5 ? 'PASSED' : 'FAILED',
+      benchmarkResult: benchPass1 ? 'PASSED' : 'FAILED',
+      finalTaskStatus: audit1.finalTaskStatus,
+      agentResolution: audit1.agentResolution,
+      verificationOutcome: audit1.verificationOutcome,
       attempts: (task1Rec?.retryCount || 0) + 1,
       durationMs: duration1,
       costReport: cost1.costReport,
       tokensUsed: cost1.totalTokens,
       hiddenTestsPassed: hiddenTestsPassed1,
       totalHiddenTests: 5,
-      resolutionMode: resMode1,
     });
 
     console.log(
-      `   ${results[0].status === 'PASSED' ? '✓' : '❌'} Live Benchmark 1 Result: ${results[0].status} (Hidden tests passed: ${hiddenTestsPassed1}/5)`
+      `   ${benchPass1 ? '✓' : '❌'} Live Benchmark 1 Result: ${benchPass1 ? 'PASSED' : 'FAILED'} (Task: ${audit1.finalTaskStatus}, Agent: ${audit1.agentResolution}, Verif: ${audit1.verificationOutcome}, Hidden: ${hiddenTestsPassed1}/5)`
     );
 
     await new Promise((r) => setTimeout(r, 3000));
@@ -297,26 +329,26 @@ console.log('Public pricing test passed');
     }
 
     const cost2 = getMeasuredCostAndTokens(agent2, engine2);
-    const steps2 = await stepRepo.listForTask(task2.id);
-    const resMode2 = steps2.some((s) => s.outputLog?.includes('independently verified that'))
-      ? 'Independently Verified'
-      : 'Agent Declared';
+    const audit2 = await extractExecutionAudit(task2.id, task2Rec?.status);
+    const benchPass2 = isCompleted2 && audit2.verificationOutcome === 'PASSED' && hiddenTestsPassed2 === 4;
 
     results.push({
       name: 'Tiered Pricing Calculator',
       category: 'Regression Prevention',
-      status: isCompleted2 && hiddenTestsPassed2 === 4 ? 'PASSED' : 'FAILED',
+      benchmarkResult: benchPass2 ? 'PASSED' : 'FAILED',
+      finalTaskStatus: audit2.finalTaskStatus,
+      agentResolution: audit2.agentResolution,
+      verificationOutcome: audit2.verificationOutcome,
       attempts: (task2Rec?.retryCount || 0) + 1,
       durationMs: duration2,
       costReport: cost2.costReport,
       tokensUsed: cost2.totalTokens,
       hiddenTestsPassed: hiddenTestsPassed2,
       totalHiddenTests: 4,
-      resolutionMode: resMode2,
     });
 
     console.log(
-      `   ${results[1].status === 'PASSED' ? '✓' : '❌'} Live Benchmark 2 Result: ${results[1].status} (Regression tests passed: ${hiddenTestsPassed2}/4)`
+      `   ${benchPass2 ? '✓' : '❌'} Live Benchmark 2 Result: ${benchPass2 ? 'PASSED' : 'FAILED'} (Task: ${audit2.finalTaskStatus}, Agent: ${audit2.agentResolution}, Verif: ${audit2.verificationOutcome}, Regression: ${hiddenTestsPassed2}/4)`
     );
 
     await new Promise((r) => setTimeout(r, 3000));
@@ -451,26 +483,26 @@ console.log('Public user service test passed');
     }
 
     const cost3 = getMeasuredCostAndTokens(agent3, engine3);
-    const steps3 = await stepRepo.listForTask(task3.id);
-    const resMode3 = steps3.some((s) => s.outputLog?.includes('independently verified that'))
-      ? 'Independently Verified'
-      : 'Agent Declared';
+    const audit3 = await extractExecutionAudit(task3.id, task3Rec?.status);
+    const benchPass3 = isCompleted3 && audit3.verificationOutcome === 'PASSED' && hiddenTestsPassed3 === 4;
 
     results.push({
       name: 'Multi-File Service Contract',
       category: 'Coordinated Multi-File',
-      status: isCompleted3 && hiddenTestsPassed3 === 4 ? 'PASSED' : 'FAILED',
+      benchmarkResult: benchPass3 ? 'PASSED' : 'FAILED',
+      finalTaskStatus: audit3.finalTaskStatus,
+      agentResolution: audit3.agentResolution,
+      verificationOutcome: audit3.verificationOutcome,
       attempts: (task3Rec?.retryCount || 0) + 1,
       durationMs: duration3,
       costReport: cost3.costReport,
       tokensUsed: cost3.totalTokens,
       hiddenTestsPassed: hiddenTestsPassed3,
       totalHiddenTests: 4,
-      resolutionMode: resMode3,
     });
 
     console.log(
-      `   ${results[2].status === 'PASSED' ? '✓' : '❌'} Live Benchmark 3 Result: ${results[2].status} (Multi-file tests passed: ${hiddenTestsPassed3}/4)`
+      `   ${benchPass3 ? '✓' : '❌'} Live Benchmark 3 Result: ${benchPass3 ? 'PASSED' : 'FAILED'} (Task: ${audit3.finalTaskStatus}, Agent: ${audit3.agentResolution}, Verif: ${audit3.verificationOutcome}, Multi-file: ${hiddenTestsPassed3}/4)`
     );
 
     await new Promise((r) => setTimeout(r, 3000));
@@ -581,51 +613,82 @@ console.log('Public crypto module test passed');
     }
 
     const cost4 = getMeasuredCostAndTokens(agent4, engine4);
-    const steps4 = await stepRepo.listForTask(task4.id);
-    const resMode4 = steps4.some((s) => s.outputLog?.includes('independently verified that'))
-      ? 'Independently Verified'
-      : 'Agent Declared';
+    const audit4 = await extractExecutionAudit(task4.id, task4Rec?.status);
+    const benchPass4 = isCompleted4 && audit4.verificationOutcome === 'PASSED' && hiddenTestsPassed4 === 4;
 
     results.push({
       name: 'ESM Dependency Configuration',
       category: 'Package & Resolution',
-      status: isCompleted4 && hiddenTestsPassed4 === 4 ? 'PASSED' : 'FAILED',
+      benchmarkResult: benchPass4 ? 'PASSED' : 'FAILED',
+      finalTaskStatus: audit4.finalTaskStatus,
+      agentResolution: audit4.agentResolution,
+      verificationOutcome: audit4.verificationOutcome,
       attempts: (task4Rec?.retryCount || 0) + 1,
       durationMs: duration4,
       costReport: cost4.costReport,
       tokensUsed: cost4.totalTokens,
       hiddenTestsPassed: hiddenTestsPassed4,
       totalHiddenTests: 4,
-      resolutionMode: resMode4,
     });
 
     console.log(
-      `   ${results[3].status === 'PASSED' ? '✓' : '❌'} Live Benchmark 4 Result: ${results[3].status} (Resolution tests passed: ${hiddenTestsPassed4}/4)`
+      `   ${benchPass4 ? '✓' : '❌'} Live Benchmark 4 Result: ${benchPass4 ? 'PASSED' : 'FAILED'} (Task: ${audit4.finalTaskStatus}, Agent: ${audit4.agentResolution}, Verif: ${audit4.verificationOutcome}, Resolution: ${hiddenTestsPassed4}/4)`
     );
 
     // -------------------------------------------------------------------------
     // Report Summary
     // -------------------------------------------------------------------------
-    console.log('\n================================================================================================');
-    console.log('                  LIVE MODEL REPAIR BENCHMARKS: EMPIRICAL EVALUATION REPORT                     ');
-    console.log('================================================================================================');
-    console.log('| Benchmark                    | Category             | Result | Att | Latency | Hidden | Resolution Mode         | Measured Spend / Tokens   |');
-    console.log('|------------------------------|----------------------|--------|-----|---------|--------|-------------------------|---------------------------|');
+    console.log('\n========================================================================================================================================');
+    console.log('                                  LIVE MODEL REPAIR BENCHMARKS: EMPIRICAL EVALUATION REPORT                                             ');
+    console.log('========================================================================================================================================');
+    console.log('| Benchmark                    | Category             | Result | Task Status | Agent Resolution     | Verif Outcome | Att | Duration | Hidden | Measured Spend / Tokens   |');
+    console.log('|------------------------------|----------------------|--------|-------------|----------------------|---------------|-----|----------|--------|---------------------------|');
     for (const r of results) {
       console.log(
-        `| ${r.name.padEnd(28)} | ${r.category.padEnd(20)} | ${r.status.padEnd(6)} | ${String(r.attempts).padEnd(3)} | ${`${r.durationMs}ms`.padEnd(7)} | ${`${r.hiddenTestsPassed}/${r.totalHiddenTests}`.padEnd(6)} | ${r.resolutionMode.padEnd(23)} | ${r.costReport.padEnd(25)} |`
+        `| ${r.name.padEnd(28)} | ${r.category.padEnd(20)} | ${r.benchmarkResult.padEnd(6)} | ${r.finalTaskStatus.padEnd(11)} | ${r.agentResolution.padEnd(20)} | ${r.verificationOutcome.padEnd(13)} | ${String(r.attempts).padEnd(3)} | ${`${r.durationMs}ms`.padEnd(8)} | ${`${r.hiddenTestsPassed}/${r.totalHiddenTests}`.padEnd(6)} | ${r.costReport.padEnd(25)} |`
       );
     }
-    console.log('================================================================================================');
+    console.log('========================================================================================================================================');
 
-    const totalPassed = results.filter((r) => r.status === 'PASSED').length;
+    const totalPassed = results.filter((r) => r.benchmarkResult === 'PASSED').length;
     const totalTokensAll = results.reduce((sum, r) => sum + r.tokensUsed, 0);
     console.log(`Live Model Diverse Benchmark Pass Rate: ${Math.round((totalPassed / results.length) * 100)}% (${totalPassed}/${results.length})`);
     console.log(`Total Tokens Metered: ${totalTokensAll} tokens across ${results.length} diverse repair scenarios`);
-    console.log('================================================================================================\n');
+    console.log('========================================================================================================================================\n');
 
-    // Acceptance Criteria: Diverse live benchmarks demonstrate robust repair capability across categories
-    assert.ok(totalPassed >= 2, `Live model benchmarks must demonstrate successful repair on majority of tasks (passed: ${totalPassed}/${results.length})`);
+    // Save report to disk as JSON and Markdown artifacts for CI diagnosability
+    const reportArtifact = {
+      timestamp: new Date().toISOString(),
+      model: config.geminiModel,
+      passRate: `${Math.round((totalPassed / results.length) * 100)}%`,
+      totalPassed,
+      totalBenchmarks: results.length,
+      totalTokensAll,
+      benchmarks: results,
+    };
+    await fs.writeFile('benchmark-report.json', JSON.stringify(reportArtifact, null, 2));
+
+    let mdReport = `# Live Model Autonomous Repair Benchmarks Evaluation Report\n\n`;
+    mdReport += `**Model**: \`${config.geminiModel}\` | **Date**: ${new Date().toISOString()} | **Pass Rate**: ${totalPassed}/${results.length} (${Math.round((totalPassed / results.length) * 100)}%)\n\n`;
+    mdReport += `| Benchmark | Category | Result | Task Status | Agent Resolution | Verif Outcome | Attempts | Duration | Hidden Tests | Cost & Tokens |\n`;
+    mdReport += `| :--- | :--- | :---: | :---: | :--- | :---: | :---: | :---: | :---: | :--- |\n`;
+    for (const r of results) {
+      mdReport += `| **${r.name}** | ${r.category} | **${r.benchmarkResult}** | \`${r.finalTaskStatus}\` | ${r.agentResolution} | \`${r.verificationOutcome}\` | ${r.attempts} | ${r.durationMs}ms | ${r.hiddenTestsPassed}/${r.totalHiddenTests} | ${r.costReport} |\n`;
+    }
+    mdReport += `\n**Total Tokens Metered**: ${totalTokensAll} tokens across ${results.length} benchmarks.\n`;
+    await fs.writeFile('benchmark-report.md', mdReport);
+
+    // P0 Requirement: Set a nonzero process exit code when any required benchmark fails
+    if (totalPassed < results.length) {
+      console.error(`\n❌ [P0 FAILURE] ${results.length - totalPassed} required live benchmarks failed. Preserving report and failing CI.`);
+      process.exit(1);
+    }
+
+    assert.strictEqual(
+      totalPassed,
+      results.length,
+      `All ${results.length} required live model benchmarks must pass (passed: ${totalPassed}/${results.length})`
+    );
   } finally {
     try {
       await fs.rm(benchmarkBase, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });

@@ -9,8 +9,9 @@
     "start": "tsx src/index.ts",
     "build": "tsc",
     "cli": "tsx src/cli/index.ts",
-    "test": "tsx tests/p0-truthful-completion.test.ts && tsx tests/e2e-production-readiness.test.ts && tsx tests/autonomous-repair-loop.test.ts && tsx tests/autonomous-repair-benchmarks.test.ts",
+    "test": "tsx tests/reviewer-safety.test.ts && tsx tests/p0-truthful-completion.test.ts && tsx tests/e2e-production-readiness.test.ts && tsx tests/autonomous-repair-loop.test.ts && tsx tests/autonomous-repair-benchmarks.test.ts",
     "test:e2e": "tsx tests/e2e-production-readiness.test.ts",
+    "test:reviewer": "tsx tests/reviewer-safety.test.ts",
     "test:agent": "tsx tests/autonomous-repair-loop.test.ts",
     "test:benchmarks": "tsx tests/autonomous-repair-benchmarks.test.ts",
     "test:benchmarks:live": "tsx tests/live-llm-benchmarks.test.ts",
@@ -25,7 +26,7 @@
   "author": "",
   "license": "MIT",
   "engines": {
-    "node": ">=20.16.0"
+    "node": ">=22.12.0"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",

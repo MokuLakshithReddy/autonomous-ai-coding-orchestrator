@@ -459,10 +459,12 @@ export class OrchestrationEngine extends EventEmitter {
 
       // P1.1: Verify against baseline commit so committed changes are tracked!
       const preStepVerifFingerprint = await taskInspector.getWorkspaceFingerprint();
+      const isLastStep = i === plan.steps.length - 1;
+      const stepVerificationCmd = step.verificationCommand || (isLastStep ? undefined : repoMeta.buildCmd || undefined);
       let verification = await verifier.verify(
         repoMeta,
         plan.acceptanceCriteria,
-        step.verificationCommand || undefined,
+        stepVerificationCmd,
         baseline?.baseCommit
       );
       const postStepVerifFingerprint = await taskInspector.getWorkspaceFingerprint();
@@ -563,7 +565,7 @@ export class OrchestrationEngine extends EventEmitter {
         verification = await verifier.verify(
           repoMeta,
           plan.acceptanceCriteria,
-          step.verificationCommand || undefined,
+          stepVerificationCmd,
           baseline?.baseCommit
         );
       }

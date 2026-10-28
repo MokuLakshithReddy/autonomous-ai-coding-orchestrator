@@ -145,17 +145,28 @@ export class BuiltInAutonomousAgent implements CodingAgent {
       iteration++;
       logs.push(`\n--- Iteration ${iteration}/${maxIterations} ---`);
 
-      // Gather current file contexts (auto-populate workspace files if targetFiles is empty)
+      // Gather current file contexts (auto-populate target files and related workspace files)
       const fileContexts: Record<string, string> = {};
-      let filesToInspect = targetFiles.filter(Boolean);
-      if (filesToInspect.length === 0) {
+      const targetSet = new Set(targetFiles.filter(Boolean));
+      if (targetSet.size === 0) {
         try {
           const allFiles = await this.toolbox.listFiles();
-          filesToInspect = allFiles.filter((f) => !f.endsWith('/')).slice(0, 8);
+          for (const f of allFiles.filter((f) => !f.endsWith('/') && !f.includes('node_modules')).slice(0, 8)) {
+            targetSet.add(f);
+          }
+        } catch { }
+      } else {
+        // Also include related workspace source files (up to 8 files) for cross-file contract awareness
+        try {
+          const allFiles = await this.toolbox.listFiles();
+          for (const f of allFiles.filter((f) => !f.endsWith('/') && !f.includes('node_modules'))) {
+            if (targetSet.size >= 8) break;
+            targetSet.add(f);
+          }
         } catch { }
       }
 
-      for (const tf of filesToInspect) {
+      for (const tf of targetSet) {
         try {
           fileContexts[tf] = await this.toolbox.readFile(tf);
         } catch {
@@ -233,14 +244,43 @@ Output your response ONLY in valid JSON matching this schema:
           }
         }
 
+        let rawText = (response.text || '{}').trim();
+        rawText = rawText.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim();
+
         let actionJson: any;
         try {
-          actionJson = JSON.parse(response.text || '{}');
+          actionJson = JSON.parse(rawText);
         } catch (parseErr: any) {
-          encounteredError = true;
-          failureReason = `Agent emitted malformed JSON response: ${parseErr.message}`;
-          logs.push(`[Error] ${failureReason}`);
-          break;
+          // Attempt sanitization: escape unescaped control characters inside JSON string literals
+          try {
+            let inString = false;
+            let escaped = false;
+            let sanitized = '';
+            for (let idx = 0; idx < rawText.length; idx++) {
+              const char = rawText[idx];
+              if (char === '"' && !escaped) {
+                inString = !inString;
+                sanitized += char;
+              } else if (inString && !escaped) {
+                if (char === '\n') sanitized += '\\n';
+                else if (char === '\r') sanitized += '\\r';
+                else if (char === '\t') sanitized += '\\t';
+                else sanitized += char;
+              } else {
+                sanitized += char;
+              }
+              escaped = char === '\\' && !escaped;
+            }
+            actionJson = JSON.parse(sanitized);
+          } catch {
+            logs.push(`[Iteration ${iteration} Warning] Malformed JSON emitted by model: ${parseErr.message}`);
+            recentActions.push({
+              iter: iteration,
+              action: 'error',
+              summary: `Failed to parse response JSON: ${parseErr.message}. Output strictly valid JSON.`,
+            });
+            continue;
+          }
         }
 
         logs.push(`[Thought]: ${actionJson.thought || 'Executing next step'}`);

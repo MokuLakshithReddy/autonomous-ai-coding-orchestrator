@@ -100,10 +100,13 @@ You are the Brain of an Autonomous AI Coding Orchestrator.
 Your goal is to understand requirements, inspect repository state, and generate a validated, structured execution plan.
 
 Rules:
-1. Break down complex tasks into atomic milestones with explicit dependencies.
-2. Define non-negotiable Acceptance Criteria that can be independently verified with builds, tests, or diff inspection.
-3. If an action could delete files, alter security configs, or affect production, set 'isSensitive': true.
-4. Output your response ONLY in valid JSON matching this exact structure:
+1. Every plan step must be an actionable code change, test creation, or configuration milestone. Do NOT create separate "inspection-only", "analysis", or "review" steps because the agent automatically inspects workspace files as part of step execution.
+2. For focused bug repairs, logic updates, or contract refactorings, formulate a direct, concise 1-step or 2-step actionable plan that directly addresses the required files.
+3. For multi-file changes or coordinated refactorings, specify all interdependent files in 'targetFiles' (e.g. caller and callee modules) so the agent has complete cross-file contract context.
+4. Set 'verificationCommand' to the test command on the milestone that finishes the fix (or null if it is an intermediate preparation step).
+5. Define non-negotiable Acceptance Criteria that can be independently verified with builds, tests, or diff inspection.
+6. If an action could delete files, alter security configs, or affect production, set 'isSensitive': true.
+7. Output your response ONLY in valid JSON matching this exact structure:
 {
   "summary": "High-level summary of the plan",
   "analysis": "Technical analysis of the problem and workspace",
@@ -274,6 +277,52 @@ ${gitDiff.slice(-3000) || '(No diff)'}
   }
 
   /**
+   * Evaluates whether empirical verification evidence is authoritative and trusted enough
+   * to authorize task completion when an LLM reviewer is offline, unavailable, or encounters an error.
+   * Fail-Closed: Rejects unconfigured tests, missing verification runs, failing checks, or empty diffs.
+   */
+  hasTrustedVerificationEvidence(
+    verificationSummaries: string[],
+    finalDiff: string,
+    hasUnresolvedVerificationErrors: boolean
+  ): { trusted: boolean; reason?: string } {
+    if (hasUnresolvedVerificationErrors) {
+      return { trusted: false, reason: 'Independent verification reported unresolved errors or failing criteria.' };
+    }
+
+    if (!verificationSummaries || verificationSummaries.length === 0) {
+      return { trusted: false, reason: 'Incomplete verification: No verification records were captured.' };
+    }
+
+    if (!finalDiff || finalDiff.trim().length === 0) {
+      return { trusted: false, reason: 'Missing code changes: Final Git diff is empty.' };
+    }
+
+    // Inspect the latest / final verification summary for authoritative outcome (index 0 is newest from DESC query)
+    const latestSummary = verificationSummaries[0];
+
+    if (latestSummary.includes('Test: FAILED') || latestSummary.includes('[FAILED]')) {
+      return { trusted: false, reason: 'Latest verification summary indicates failing test checks.' };
+    }
+    if (latestSummary.includes('Build: FAILED')) {
+      return { trusted: false, reason: 'Latest verification summary indicates build failure.' };
+    }
+    if (latestSummary.includes('Test: NOT_CONFIGURED')) {
+      return { trusted: false, reason: 'Tests are not configured for this repository; cannot authorize unverified completion.' };
+    }
+    if (latestSummary.includes('Test: NOT_RUN') || latestSummary.includes('Test: SKIPPED')) {
+      return { trusted: false, reason: 'Configured test suite was not executed or was skipped.' };
+    }
+
+    // Must have verified test with status PASSED
+    if (!latestSummary.includes('Test: PASSED')) {
+      return { trusted: false, reason: 'Latest verification did not record a PASSED test check.' };
+    }
+
+    return { trusted: true };
+  }
+
+  /**
    * Truthful Reviewer: Evaluates completion based strictly on verified evidence.
    * NEVER infers completion from high confidence scores alone or auto-approves when offline.
    */
@@ -295,19 +344,20 @@ ${gitDiff.slice(-3000) || '(No diff)'}
     }
 
     if (!this.ai) {
-      if (!hasUnresolvedVerificationErrors) {
+      const verifCheck = this.hasTrustedVerificationEvidence(verificationSummaries, finalDiff, hasUnresolvedVerificationErrors);
+      if (verifCheck.trusted) {
         return {
           isComplete: true,
           confidenceScore: 95,
           unresolvedIssues: [],
-          summary: 'All execution checks, test suites, and acceptance criteria passed with empirical verification evidence.',
+          summary: 'All execution checks, test suites, and acceptance criteria passed with verified empirical evidence.',
         };
       }
       return {
         isComplete: false,
-        confidenceScore: 50,
-        unresolvedIssues: ['Automated LLM Reviewer is offline and verification checks reported issues.'],
-        summary: 'Verification checks failed or incomplete while offline reviewer was active.',
+        confidenceScore: 0,
+        unresolvedIssues: [`Offline reviewer cannot verify completion: ${verifCheck.reason}`],
+        summary: `Verification evidence insufficient or untrusted: ${verifCheck.reason}`,
       };
     }
 
@@ -374,7 +424,8 @@ ${finalDiff.slice(-4000) || '(No diff)'}
       const parsed = JSON.parse(response.text || '{}');
       return ReviewResultSchema.parse(parsed);
     } catch (err: any) {
-      if (!hasUnresolvedVerificationErrors && finalDiff.length > 0) {
+      const verifCheck = this.hasTrustedVerificationEvidence(verificationSummaries, finalDiff, hasUnresolvedVerificationErrors);
+      if (verifCheck.trusted) {
         return {
           isComplete: true,
           confidenceScore: 90,
@@ -384,9 +435,11 @@ ${finalDiff.slice(-4000) || '(No diff)'}
       }
       return {
         isComplete: false,
-        confidenceScore: 40,
-        unresolvedIssues: [`Reviewer encountered schema error: ${err?.message}`],
-        summary: 'Review could not be completed cleanly.',
+        confidenceScore: 0,
+        unresolvedIssues: [
+          `Reviewer encountered error (${err?.message}) and independent verification is insufficient: ${verifCheck.reason}`,
+        ],
+        summary: `Task review failed closed: ${verifCheck.reason}`,
       };
     }
   }
