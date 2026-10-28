@@ -238,12 +238,13 @@ export class RepoInspector {
     }
   }
 
-  async getDiffAgainstBase(): Promise<string> {
+  async getDiffAgainstBase(explicitBaseCommit?: string): Promise<string> {
+    const base = explicitBaseCommit || this.baseline?.baseCommit;
     try {
-      if (!(await this.isGitRepository()) || !this.baseline?.baseCommit || this.baseline.baseCommit === 'initial') {
+      if (!(await this.isGitRepository()) || !base || base === 'initial') {
         return await this.getDiff();
       }
-      return await this.git.diff([this.baseline.baseCommit]);
+      return await this.git.diff([base]);
     } catch {
       return await this.getDiff();
     }

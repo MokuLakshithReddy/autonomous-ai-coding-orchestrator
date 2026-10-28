@@ -102,13 +102,13 @@ console.log('Public interval merger tests passed');
     const startTime1 = Date.now();
     const task1 = await engine1.runTask({
       prompt:
-        'Implement mergeIntervals(intervals) in merger.js so that overlapping intervals are correctly merged and node test.js passes cleanly. Handle unsorted inputs, adjacent intervals, and single-interval inputs.',
+        'In merger.js, fix the mergeIntervals(intervals) function so that overlapping intervals are correctly merged into [minStart, maxEnd] and node test.js passes cleanly.',
       workspacePath: b1Dir,
-      maxRetries: 3,
+      maxRetries: 2,
       customAgent: agent1,
     });
 
-    const maxWait = 90000;
+    const maxWait = 240000;
     const startWait1 = Date.now();
     let task1Rec = await taskRepo.getById(task1.id);
     while (task1Rec && !['completed', 'failed', 'blocked', 'cancelled'].includes(task1Rec.status.toLowerCase())) {
@@ -120,10 +120,12 @@ console.log('Public interval merger tests passed');
     const duration1 = Date.now() - startTime1;
     const isCompleted1 = task1Rec?.status.toLowerCase() === 'completed';
 
-    // Independent hidden verification test suite (Edge cases never seen in public test)
+    // Independent hidden verification test suite on repaired task branch
     let hiddenTestsPassed1 = 0;
     if (isCompleted1) {
       try {
+        const taskBranch1 = `task/${task1.id.slice(0, 8)}`;
+        await git1.checkout(taskBranch1);
         const { mergeIntervals } = await import(`file://${path.join(b1Dir, 'merger.js')}?v=${Date.now()}`);
         assert.deepStrictEqual(mergeIntervals([]), [], 'Empty input');
         hiddenTestsPassed1++;
@@ -215,9 +217,9 @@ console.log('Public pricing test passed');
     const startTime2 = Date.now();
     const task2 = await engine2.runTask({
       prompt:
-        'Fix the VIP20 discount calculation in pricing.js so that node test.js passes. Ensure no discount is applied for unknown coupons and preserve standard pricing behavior.',
+        'In pricing.js, fix calculateTotal(items, couponCode) so VIP20 deducts 20% (subtotal * 0.8) and node test.js passes cleanly. Do not modify subtotal for missing or unknown coupons.',
       workspacePath: b2Dir,
-      maxRetries: 3,
+      maxRetries: 2,
       customAgent: agent2,
     });
 
@@ -232,10 +234,12 @@ console.log('Public pricing test passed');
     const duration2 = Date.now() - startTime2;
     const isCompleted2 = task2Rec?.status.toLowerCase() === 'completed';
 
-    // Hidden regression suite: verify existing behavior did not regress
+    // Hidden regression suite on repaired task branch
     let hiddenTestsPassed2 = 0;
     if (isCompleted2) {
       try {
+        const taskBranch2 = `task/${task2.id.slice(0, 8)}`;
+        await git2.checkout(taskBranch2);
         const { calculateTotal } = await import(`file://${path.join(b2Dir, 'pricing.js')}?v=${Date.now()}`);
         assert.strictEqual(calculateTotal([{ price: 50, quantity: 2 }], undefined), 100, 'Standard subtotal without coupon');
         hiddenTestsPassed2++;

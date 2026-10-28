@@ -50,7 +50,7 @@ export class BuiltInAutonomousAgent implements CodingAgent {
     this.workspacePath = workspacePath;
     this.onRequestApproval = onRequestApproval;
     this.toolbox = new AgentToolbox(workspacePath, onRequestApproval);
-    this.modelName = config.geminiModel || 'gemini-2.5-flash';
+    this.modelName = config.geminiModel || 'gemini-flash-lite-latest';
     if (modelClient) {
       this.ai = modelClient;
     } else if (config.geminiApiKey) {
@@ -127,9 +127,17 @@ export class BuiltInAutonomousAgent implements CodingAgent {
       iteration++;
       logs.push(`\n--- Iteration ${iteration}/${maxIterations} ---`);
 
-      // Gather current file contexts if targetFiles are specified
+      // Gather current file contexts (auto-populate workspace files if targetFiles is empty)
       const fileContexts: Record<string, string> = {};
-      for (const tf of targetFiles) {
+      let filesToInspect = targetFiles.filter(Boolean);
+      if (filesToInspect.length === 0) {
+        try {
+          const allFiles = await this.toolbox.listFiles();
+          filesToInspect = allFiles.filter((f) => !f.endsWith('/')).slice(0, 8);
+        } catch {}
+      }
+
+      for (const tf of filesToInspect) {
         try {
           fileContexts[tf] = await this.toolbox.readFile(tf);
         } catch {
@@ -140,7 +148,7 @@ export class BuiltInAutonomousAgent implements CodingAgent {
       const prompt = `
 You are an Autonomous Software Engineer executing a specific coding task.
 Task: ${currentTask}
-Target Files: ${targetFiles.join(', ') || 'Any relevant files'}
+Target Files: ${targetFiles.join(', ') || 'Any relevant files in repository'}
 
 File Contexts:
 ${Object.entries(fileContexts)
@@ -149,14 +157,19 @@ ${Object.entries(fileContexts)
 
 Decide on the next action to take. You can choose ONE action:
 1. "writeFile": Create or overwrite a file with complete content.
-2. "executeCommand": Run a terminal command (e.g. build, test, install, format).
-3. "complete": Finish the step and declare work complete.
+2. "readFile": Read the contents of a file in the workspace.
+3. "executeCommand": Run a terminal command (e.g. build, test, install, format).
+4. "complete": Finish the step and declare work complete.
+
+Rules:
+- Once the fix is written and verified by running the test, return action: "complete" immediately. Do NOT repeatedly run tests in a loop.
+- When writing files with "writeFile", always provide the complete file content.
 
 Output your response ONLY in valid JSON matching this schema:
 {
   "thought": "Your reasoning about what needs to be done next",
-  "action": "writeFile" | "executeCommand" | "complete",
-  "filePath": "src/example.ts (if action is writeFile)",
+  "action": "writeFile" | "readFile" | "executeCommand" | "complete",
+  "filePath": "path/to/file (if action is writeFile or readFile)",
   "fileContent": "the code to write (if action is writeFile)",
   "command": "npm.cmd test (if action is executeCommand)",
   "summary": "Summary of action"
@@ -164,13 +177,38 @@ Output your response ONLY in valid JSON matching this schema:
 `;
 
       try {
-        const response = await this.ai!.models.generateContent({
-          model: this.modelName,
-          contents: prompt,
-          config: {
-            responseMimeType: 'application/json',
-          },
-        });
+        let response: any;
+        let modelAttempts = 0;
+        while (modelAttempts < 3) {
+          try {
+            response = await this.ai!.models.generateContent({
+              model: this.modelName,
+              contents: prompt,
+              config: {
+                responseMimeType: 'application/json',
+              },
+            });
+            break;
+          } catch (modelErr: any) {
+            modelAttempts++;
+            const errMsg = modelErr?.message || '';
+            const isRateLimit = errMsg.includes('429') || errMsg.includes('RESOURCE_EXHAUSTED') || errMsg.includes('limit: 5');
+            const isUnavailable = errMsg.includes('503') || errMsg.includes('UNAVAILABLE') || errMsg.includes('high demand');
+            if ((isRateLimit || isUnavailable) && modelAttempts < 3) {
+              let waitMs = 15000;
+              const match = errMsg.match(/retry in ([0-9.]+)s/i) || errMsg.match(/"retryDelay":\s*"([0-9]+)s"/i);
+              if (match) {
+                const parsedSec = parseFloat(match[1]);
+                waitMs = (parsedSec > 1000 ? Math.ceil(parsedSec) : Math.ceil(parsedSec * 1000)) + 1000;
+              }
+              waitMs = Math.min(Math.max(waitMs, 5000), 30000);
+              logs.push(`[Gemini Backoff] Received ${isRateLimit ? '429 Rate Limit' : '503 High Demand'}. Pausing ${Math.round(waitMs / 1000)}s for Free Tier quota window...`);
+              await new Promise((r) => setTimeout(r, waitMs));
+              continue;
+            }
+            throw modelErr;
+          }
+        }
 
         let actionJson: any;
         try {
@@ -198,6 +236,21 @@ Output your response ONLY in valid JSON matching this schema:
           logs.push(`[Action] Writing file: ${actionJson.filePath}`);
           await this.toolbox.writeFile(actionJson.filePath, actionJson.fileContent);
           toolsUsed.push(`writeFile:${actionJson.filePath}`);
+        } else if (actionJson.action === 'readFile') {
+          if (!actionJson.filePath) {
+            encounteredError = true;
+            failureReason = 'readFile action missing filePath';
+            logs.push(`[Error] ${failureReason}`);
+            break;
+          }
+          logs.push(`[Action] Reading file: ${actionJson.filePath}`);
+          try {
+            const content = await this.toolbox.readFile(actionJson.filePath);
+            logs.push(`[Read Content from ${actionJson.filePath}]:\n${content.slice(0, 2000)}`);
+            toolsUsed.push(`readFile:${actionJson.filePath}`);
+          } catch (readErr: any) {
+            logs.push(`[Warning] Could not read ${actionJson.filePath}: ${readErr.message}`);
+          }
         } else if (actionJson.action === 'executeCommand') {
           if (!actionJson.command) {
             encounteredError = true;

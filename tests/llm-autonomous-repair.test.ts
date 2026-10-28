@@ -74,6 +74,7 @@ try {
 
   await git.add('.');
   await git.commit('Initial commit with seeded calculation bug');
+  const baseCommitHash = (await git.revparse(['HEAD'])).trim();
 
   console.log('1. Created disposable repository at:', repoDir);
 
@@ -92,12 +93,12 @@ try {
     customAgent: liveAgent,
   });
 
-  // Poll until terminal state
-  const maxWaitMs = 60000;
+  // Poll until terminal state (5 minutes to accommodate Free Tier rate-limit backoffs)
+  const maxWaitMs = 300000;
   const startWait = Date.now();
   let latestTask = await taskRepo.getById(task.id);
 
-  while (latestTask && !['completed', 'failed', 'blocked', 'cancelled'].includes(latestTask.status.toLowerCase())) {
+  while (latestTask && !['completed', 'failed', 'blocked', 'cancelled', 'needs_human_review', 'partially_completed'].includes(latestTask.status.toLowerCase())) {
     if (Date.now() - startWait > maxWaitMs) {
       throw new Error(`Timeout waiting for live LLM task ${task.id} to finish (current state: ${latestTask.status})`);
     }
@@ -160,7 +161,7 @@ try {
   );
 
   // 4c. Semantic git diff inspection (evaluates additions and deletions separately)
-  const diff = await git.diff(['HEAD~1', 'HEAD', '--', 'math.js']);
+  const diff = await git.diff([baseCommitHash, taskBranch, '--', 'math.js']);
   assert.ok(diff.includes('--- a/math.js') && diff.includes('+++ b/math.js'), 'Diff must touch math.js');
 
   const diffLines = diff.split('\n');

@@ -176,7 +176,9 @@ export class AgentToolbox {
     return new Promise((resolve) => {
       const isWin = process.platform === 'win32';
       const shell = isWin ? 'powershell.exe' : '/bin/bash';
-      const shellArgs = isWin ? ['-NoProfile', '-Command', commandStr] : ['-c', commandStr];
+      const shellArgs = isWin
+        ? ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', commandStr]
+        : ['-c', commandStr];
 
       const child = spawn(shell, shellArgs, {
         cwd: this.workspacePath,

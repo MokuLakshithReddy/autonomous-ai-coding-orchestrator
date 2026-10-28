@@ -272,6 +272,9 @@ export class OrchestrationEngine extends EventEmitter {
     if (abortController.signal.aborted || stateMachine.isTerminal()) return;
     await this.transitionTaskState(taskId, stateMachine, 'discovering', 'Capturing repository baseline');
     const baseline = await inspector.captureBaseline();
+    if (taskInspector) {
+      (taskInspector as any).baseline = baseline;
+    }
     const repoMeta = await inspector.inspect();
 
     if (baseline) {
@@ -456,7 +459,7 @@ export class OrchestrationEngine extends EventEmitter {
       let verification = await verifier.verify(
         repoMeta,
         plan.acceptanceCriteria,
-        step.verificationCommand,
+        step.verificationCommand || undefined,
         baseline?.baseCommit
       );
       const postStepVerifFingerprint = await taskInspector.getWorkspaceFingerprint();
@@ -505,7 +508,7 @@ export class OrchestrationEngine extends EventEmitter {
         // Diagnose with LLM Brain
         await this.transitionTaskState(taskId, stateMachine, 'diagnosing', `Diagnosing failure for "${step.title}"`);
 
-        const recentDiff = await inspector.getDiffAgainstBase();
+        const recentDiff = await taskInspector.getDiffAgainstBase(baseline?.baseCommit);
         const diagnostic = await brain.diagnoseFailure(
           step,
           executionResult.logs,
@@ -550,7 +553,7 @@ export class OrchestrationEngine extends EventEmitter {
         verification = await verifier.verify(
           repoMeta,
           plan.acceptanceCriteria,
-          step.verificationCommand,
+          step.verificationCommand || undefined,
           baseline?.baseCommit
         );
       }
@@ -695,7 +698,7 @@ export class OrchestrationEngine extends EventEmitter {
       );
     }
 
-    const finalDiff = await taskInspector.getDiffAgainstBase();
+    const finalDiff = await taskInspector.getDiffAgainstBase(baseline?.baseCommit);
 
     const verifications = await verificationRepo.listForTask(taskId);
     const verifSummaries = verifications.map(
