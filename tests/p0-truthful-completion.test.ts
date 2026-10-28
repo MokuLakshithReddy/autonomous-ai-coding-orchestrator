@@ -833,6 +833,117 @@ async function runTests() {
   );
   console.log('   ✓ Secret-setting script safely rejects secret values in CLI arguments.');
 
+  // Test 17: Mutating Contents of Existing Untracked File During Verification
+  console.log('\n17. Testing Fingerprint Detection of Content Mutation in Existing Untracked Files (P0)...');
+  const test17Base = path.join(os.tmpdir(), `test17-untracked-${Date.now()}`);
+  await fs.mkdir(test17Base, { recursive: true });
+  const t17Git = simpleGit(test17Base);
+  await t17Git.init();
+  await t17Git.addConfig('user.name', 'Tester');
+  await t17Git.addConfig('user.email', 'test@test.local');
+  await fs.writeFile(path.join(test17Base, 'tracked.txt'), 'tracked initial');
+  await t17Git.add('.');
+  await t17Git.commit('Initial tracked commit');
+
+  // Create an untracked file BEFORE verification
+  const untrackedFile = path.join(test17Base, 'untracked_user_notes.txt');
+  await fs.writeFile(untrackedFile, 'Original Untracked Content V1');
+
+  const inspector17 = new (await import('../src/repo/inspector.js')).RepoInspector(test17Base);
+  const fp1 = await inspector17.getWorkspaceFingerprint();
+
+  // Mutate ONLY the content of the untracked file (status remains "?? untracked_user_notes.txt")
+  await fs.writeFile(untrackedFile, 'Tampered Untracked Content V2 (Sneak Mutation)');
+  const fp2 = await inspector17.getWorkspaceFingerprint();
+
+  assert.notStrictEqual(
+    fp1,
+    fp2,
+    'getWorkspaceFingerprint must detect content change inside existing untracked file!'
+  );
+  await fs.rm(test17Base, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  console.log('   ✓ Untracked file content mutation reliably detected by content fingerprinting.');
+
+  // Test 18: Mutating Non-Ephemeral Ignored File During Verification
+  console.log('\n18. Testing Fingerprint Detection of Mutated Non-Ephemeral Ignored Files (P0)...');
+  const test18Base = path.join(os.tmpdir(), `test18-ignored-${Date.now()}`);
+  await fs.mkdir(test18Base, { recursive: true });
+  const t18Git = simpleGit(test18Base);
+  await t18Git.init();
+  await t18Git.addConfig('user.name', 'Tester');
+  await t18Git.addConfig('user.email', 'test@test.local');
+  await fs.writeFile(path.join(test18Base, '.gitignore'), 'secrets.conf\ncoverage/\n*.log\n');
+  await t18Git.add('.');
+  await t18Git.commit('Initial commit with .gitignore');
+
+  // Create non-ephemeral ignored file
+  const ignoredSecretFile = path.join(test18Base, 'secrets.conf');
+  await fs.writeFile(ignoredSecretFile, 'DB_PASSWORD=initial_safe_pass');
+
+  const inspector18 = new (await import('../src/repo/inspector.js')).RepoInspector(test18Base);
+  const fpIgnored1 = await inspector18.getWorkspaceFingerprint();
+
+  // Mutate non-ephemeral ignored file
+  await fs.writeFile(ignoredSecretFile, 'DB_PASSWORD=tampered_modified_pass');
+  const fpIgnored2 = await inspector18.getWorkspaceFingerprint();
+
+  assert.notStrictEqual(
+    fpIgnored1,
+    fpIgnored2,
+    'getWorkspaceFingerprint must detect content change inside non-ephemeral ignored files!'
+  );
+  await fs.rm(test18Base, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  console.log('   ✓ Non-ephemeral ignored file mutation reliably detected by content fingerprinting.');
+
+  // Test 19: Distinguishing PASSED from NOT_CONFIGURED / INCONCLUSIVE (P1)
+  console.log('\n19. Testing Verification Distinction Between PASSED and INCONCLUSIVE (P1)...');
+  const unconfiguredVerifier = new IndependentVerifier(process.cwd());
+  const inconclusiveReport = await unconfiguredVerifier.verify(
+    {
+      isGitRepo: false,
+      hasUncommittedChanges: false,
+      uncommittedFiles: [],
+      ecosystems: ['unknown'],
+      fileTreeSummary: [],
+    },
+    ['Build succeeds', 'Tests pass']
+  );
+
+  assert.strictEqual(inconclusiveReport.isVerified, false, 'Inconclusive verification must NEVER be marked verified');
+  assert.strictEqual(inconclusiveReport.status, 'INCONCLUSIVE', 'Missing build/test runner must produce INCONCLUSIVE status');
+  assert.ok(
+    inconclusiveReport.blockingReasons.some((r) => r.includes('Inconclusive verification') || r.includes('Neither a build')),
+    'Blocking reasons must explain lack of verification commands'
+  );
+  console.log('   ✓ Verifier strictly distinguishes PASSED from INCONCLUSIVE when verification evidence is absent.');
+
+  // Test 20: Durable Event Persistence Awaiting & Retry Protection (P1)
+  console.log('\n20. Testing Awaited Event Persistence & Error Propagation (P1)...');
+  const testEngineEvents = new OrchestrationEngine({ allowedWorkspaces: [process.cwd()] });
+  const eventTaskId = crypto.randomUUID();
+  await taskRepo.create({
+    id: eventTaskId,
+    title: 'Event Persistence Test Task',
+    prompt: 'Testing event persistence',
+    workspacePath: process.cwd(),
+    status: 'queued',
+    retryCount: 0,
+    maxRetries: 0,
+    attemptId: crypto.randomUUID(),
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  });
+  
+  // Test event ledger append writes directly with a valid task
+  await assert.doesNotReject(async () => {
+    await testEngineEvents.emitOrchestratorEvent({
+      taskId: eventTaskId,
+      type: 'LOG',
+      message: 'Awaited event persistence audit test',
+    });
+  }, 'emitOrchestratorEvent must successfully await database ledger write');
+  console.log('   ✓ Orchestrator event ledger write confirmed awaited and durable.');
+
   console.log('\n=== ALL P0/P1 CORRECTNESS, SAFETY & VERIFICATION TESTS PASSED! ===\n');
 }
 

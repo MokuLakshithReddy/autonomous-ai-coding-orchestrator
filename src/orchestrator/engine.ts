@@ -49,26 +49,40 @@ export class OrchestrationEngine extends EventEmitter {
     this.allowUnrestricted = options?.allowUnrestricted;
   }
 
-  emitOrchestratorEvent(event: Omit<OrchestratorEvent, 'id' | 'timestamp'>): void {
+  /**
+   * P1 FIX: Awaited and retry-protected event ledger write.
+   * Guarantees audit events are safely persisted to SQLite before lifecycle progression.
+   */
+  async emitOrchestratorEvent(event: Omit<OrchestratorEvent, 'id' | 'timestamp'>): Promise<void> {
     const fullEvent: OrchestratorEvent = {
       id: crypto.randomUUID(),
       timestamp: new Date().toISOString(),
       ...event,
     };
 
-    // Append to durable SQLite event ledger
-    eventRepo
-      .append({
-        id: fullEvent.id,
-        taskId: fullEvent.taskId,
-        eventType: fullEvent.type,
-        fromState: fullEvent.fromState,
-        toState: fullEvent.toState,
-        message: fullEvent.message,
-        dataJson: fullEvent.data ? JSON.stringify(fullEvent.data) : undefined,
-        timestamp: fullEvent.timestamp,
-      })
-      .catch((err) => console.error('Failed to append event to ledger:', err));
+    let attempts = 0;
+    while (attempts < 3) {
+      try {
+        await eventRepo.append({
+          id: fullEvent.id,
+          taskId: fullEvent.taskId,
+          eventType: fullEvent.type,
+          fromState: fullEvent.fromState,
+          toState: fullEvent.toState,
+          message: fullEvent.message,
+          dataJson: fullEvent.data ? JSON.stringify(fullEvent.data) : undefined,
+          timestamp: fullEvent.timestamp,
+        });
+        break;
+      } catch (err: any) {
+        attempts++;
+        if (attempts >= 3) {
+          console.error(`[Event Ledger Persistence Failure] Could not append event "${fullEvent.type}":`, err);
+          throw new Error(`Durable event ledger persistence error (${fullEvent.type}): ${err.message}`);
+        }
+        await new Promise((r) => setTimeout(r, 50 * attempts));
+      }
+    }
 
     this.emit('event', fullEvent);
   }
@@ -83,7 +97,7 @@ export class OrchestrationEngine extends EventEmitter {
     const transition = stateMachine.transition(targetState, reason);
     await taskRepo.updateStatus(taskId, targetState, summary);
 
-    this.emitOrchestratorEvent({
+    await this.emitOrchestratorEvent({
       taskId,
       type: `STATE_${targetState.toUpperCase()}`,
       fromState: transition.from,
@@ -135,7 +149,7 @@ export class OrchestrationEngine extends EventEmitter {
 
     await taskRepo.create(task);
 
-    this.emitOrchestratorEvent({
+    await this.emitOrchestratorEvent({
       taskId,
       type: 'TASK_CREATED',
       toState: 'queued',
@@ -165,7 +179,7 @@ export class OrchestrationEngine extends EventEmitter {
           );
         } catch {}
       }
-      this.emitOrchestratorEvent({
+      await this.emitOrchestratorEvent({
         taskId,
         type: 'TASK_FAILED',
         toState: 'failed',
@@ -188,7 +202,7 @@ export class OrchestrationEngine extends EventEmitter {
     }
   ): Promise<void> {
     const active = this.activeTasks.get(taskId);
-    if (!active) return;
+    if (!active || active.stateMachine.isTerminal()) return;
     const { stateMachine, abortController, startedAt } = active;
 
     const inspector = new RepoInspector(params.workspacePath);
@@ -258,6 +272,7 @@ export class OrchestrationEngine extends EventEmitter {
     };
 
     // 1. Discovering Phase: Repo Baseline & Ecosystem
+    if (abortController.signal.aborted || stateMachine.isTerminal()) return;
     await this.transitionTaskState(taskId, stateMachine, 'discovering', 'Capturing repository baseline');
     const baseline = await inspector.captureBaseline();
     const repoMeta = await inspector.inspect();
@@ -274,7 +289,7 @@ export class OrchestrationEngine extends EventEmitter {
       });
     }
 
-    this.emitOrchestratorEvent({
+    await this.emitOrchestratorEvent({
       taskId,
       type: 'REPO_INSPECTED',
       message: `Repository discovered: ${repoMeta.ecosystems.join(', ')} ecosystem. Baseline: ${baseline?.baseCommit || 'none'}`,
@@ -288,7 +303,7 @@ export class OrchestrationEngine extends EventEmitter {
     const plan: ExecutionPlan = await brain.generatePlan(params.prompt, repoMeta);
     await taskRepo.updatePlan(taskId, JSON.stringify(plan));
 
-    this.emitOrchestratorEvent({
+    await this.emitOrchestratorEvent({
       taskId,
       type: 'PLAN_GENERATED',
       message: `Plan formulated with ${plan.steps.length} milestones and ${plan.acceptanceCriteria.length} acceptance criteria.`,
@@ -351,7 +366,7 @@ export class OrchestrationEngine extends EventEmitter {
           createdAt: new Date().toISOString(),
         });
 
-        this.emitOrchestratorEvent({
+        await this.emitOrchestratorEvent({
           taskId,
           stepId: stepRec.id,
           type: 'APPROVAL_REQUIRED',
@@ -364,7 +379,7 @@ export class OrchestrationEngine extends EventEmitter {
 
         if (!isApproved) {
           await stepRepo.update(stepRec.id, { status: 'SKIPPED' });
-          this.emitOrchestratorEvent({
+          await this.emitOrchestratorEvent({
             taskId,
             stepId: stepRec.id,
             type: 'APPROVAL_RESOLVED',
@@ -386,7 +401,7 @@ export class OrchestrationEngine extends EventEmitter {
       await this.transitionTaskState(taskId, stateMachine, 'executing', `Executing step ${step.index}: "${step.title}"`);
       await stepRepo.update(stepRec.id, { status: 'RUNNING' });
 
-      this.emitOrchestratorEvent({
+      await this.emitOrchestratorEvent({
         taskId,
         stepId: stepRec.id,
         type: 'STEP_STARTED',
@@ -428,7 +443,7 @@ export class OrchestrationEngine extends EventEmitter {
         durationMs: stepDurationMs,
       });
 
-      this.emitOrchestratorEvent({
+      await this.emitOrchestratorEvent({
         taskId,
         stepId: stepRec.id,
         type: 'STEP_EXECUTED',
@@ -468,7 +483,7 @@ export class OrchestrationEngine extends EventEmitter {
           ? `Agent execution failed: ${executionResult.failureReason || 'Incomplete execution'}`
           : `Verification failed: ${verification.blockingReasons.join('; ')}`;
 
-        this.emitOrchestratorEvent({
+        await this.emitOrchestratorEvent({
           taskId,
           stepId: stepRec.id,
           type: 'VERIFICATION_FAILED',
@@ -509,7 +524,7 @@ export class OrchestrationEngine extends EventEmitter {
             `Unrecoverable blocker identified: ${diagnostic.rootCause}`,
             diagnostic.rootCause
           );
-          this.emitOrchestratorEvent({
+          await this.emitOrchestratorEvent({
             taskId,
             stepId: stepRec.id,
             type: 'TASK_BLOCKED',
@@ -522,7 +537,7 @@ export class OrchestrationEngine extends EventEmitter {
         // Repair Attempt
         await this.transitionTaskState(taskId, stateMachine, 'repairing', `Attempting self-repair (Attempt ${stepRetries})`);
 
-        this.emitOrchestratorEvent({
+        await this.emitOrchestratorEvent({
           taskId,
           stepId: stepRec.id,
           type: 'REPAIR_ATTEMPT',
@@ -581,7 +596,7 @@ export class OrchestrationEngine extends EventEmitter {
           `Failed on step: ${step.title}. ${finalFailReason}`
         );
 
-        this.emitOrchestratorEvent({
+        await this.emitOrchestratorEvent({
           taskId,
           stepId: stepRec.id,
           type: 'TASK_FAILED',
@@ -610,7 +625,7 @@ export class OrchestrationEngine extends EventEmitter {
         createdAt: new Date().toISOString(),
       });
 
-      this.emitOrchestratorEvent({
+      await this.emitOrchestratorEvent({
         taskId,
         stepId: stepRec.id,
         type: 'VERIFICATION_PASSED',
@@ -735,7 +750,7 @@ export class OrchestrationEngine extends EventEmitter {
     // Truthful Completion Gate: Distinguish completed vs partially_completed vs needs_human_review vs failed
     if (finalVerification.isVerified && review.isComplete) {
       await this.transitionTaskState(taskId, stateMachine, 'completed', 'All requirements verified', review.summary);
-      this.emitOrchestratorEvent({
+      await this.emitOrchestratorEvent({
         taskId,
         type: 'TASK_COMPLETED',
         message: `Task successfully verified and completed: ${review.summary}`,
@@ -749,7 +764,7 @@ export class OrchestrationEngine extends EventEmitter {
         'Verification passed but reviewer identified pending items',
         review.summary
       );
-      this.emitOrchestratorEvent({
+      await this.emitOrchestratorEvent({
         taskId,
         type: 'TASK_NEEDS_REVIEW',
         message: `Task requires human review: ${review.summary}`,
@@ -763,7 +778,7 @@ export class OrchestrationEngine extends EventEmitter {
         `Verification incomplete: ${finalVerification.blockingReasons.join('; ')}`,
         review.summary
       );
-      this.emitOrchestratorEvent({
+      await this.emitOrchestratorEvent({
         taskId,
         type: 'TASK_PARTIALLY_COMPLETED',
         message: `Task partially completed with unverified criteria: ${finalVerification.blockingReasons.join(', ')}`,
@@ -780,7 +795,7 @@ export class OrchestrationEngine extends EventEmitter {
           } else {
             await inspector.removeIsolatedSandbox(taskWorktreePath);
           }
-          this.emitOrchestratorEvent({
+          await this.emitOrchestratorEvent({
             taskId,
             type: 'LOG',
             message: `Isolated environment cleaned up. Task changes preserved ${
@@ -818,7 +833,7 @@ export class OrchestrationEngine extends EventEmitter {
       createdAt: new Date().toISOString(),
     });
 
-    this.emitOrchestratorEvent({
+    await this.emitOrchestratorEvent({
       taskId,
       stepId,
       type: 'APPROVAL_REQUIRED',

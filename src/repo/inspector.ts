@@ -89,30 +89,96 @@ export class RepoInspector {
   }
 
   /**
-   * P0 FIX: Full workspace state fingerprinting.
-   * Hashes the exact HEAD commit, porcelain status (tracked modifications, staging, additions,
-   * deletions, untracked files), and working diffs.
-   * Guarantees that ANY file change made during or after verification is detected.
+   * Policy for allowable ephemeral verification side-effects (build outputs, coverage, test caches)
+   */
+  private static readonly EPHEMERAL_IGNORED_PATTERNS = [
+    /^(dist|build|coverage|\.nyc_output|\.turbo|\.next|\.cache|\.temp|\.tmp)([\\/]|$)/i,
+    /\.(log|tmp|tsbuildinfo|cache)$/i,
+  ];
+
+  /**
+   * P0 FIX: Exhaustive Workspace State Fingerprinting.
+   * Guarantees that ANY file modification during verification is detected:
+   * 1. Tracked Files: HEAD commit + git status + working diff + staged diff.
+   * 2. Untracked Files: Enumerated with '-uall'; file content SHA-256, size, mtime, and symlink targets hashed.
+   *    (Detects content mutations in existing untracked files without relying on git status changes).
+   * 3. Ignored Files: Evaluated against EPHEMERAL_IGNORED_PATTERNS; non-ephemeral ignored files
+   *    (e.g., custom .env, config, user data) are content-hashed.
+   * 4. Symlinks: Resolved with readlink to prevent symlink retargeting attacks.
+   * 5. Non-Git Fallback: Full directory tree hash with symlink and content verification.
    */
   async getWorkspaceFingerprint(): Promise<string> {
     if (await this.isGitRepository()) {
       try {
         const headCommit = (await this.getCurrentCommitHash()) || 'NO_HEAD';
-        const porcelain = await this.git.raw(['status', '--porcelain=v1']);
+        const porcelain = await this.git.raw(['status', '--porcelain=v1', '-uall']);
         const workingDiff = await this.git.diff();
         const stagedDiff = await this.git.diff(['--cached']);
-        return crypto
-          .createHash('sha256')
-          .update(`HEAD:${headCommit}\n`)
-          .update(`PORCELAIN:\n${porcelain}\n`)
-          .update(`WORKING_DIFF:\n${workingDiff}\n`)
-          .update(`STAGED_DIFF:\n${stagedDiff}\n`)
-          .digest('hex');
+
+        const hasher = crypto.createHash('sha256');
+        hasher.update(`HEAD:${headCommit}\n`);
+        hasher.update(`PORCELAIN:\n${porcelain}\n`);
+        hasher.update(`WORKING_DIFF:\n${workingDiff}\n`);
+        hasher.update(`STAGED_DIFF:\n${stagedDiff}\n`);
+
+        // 1. Content-hash all untracked files individually
+        const untrackedFiles: string[] = [];
+        for (const line of porcelain.split('\n')) {
+          if (line.startsWith('?? ')) {
+            const rawPath = line.slice(3).trim().replace(/^"|"$/g, '');
+            if (rawPath) untrackedFiles.push(rawPath);
+          }
+        }
+        untrackedFiles.sort();
+
+        for (const relPath of untrackedFiles) {
+          const fullPath = path.join(this.workspacePath, relPath);
+          await this.hashFileOrSymlink(fullPath, `UNTRACKED:${relPath}`, hasher);
+        }
+
+        // 2. Hash non-ephemeral ignored files
+        try {
+          const ignoredOutput = await this.git.raw(['status', '--porcelain=v1', '--ignored=matching', '-uall']);
+          const nonEphemeralIgnored: string[] = [];
+          for (const line of ignoredOutput.split('\n')) {
+            if (line.startsWith('!! ')) {
+              const rawPath = line.slice(3).trim().replace(/^"|"$/g, '');
+              const norm = rawPath.replace(/\\/g, '/');
+              const isEphemeral = RepoInspector.EPHEMERAL_IGNORED_PATTERNS.some((pat) => pat.test(norm));
+              if (!isEphemeral && norm) {
+                nonEphemeralIgnored.push(rawPath);
+              }
+            }
+          }
+          nonEphemeralIgnored.sort();
+          for (const relPath of nonEphemeralIgnored) {
+            const fullPath = path.join(this.workspacePath, relPath);
+            await this.hashFileOrSymlink(fullPath, `IGNORED:${relPath}`, hasher);
+          }
+        } catch {}
+
+        return hasher.digest('hex');
       } catch {}
     }
 
     // Non-Git or fallback directory tree hashing
     return await this.computeDirectoryTreeHash(this.workspacePath);
+  }
+
+  private async hashFileOrSymlink(fullPath: string, label: string, hasher: crypto.Hash): Promise<void> {
+    try {
+      const lstat = await fs.lstat(fullPath);
+      if (lstat.isSymbolicLink()) {
+        const linkTarget = await fs.readlink(fullPath);
+        hasher.update(`SYMLINK:${label}->${linkTarget}\n`);
+      } else if (lstat.isFile()) {
+        hasher.update(`FILE:${label}:${lstat.size}:${lstat.mtimeMs}\n`);
+        const content = await fs.readFile(fullPath);
+        hasher.update(crypto.createHash('sha256').update(content).digest('hex'));
+      }
+    } catch {
+      hasher.update(`MISSING:${label}\n`);
+    }
   }
 
   private async computeDirectoryTreeHash(dir: string): Promise<string> {
@@ -130,13 +196,8 @@ export class RepoInspector {
         if (entry.isDirectory()) {
           hash.update(`DIR:${rel}\n`);
           await walk(full);
-        } else if (entry.isFile()) {
-          const stat = await fs.stat(full);
-          hash.update(`FILE:${rel}:${stat.size}:${stat.mtimeMs}\n`);
-          try {
-            const buf = await fs.readFile(full);
-            hash.update(crypto.createHash('sha256').update(buf).digest('hex'));
-          } catch {}
+        } else {
+          await this.hashFileOrSymlink(full, rel, hash);
         }
       }
     };

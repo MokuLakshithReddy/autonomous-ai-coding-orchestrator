@@ -36,6 +36,9 @@ jobs:
       - name: Run Critical P0/P1 Correctness & Security Tests
         run: npm test
 
+      - name: Run Autonomous Repair Benchmarks
+        run: npm run test:benchmarks
+
       - name: Install & Build Web Dashboard
         working-directory: ./web
         run: |

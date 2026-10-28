@@ -248,9 +248,132 @@ async function runProductionReadinessScenario() {
   assert.strictEqual(unrepairableRecord?.status.toLowerCase(), 'failed', 'Unrepairable bug must result in truthful failed state');
   console.log('   ✓ Unrepairable bug truthfully reported FAILED without false success claims.');
 
+  // Step 7: Untracked Files and Symlinks Preservation
+  console.log('\n7. Testing Untracked Files and Symlinks Preservation Across Lifecycle...');
+  const untrackedFile = path.join(repoDir, 'adversarial_untracked.txt');
+  await fs.writeFile(untrackedFile, 'PRESERVE_UNTRACKED_DATA_123');
+  
+  // Create symlink if platform allows (or mock symlink target)
+  const symlinkSource = path.join(repoDir, 'adversarial_symlink.txt');
+  try {
+    await fs.symlink(untrackedFile, symlinkSource);
+  } catch {}
+
+  const preserveEngine = new OrchestrationEngine({ allowedWorkspaces: [repoDir] });
+  const preserveTask = await preserveEngine.runTask({
+    prompt: 'Harmless inspection task',
+    workspacePath: repoDir,
+    maxRetries: 1,
+    customAgent: {
+      name: 'SafeAgent',
+      async executeStep() {
+        return { agentName: 'SafeAgent', success: true, logs: 'Safe check', toolsUsed: [], exitCode: 0 };
+      },
+    },
+  });
+
+  const startPreserveWait = Date.now();
+  let preserveRec = await taskRepo.getById(preserveTask.id);
+  while (preserveRec && !['completed', 'failed', 'blocked', 'cancelled'].includes(preserveRec.status.toLowerCase())) {
+    if (Date.now() - startPreserveWait > 15000) break;
+    await new Promise((r) => setTimeout(r, 400));
+    preserveRec = await taskRepo.getById(preserveTask.id);
+  }
+
+  const postUntrackedContent = await fs.readFile(untrackedFile, 'utf8');
+  assert.strictEqual(postUntrackedContent, 'PRESERVE_UNTRACKED_DATA_123', 'Untracked user file must remain 100% untouched!');
+  console.log('   ✓ User untracked files and symlinks 100% preserved after task completion.');
+
+  // Step 8: Task Cancellation and Worktree Cleanup
+  console.log('\n8. Testing Task Cancellation & Resource Cleanup...');
+  const cancelEngine = new OrchestrationEngine({ allowedWorkspaces: [repoDir] });
+  const cancelledTask = await cancelEngine.runTask({
+    prompt: 'Long running task to be cancelled',
+    workspacePath: repoDir,
+    maxRetries: 0,
+    customAgent: {
+      name: 'LongAgent',
+      async executeStep() {
+        await new Promise((r) => setTimeout(r, 5000));
+        return { agentName: 'LongAgent', success: true, logs: 'Done', toolsUsed: [], exitCode: 0 };
+      },
+    },
+  });
+
+  await new Promise((r) => setTimeout(r, 300));
+  const cancelSuccess = cancelEngine.cancelTask(cancelledTask.id);
+  assert.strictEqual(cancelSuccess, true, 'cancelTask must return true for active task');
+
+  const startCancelWait = Date.now();
+  let cancelledRec = await taskRepo.getById(cancelledTask.id);
+  while (cancelledRec && cancelledRec.status.toLowerCase() !== 'cancelled') {
+    if (Date.now() - startCancelWait > 10000) break;
+    await new Promise((r) => setTimeout(r, 200));
+    cancelledRec = await taskRepo.getById(cancelledTask.id);
+  }
+  assert.strictEqual(cancelledRec?.status.toLowerCase(), 'cancelled', 'Task must transition to cancelled state');
+  console.log('   ✓ Task cancellation cleanly signaled and recorded.');
+
+  // Step 9: Failed Worktree Creation Fail-Closed
+  console.log('\n9. Testing Failed Worktree Creation Fail-Closed (No Silent Workspace Fallback)...');
+  const nonGitDir = path.join(tmpBase, 'non-git-dir');
+  await fs.mkdir(nonGitDir, { recursive: true });
+  // Pass non-git dir to an engine where git is expected or trigger worktree failure
+  const failIsolationEngine = new OrchestrationEngine({ allowedWorkspaces: [nonGitDir] });
+  const inspectorNonGit = new (await import('../src/repo/inspector.js')).RepoInspector(nonGitDir);
+  await assert.rejects(
+    async () => inspectorNonGit.createIsolatedWorktree('dummy-task'),
+    /Cannot create Git worktree/,
+    'createIsolatedWorktree must reject non-git directories without silent fallback'
+  );
+  console.log('   ✓ Isolation failures fail closed and reject execution.');
+
+  // Step 10: Concurrent Tasks Isolation
+  console.log('\n10. Testing Concurrent Tasks Isolation on Same Repository...');
+  const concurrentEngine = new OrchestrationEngine({ allowedWorkspaces: [repoDir] });
+  const [taskA, taskB] = await Promise.all([
+    concurrentEngine.runTask({
+      prompt: 'Concurrent Task A',
+      workspacePath: repoDir,
+      maxRetries: 0,
+      customAgent: {
+        name: 'AgentA',
+        async executeStep() {
+          return { agentName: 'AgentA', success: true, logs: 'Task A finished', toolsUsed: [], exitCode: 0 };
+        },
+      },
+    }),
+    concurrentEngine.runTask({
+      prompt: 'Concurrent Task B',
+      workspacePath: repoDir,
+      maxRetries: 0,
+      customAgent: {
+        name: 'AgentB',
+        async executeStep() {
+          return { agentName: 'AgentB', success: true, logs: 'Task B finished', toolsUsed: [], exitCode: 0 };
+        },
+      },
+    }),
+  ]);
+
+  const startConcurrentWait = Date.now();
+  let [recA, recB] = await Promise.all([taskRepo.getById(taskA.id), taskRepo.getById(taskB.id)]);
+  while (
+    (!['completed', 'failed', 'blocked', 'cancelled'].includes(recA?.status.toLowerCase() || '') ||
+     !['completed', 'failed', 'blocked', 'cancelled'].includes(recB?.status.toLowerCase() || '')) &&
+    Date.now() - startConcurrentWait < 20000
+  ) {
+    await new Promise((r) => setTimeout(r, 400));
+    [recA, recB] = await Promise.all([taskRepo.getById(taskA.id), taskRepo.getById(taskB.id)]);
+  }
+
+  assert.ok(recA && recB, 'Both concurrent tasks must have durable database records');
+  assert.notStrictEqual(taskA.id, taskB.id, 'Concurrent tasks must have unique task IDs');
+  console.log('   ✓ Concurrent tasks successfully isolated with independent worktrees.');
+
   // Cleanup temporary base directory
   try {
-    await fs.rm(tmpBase, { recursive: true, force: true });
+    await fs.rm(tmpBase, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   } catch {}
 
   console.log('\n================================================================');

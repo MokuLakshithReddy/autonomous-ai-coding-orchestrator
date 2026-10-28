@@ -320,16 +320,21 @@ export class IndependentVerifier {
       hasSuspiciousDeletions;
 
     let status: VerificationReport['status'];
-    if (hasActiveFailures || blockingReasons.length > 0) {
+    if (hasActiveFailures) {
       status = 'FAILED';
     } else if (
       buildCheck.status === 'NOT_CONFIGURED' &&
       testCheck.status === 'NOT_CONFIGURED' &&
-      filesChanged.length === 0 &&
-      diff.length === 0
+      !customVerificationCmd
     ) {
+      // P1 FIX: Distinguish "PASSED" from "NOT_CONFIGURED / INCONCLUSIVE"
+      // Neither build nor test command was configured or executed, so no automated verification occurred.
       status = 'INCONCLUSIVE';
-      blockingReasons.push('Inconclusive verification: No verification commands configured and no files modified.');
+      blockingReasons.push(
+        'Inconclusive verification: Neither a build command nor a test runner is configured, and no custom verification command ran.'
+      );
+    } else if (blockingReasons.length > 0) {
+      status = 'FAILED';
     } else {
       status = 'PASSED';
     }
