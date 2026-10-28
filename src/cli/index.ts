@@ -45,13 +45,9 @@ program
   .option('-r, --retries <number>', 'Maximum self-repair retry budget', String(config.maxRetryBudget))
   .action(async (opts) => {
     await initDatabase();
-    const allowedRoots =
-      config.allowedWorkspaces.length > 0
-        ? config.allowedWorkspaces
-        : (config.allowUnrestrictedWorkspaces ? [] : [process.cwd()]);
     const authorizedWorkspace = SecurityPolicyEngine.validateWorkspaceAuthorization(
       opts.workspace,
-      allowedRoots,
+      config.allowedWorkspaces,
       { allowUnrestricted: config.allowUnrestrictedWorkspaces }
     );
     const resolvedWorkspace = SecurityPolicyEngine.assertPathContainment(authorizedWorkspace, authorizedWorkspace);

@@ -27,30 +27,55 @@ interface WsTicket {
   expiresAt: number;
 }
 export const wsTickets = new Map<string, WsTicket>();
+export const MAX_WS_TICKETS = 1000;
 
-export function issueWsTicket(): string {
+export function cleanupExpiredWsTickets(now = Date.now()): number {
+  let cleaned = 0;
+  for (const [ticket, item] of wsTickets.entries()) {
+    if (now > item.expiresAt) {
+      wsTickets.delete(ticket);
+      cleaned++;
+    }
+  }
+  return cleaned;
+}
+
+export function issueWsTicket(ttlMs = 60_000): string {
+  cleanupExpiredWsTickets();
+  if (wsTickets.size >= MAX_WS_TICKETS) {
+    const keys = Array.from(wsTickets.keys());
+    for (let i = 0; i < 100 && i < keys.length; i++) {
+      wsTickets.delete(keys[i]);
+    }
+  }
   const ticket = crypto.randomBytes(32).toString('hex');
-  const expiresAt = Date.now() + 60_000;
+  const expiresAt = Date.now() + ttlMs;
   wsTickets.set(ticket, { ticket, expiresAt });
   return ticket;
 }
 
-export function consumeWsTicket(ticket: string): boolean {
+export function consumeWsTicket(ticket: string, now = Date.now()): boolean {
+  cleanupExpiredWsTickets(now);
   const item = wsTickets.get(ticket);
   if (!item) return false;
   wsTickets.delete(ticket);
-  return Date.now() <= item.expiresAt;
+  return now <= item.expiresAt;
 }
 
-export function validateWorkspacePath(requestedPath?: string): string {
+export function validateWorkspacePath(
+  requestedPath?: string,
+  allowedRoots: string[] = config.allowedWorkspaces,
+  options?: { allowUnrestricted?: boolean; forceCaseSensitive?: boolean }
+): string {
   const targetRaw = requestedPath || process.cwd();
-  const allowedRoots =
-    config.allowedWorkspaces.length > 0 ? config.allowedWorkspaces : [process.cwd()];
+  const allowUnrestricted = options?.allowUnrestricted ?? config.allowUnrestrictedWorkspaces;
 
   try {
-    const authorized = SecurityPolicyEngine.validateWorkspaceAuthorization(targetRaw, allowedRoots, {
-      allowUnrestricted: config.allowUnrestrictedWorkspaces,
-    });
+    const authorized = SecurityPolicyEngine.validateWorkspaceAuthorization(
+      targetRaw,
+      allowedRoots,
+      { allowUnrestricted, forceCaseSensitive: options?.forceCaseSensitive }
+    );
     return SecurityPolicyEngine.assertPathContainment(authorized, authorized);
   } catch (err: any) {
     throw new Error(`Forbidden: ${err.message}`);
@@ -89,12 +114,14 @@ export async function createServer() {
   // Strictly requires Authorization: Bearer <token> or x-api-token header (rejects query-string tokens on HTTP)
   fastify.addHook('onRequest', async (req, reply) => {
     const url = req.raw.url || '';
-    // Public paths: health check, root, static assets
+    // Public paths: health check, root, static assets, and WebSocket upgrade route
+    // (WebSocket route enforces its own authentication via single-use ticket or handshake)
     if (
       url === '/api/system/status' ||
       url === '/' ||
       url.startsWith('/index.html') ||
-      (!url.startsWith('/api') && !url.startsWith('/ws'))
+      url.startsWith('/ws') ||
+      !url.startsWith('/api')
     ) {
       return;
     }
@@ -174,10 +201,7 @@ export async function createServer() {
       // Security Fix: Explicitly reject long-lived API tokens in query strings to prevent URL credential exposure
       const queryToken = (req.query as any)?.token;
       if (queryToken) {
-        socket.close(
-          1008,
-          'Unauthorized: Long-lived API tokens in query strings are rejected. Use x-api-token header, POST /api/auth/ws-ticket, or AUTH handshake message.'
-        );
+        socket.close(1008, 'Unauthorized: Long-lived token in URL query is forbidden');
         return;
       }
 

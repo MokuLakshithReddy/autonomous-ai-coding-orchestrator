@@ -270,8 +270,8 @@ async function runTests() {
   );
   console.log('   ✓ Verifier strictly requires test proof for behavioral and implementation criteria.');
 
-  // Test 10: Empty Allowlist Fail-Closed Policy Enforcement
-  console.log('\n10. Testing Empty Workspace Allowlist Fail-Closed Policy...');
+  // Test 10: Empty Allowlist Fail-Closed Policy Enforcement across API, CLI, and Engine
+  console.log('\n10. Testing Empty Workspace Allowlist Fail-Closed Policy across all entry points...');
   assert.throws(
     () =>
       SecurityPolicyEngine.validateWorkspaceAuthorization(currentWorkspace, [], {
@@ -280,17 +280,30 @@ async function runTests() {
     /Security Exception \[Workspace Forbidden\]: Workspace authorization failed\. Allowed workspace roots list is empty/,
     'Empty allowlist must strictly fail closed when unrestricted mode is not enabled'
   );
+  // Server entry point validateWorkspacePath
+  assert.throws(
+    () => validateWorkspacePath(currentWorkspace, [], { allowUnrestricted: false }),
+    /Forbidden: Security Exception \[Workspace Forbidden\]/,
+    'Server validateWorkspacePath must fail closed when allowlist is empty and unrestricted mode is false'
+  );
+  // Engine entry point
+  const restrictedEngine = new OrchestrationEngine({ allowedWorkspaces: [], allowUnrestricted: false });
+  await assert.rejects(
+    async () => restrictedEngine.runTask({ prompt: 'test', workspacePath: currentWorkspace }),
+    /Security Exception \[Workspace Forbidden\]/,
+    'Engine runTask must fail closed when allowlist is empty and unrestricted mode is false'
+  );
+
+  // Opt-in unrestricted mode must allow workspace consistently across all three
   const allowedInUnrestricted = SecurityPolicyEngine.validateWorkspaceAuthorization(
     currentWorkspace,
     [],
     { allowUnrestricted: true }
   );
-  assert.strictEqual(
-    allowedInUnrestricted,
-    currentWorkspace,
-    'Explicit opt-in unrestricted mode must allow workspace'
-  );
-  console.log('   ✓ Workspace authorization strictly fails closed on empty allowlist unless unrestricted mode is opted into.');
+  assert.strictEqual(allowedInUnrestricted, currentWorkspace);
+  const serverAllowed = validateWorkspacePath(currentWorkspace, [], { allowUnrestricted: true });
+  assert.strictEqual(serverAllowed, currentWorkspace);
+  console.log('   ✓ Workspace authorization strictly and consistently fails closed on empty allowlist unless unrestricted mode is opted into.');
 
   // Test 11: Non-Git Sandbox Exact Directory Filtering
   console.log('\n11. Testing Non-Git Sandbox Directory Filtering (.github preservation)...');
@@ -328,8 +341,9 @@ async function runTests() {
   await fs.rm(tempBase, { recursive: true, force: true });
   console.log('   ✓ Non-Git sandbox copying cleanly preserves .github/ and dotfiles while excluding .git metadata.');
 
-  // Test 12: WebSocket Authentication Security (Tokens in query string rejected; ticket/handshake required)
-  console.log('\n12. Testing WebSocket Authentication Security (Ticket & Handshake vs Query Token)...');
+  // Test 12: WebSocket Authentication Security (Browser-compatible ticket auth, expiry, memory cleanup)
+  console.log('\n12. Testing WebSocket Authentication Security (Browser Ticket, Expiry & Memory Cleanup)...');
+  const { issueWsTicket, consumeWsTicket, cleanupExpiredWsTickets, wsTickets } = await import('../src/server/index.js');
   const serverPort = 4455;
   await server.listen({ port: serverPort, host: '127.0.0.1' });
 
@@ -352,18 +366,18 @@ async function runTests() {
     const { ticket } = JSON.parse(ticketRes.body);
     assert.ok(ticket, 'Must receive a valid connection ticket');
 
-    // Connect with ticket in query string
-    const ticketWs = new WebSocket(`ws://127.0.0.1:${serverPort}/ws?ticket=${ticket}`);
-    const ticketConnected = await new Promise<boolean>((resolve) => {
-      ticketWs.on('message', (data) => {
+    // Connect with standard browser-like client (no custom headers) using ticket in query string
+    const browserWs = new WebSocket(`ws://127.0.0.1:${serverPort}/ws?ticket=${ticket}`);
+    const browserConnected = await new Promise<boolean>((resolve) => {
+      browserWs.on('message', (data) => {
         const msg = JSON.parse(data.toString());
         if (msg.type === 'CONNECTED') resolve(true);
       });
-      ticketWs.on('close', () => resolve(false));
-      ticketWs.on('error', () => resolve(false));
+      browserWs.on('close', () => resolve(false));
+      browserWs.on('error', () => resolve(false));
     });
-    assert.strictEqual(ticketConnected, true, 'WebSocket authenticated with ticket must connect successfully');
-    ticketWs.close();
+    assert.strictEqual(browserConnected, true, 'Browser WebSocket with ticket must connect without being blocked by HTTP middleware');
+    browserWs.close();
 
     // Replay ticket must be rejected (single-use)
     const replayWs = new WebSocket(`ws://127.0.0.1:${serverPort}/ws?ticket=${ticket}`);
@@ -373,7 +387,34 @@ async function runTests() {
     });
     assert.strictEqual(replayCloseCode, 1008, 'Replayed connection ticket must be rejected with 1008');
 
-    // 12c: Handshake authentication message
+    // 12c: Expired ticket must fail
+    const expiredTicket = issueWsTicket(-1000); // Created already expired
+    const expiredWs = new WebSocket(`ws://127.0.0.1:${serverPort}/ws?ticket=${expiredTicket}`);
+    const expiredCloseCode = await new Promise<number>((resolve) => {
+      expiredWs.on('close', (code) => resolve(code));
+      expiredWs.on('error', () => {});
+    });
+    assert.strictEqual(expiredCloseCode, 1008, 'Expired ticket must be rejected with 1008');
+
+    // 12d: Invalid ticket must fail
+    const invalidWs = new WebSocket(`ws://127.0.0.1:${serverPort}/ws?ticket=non-existent-ticket-9999`);
+    const invalidCloseCode = await new Promise<number>((resolve) => {
+      invalidWs.on('close', (code) => resolve(code));
+      invalidWs.on('error', () => {});
+    });
+    assert.strictEqual(invalidCloseCode, 1008, 'Invalid ticket must be rejected with 1008');
+
+    // 12e: Memory cleanup test: tickets cannot accumulate indefinitely
+    const t1 = issueWsTicket(1000);
+    const t2 = issueWsTicket(1000);
+    assert.ok(wsTickets.has(t1), 'Active ticket t1 stored in memory');
+    assert.ok(wsTickets.has(t2), 'Active ticket t2 stored in memory');
+    const cleaned = cleanupExpiredWsTickets(Date.now() + 10_000);
+    assert.ok(cleaned >= 2, 'Expired tickets must be pruned');
+    assert.strictEqual(wsTickets.has(t1), false, 'Expired ticket t1 must be purged from memory');
+    assert.strictEqual(wsTickets.has(t2), false, 'Expired ticket t2 must be purged from memory');
+
+    // 12f: Handshake authentication message
     const handshakeWs = new WebSocket(`ws://127.0.0.1:${serverPort}/ws`);
     const handshakeConnected = await new Promise<boolean>((resolve) => {
       handshakeWs.on('open', () => {
@@ -389,7 +430,7 @@ async function runTests() {
     assert.strictEqual(handshakeConnected, true, 'WebSocket authenticated via AUTH handshake message must connect successfully');
     handshakeWs.close();
 
-    console.log('   ✓ WebSocket authentication strictly rejects query tokens and enforces tickets / handshake auth.');
+    console.log('   ✓ WebSocket authentication strictly rejects query tokens, enables browser tickets, and prunes expired entries from memory.');
   } finally {
     await server.close();
   }
