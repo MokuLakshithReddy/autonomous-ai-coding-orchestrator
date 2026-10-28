@@ -10,6 +10,7 @@ export interface CommandResult {
   exitCode: number;
   durationMs: number;
   timedOut?: boolean;
+  cancelled?: boolean;
 }
 
 export class AgentToolbox {
@@ -106,9 +107,20 @@ export class AgentToolbox {
   async executeCommand(
     commandStr: string,
     timeoutMs = 60000,
-    customEnv: Record<string, string> = {}
+    customEnv: Record<string, string> = {},
+    abortSignal?: AbortSignal
   ): Promise<CommandResult> {
     this.assertCommandSafety(commandStr);
+
+    if (abortSignal?.aborted) {
+      return {
+        stdout: '',
+        stderr: 'Command execution aborted prior to spawn.',
+        exitCode: 130,
+        durationMs: 0,
+        cancelled: true,
+      };
+    }
 
     const startTime = Date.now();
     const sanitizedEnv = SecurityPolicyEngine.getSanitizedProcessEnv(customEnv);
@@ -127,17 +139,33 @@ export class AgentToolbox {
       let stdout = '';
       let stderr = '';
       let timedOut = false;
+      let cancelled = false;
 
-      const timer = setTimeout(() => {
-        timedOut = true;
+      const terminateChild = (reason: 'timeout' | 'cancel') => {
         if (child.pid) {
           try {
             treeKill(child.pid, 'SIGKILL');
           } catch {
-            child.kill('SIGKILL');
+            try {
+              child.kill('SIGKILL');
+            } catch {}
           }
         }
+      };
+
+      const timer = setTimeout(() => {
+        timedOut = true;
+        terminateChild('timeout');
       }, timeoutMs);
+
+      const abortHandler = () => {
+        cancelled = true;
+        terminateChild('cancel');
+      };
+
+      if (abortSignal) {
+        abortSignal.addEventListener('abort', abortHandler, { once: true });
+      }
 
       child.stdout.on('data', (data) => {
         if (stdout.length < this.maxOutputBytes) {
@@ -157,31 +185,50 @@ export class AgentToolbox {
 
       child.on('close', (code) => {
         clearTimeout(timer);
+        if (abortSignal) {
+          abortSignal.removeEventListener('abort', abortHandler);
+        }
+
+        let finalStderr = stderr;
+        if (timedOut) {
+          finalStderr = `${stderr}\nExecution timeout reached after ${timeoutMs}ms.`;
+        } else if (cancelled) {
+          finalStderr = `${stderr}\nExecution cancelled by abort signal.`;
+        }
+
         resolve({
           stdout: SecurityPolicyEngine.redactSensitiveData(stdout),
-          stderr: SecurityPolicyEngine.redactSensitiveData(
-            timedOut ? `${stderr}\nExecution timeout reached after ${timeoutMs}ms.` : stderr
-          ),
-          exitCode: timedOut ? 124 : (code ?? 1),
+          stderr: SecurityPolicyEngine.redactSensitiveData(finalStderr),
+          exitCode: timedOut ? 124 : cancelled ? 130 : (code ?? 1),
           durationMs: Date.now() - startTime,
           timedOut,
+          cancelled,
         });
       });
 
       child.on('error', (err) => {
         clearTimeout(timer);
+        if (abortSignal) {
+          abortSignal.removeEventListener('abort', abortHandler);
+        }
         resolve({
           stdout: SecurityPolicyEngine.redactSensitiveData(stdout),
           stderr: SecurityPolicyEngine.redactSensitiveData(`Subprocess spawn error: ${err.message}`),
           exitCode: 1,
           durationMs: Date.now() - startTime,
           timedOut: false,
+          cancelled,
         });
       });
     });
   }
 
   private assertCommandSafety(command: string): void {
+    const policy = SecurityPolicyEngine.evaluateCommandRisk(command);
+    if (policy.riskLevel === 'CRITICAL') {
+      throw new Error(`Security Exception [Action Policy]: Destructive command blocked by safety engine: "${command}". Reason: ${policy.reason}`);
+    }
+
     const normalized = command.toLowerCase().trim();
     const forbiddenPatterns = [
       /\brm\s+-rf\s+[\/\\]/i,

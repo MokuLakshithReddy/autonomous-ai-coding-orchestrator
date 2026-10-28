@@ -11,7 +11,7 @@ export interface ActionPolicy {
 }
 
 export class SecurityPolicyEngine {
-  private static readonly SAFE_ENV_VARS = new Set([
+  public static readonly SAFE_ENV_VARS = new Set([
     'PATH',
     'PATHEXT',
     'SYSTEMROOT',
@@ -87,8 +87,8 @@ export class SecurityPolicyEngine {
   }
 
   /**
-   * Returns a sanitized environment variable map containing only allowlisted entries.
-   * Explicitly strips all host API keys and tokens.
+   * Returns a sanitized environment variable map.
+   * Validates custom variables against an explicit allowlist and blocks secret patterns.
    */
   static getSanitizedProcessEnv(customEnv: Record<string, string> = {}): Record<string, string> {
     const sanitized: Record<string, string> = {};
@@ -102,10 +102,22 @@ export class SecurityPolicyEngine {
     sanitized['CI'] = 'true';
     sanitized['NODE_ENV'] = sanitized['NODE_ENV'] || 'development';
 
-    // Merge explicitly allowed custom task environment variables
+    // Validate and merge only safe, explicitly allowed custom environment variables
     for (const [k, v] of Object.entries(customEnv)) {
-      if (v !== undefined) {
-        sanitized[k] = v;
+      const upperKey = k.toUpperCase();
+      const isDangerousKey =
+        upperKey.includes('KEY') ||
+        upperKey.includes('SECRET') ||
+        upperKey.includes('TOKEN') ||
+        upperKey.includes('PASSWORD') ||
+        upperKey.includes('CREDENTIAL') ||
+        upperKey.includes('AUTH') ||
+        upperKey.includes('PRIVATE');
+
+      if (v !== undefined && !isDangerousKey) {
+        if (this.SAFE_ENV_VARS.has(upperKey) || upperKey.startsWith('TASK_') || upperKey.startsWith('APP_')) {
+          sanitized[k] = v;
+        }
       }
     }
 
@@ -133,26 +145,37 @@ export class SecurityPolicyEngine {
   }
 
   /**
-   * Evaluates action risk level and determines if human approval is mandatory.
+   * Evaluates action risk level for planning milestones or step instructions.
    */
   static evaluateActionRisk(actionDescription: string, commandOrPath?: string): ActionPolicy {
-    const text = `${actionDescription} ${commandOrPath || ''}`.toLowerCase();
+    return this.evaluateCommandRisk(`${actionDescription} ${commandOrPath || ''}`);
+  }
 
-    // Critical operations: deployments, forced pushes, system changes
+  /**
+   * Enforces risk evaluation at the actual command execution boundary.
+   */
+  static evaluateCommandRisk(command: string): ActionPolicy {
+    const text = command.toLowerCase().trim();
+
+    // Critical operations: deployments, forced pushes, system formatting
     if (
-      /\b(git\s+push\s+.*--force|deploy|publish|production|drop\s+database|format\s+[a-z]:|rm\s+-rf\s+[\/\\])\b/i.test(
+      /\b(git\s+push\s+.*--force|deploy|publish|production|drop\s+database|format\s+[a-z]:|rm\s+-rf\s+[\/\\]|dd\s+if=)\b/i.test(
         text
       )
     ) {
       return {
         riskLevel: 'CRITICAL',
         requiresApproval: true,
-        reason: 'Potentially destructive or irreversible operation targeting external/production state.',
+        reason: 'Potentially destructive or irreversible operation targeting external or production systems.',
       };
     }
 
-    // High risk: protected branch mutations, deleting config or dependencies
-    if (/\b(delete|unlink|drop|reset|chmod|install-global)\b/i.test(text)) {
+    // High risk: protected branch mutations, deleting files, permission alteration, system changes
+    if (
+      /\b(rm\s+|del\s+|unlink\s+|rmdir\s+|git\s+reset|git\s+clean|chmod\s+|chown\s+|curl\s+.*\|\s*sh|wget\s+.*\|\s*sh|npm\s+publish)\b/i.test(
+        text
+      )
+    ) {
       return {
         riskLevel: 'HIGH',
         requiresApproval: config.requireApprovalForDestructive,
@@ -160,15 +183,15 @@ export class SecurityPolicyEngine {
       };
     }
 
-    // Moderate risk: file write, local build, test runs
-    if (/\b(write|create|modify|build|test|lint)\b/i.test(text)) {
+    // Moderate risk: file modification, installing dependencies, local build & test runs
+    if (/\b(npm\s+install|pnpm\s+add|pip\s+install|cargo\s+add|npm\s+run|npm\s+test|npx\s+|tsc|pytest)\b/i.test(text)) {
       return {
         riskLevel: 'MODERATE',
         requiresApproval: false,
       };
     }
 
-    // Low risk: reads, git status, tree inspection
+    // Low risk: read operations, inspection, git status, diff
     return {
       riskLevel: 'LOW',
       requiresApproval: false,

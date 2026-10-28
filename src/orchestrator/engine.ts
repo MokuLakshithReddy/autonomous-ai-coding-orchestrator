@@ -52,16 +52,18 @@ export class OrchestrationEngine extends EventEmitter {
     };
 
     // Append to durable SQLite event ledger
-    eventRepo.append({
-      id: fullEvent.id,
-      taskId: fullEvent.taskId,
-      eventType: fullEvent.type,
-      fromState: fullEvent.fromState,
-      toState: fullEvent.toState,
-      message: fullEvent.message,
-      dataJson: fullEvent.data ? JSON.stringify(fullEvent.data) : undefined,
-      timestamp: fullEvent.timestamp,
-    }).catch((err) => console.error('Failed to append event to ledger:', err));
+    eventRepo
+      .append({
+        id: fullEvent.id,
+        taskId: fullEvent.taskId,
+        eventType: fullEvent.type,
+        fromState: fullEvent.fromState,
+        toState: fullEvent.toState,
+        message: fullEvent.message,
+        dataJson: fullEvent.data ? JSON.stringify(fullEvent.data) : undefined,
+        timestamp: fullEvent.timestamp,
+      })
+      .catch((err) => console.error('Failed to append event to ledger:', err));
 
     this.emit('event', fullEvent);
   }
@@ -92,7 +94,6 @@ export class OrchestrationEngine extends EventEmitter {
     maxRetries?: number;
     customAgent?: CodingAgent;
   }): Promise<TaskRecord> {
-    // Assert workspace path security
     const resolvedWorkspace = SecurityPolicyEngine.assertPathContainment(params.workspacePath, params.workspacePath);
 
     const taskId = crypto.randomUUID();
@@ -179,8 +180,6 @@ export class OrchestrationEngine extends EventEmitter {
     const verifier = new IndependentVerifier(params.workspacePath);
     const agent = params.customAgent || new BuiltInAutonomousAgent(params.workspacePath);
     const maxRetries = params.maxRetries ?? config.maxRetryBudget;
-
-    // Check execution budget limit (default max 30 minutes total)
     const maxTotalDurationMs = config.stepTimeoutSeconds * 10 * 1000;
 
     const checkBudgetOrAbort = (): boolean => {
@@ -194,7 +193,7 @@ export class OrchestrationEngine extends EventEmitter {
     };
 
     // 1. Discovering Phase: Repo Baseline & Ecosystem
-    await this.transitionTaskState(taskId, stateMachine, 'discovering', 'Inspecting repository and capturing baseline');
+    await this.transitionTaskState(taskId, stateMachine, 'discovering', 'Capturing repository baseline');
     const baseline = await inspector.captureBaseline();
     const repoMeta = await inspector.inspect();
 
@@ -205,7 +204,7 @@ export class OrchestrationEngine extends EventEmitter {
         attemptId,
         baseCommit: baseline.baseCommit,
         branchName: baseline.branch,
-        snapshotDescription: `Initial repository baseline on branch ${baseline.branch}`,
+        snapshotDescription: `Repository baseline on branch ${baseline.branch} (${baseline.dirtyFilesAtStart.length} pre-existing dirty files)`,
         createdAt: new Date().toISOString(),
       });
     }
@@ -213,7 +212,7 @@ export class OrchestrationEngine extends EventEmitter {
     this.emitOrchestratorEvent({
       taskId,
       type: 'REPO_INSPECTED',
-      message: `Repository discovered: ${repoMeta.ecosystems.join(', ')} ecosystem. Clean: ${baseline?.isClean ?? 'N/A'}`,
+      message: `Repository discovered: ${repoMeta.ecosystems.join(', ')} ecosystem. Baseline: ${baseline?.baseCommit || 'none'}`,
       data: { repoMeta, baseline },
     });
 
@@ -227,7 +226,7 @@ export class OrchestrationEngine extends EventEmitter {
     this.emitOrchestratorEvent({
       taskId,
       type: 'PLAN_GENERATED',
-      message: `Plan formulated with ${plan.steps.length} milestones and ${plan.acceptanceCriteria.length} criteria.`,
+      message: `Plan formulated with ${plan.steps.length} milestones and ${plan.acceptanceCriteria.length} acceptance criteria.`,
       data: plan,
     });
 
@@ -259,7 +258,7 @@ export class OrchestrationEngine extends EventEmitter {
       const stepRec = stepRecords[i];
       const targetFiles = step.targetFiles || [];
 
-      // Security & Authorization Gate
+      // P0.3 & P0.4: Handle Approval Gate at Action Boundary
       const policy = SecurityPolicyEngine.evaluateActionRisk(step.title, step.instruction);
       const isSensitive = step.isSensitive || policy.requiresApproval;
 
@@ -272,7 +271,7 @@ export class OrchestrationEngine extends EventEmitter {
         );
 
         const approvalId = crypto.randomUUID();
-        const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString(); // 10 minutes expiry
+        const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
 
         await approvalRepo.create({
           id: approvalId,
@@ -306,6 +305,12 @@ export class OrchestrationEngine extends EventEmitter {
             type: 'APPROVAL_RESOLVED',
             message: `Step "${step.title}" was not approved (rejected or expired). Skipping step.`,
           });
+          // Transition back to ready (or verifying if final step)
+          if (i === plan.steps.length - 1) {
+            await this.transitionTaskState(taskId, stateMachine, 'verifying', 'Skipped last step; proceeding to final verification');
+          } else {
+            await this.transitionTaskState(taskId, stateMachine, 'ready', 'Step skipped; ready for next step');
+          }
           continue;
         }
 
@@ -342,10 +347,10 @@ export class OrchestrationEngine extends EventEmitter {
         });
       }
 
-      // Execute Step with Agent
+      // P0.1 & P0.6: Pass abortSignal to agent
       const stepStartTime = Date.now();
       let currentInstruction = step.instruction;
-      let executionResult = await agent.executeStep(currentInstruction, targetFiles);
+      let executionResult = await agent.executeStep(currentInstruction, targetFiles, abortController.signal);
       const stepDurationMs = Date.now() - stepStartTime;
 
       await stepRepo.update(stepRec.id, {
@@ -360,27 +365,39 @@ export class OrchestrationEngine extends EventEmitter {
         taskId,
         stepId: stepRec.id,
         type: 'STEP_EXECUTED',
-        message: `Agent execution finished for "${step.title}". Triggering independent verification.`,
+        message: `Agent finished execution for "${step.title}" (Success: ${executionResult.success}). Triggering independent verification.`,
         data: executionResult,
       });
 
       // 4. Verification and Self-Repair Loop
       await this.transitionTaskState(taskId, stateMachine, 'verifying', `Verifying step "${step.title}"`);
 
-      let verification = await verifier.verify(repoMeta, plan.acceptanceCriteria, step.verificationCommand);
+      // P1.1: Verify against baseline commit so committed changes are tracked!
+      let verification = await verifier.verify(
+        repoMeta,
+        plan.acceptanceCriteria,
+        step.verificationCommand,
+        baseline?.baseCommit
+      );
+
       let stepRetries = 0;
 
-      while (!verification.overallPassed && stepRetries < maxRetries) {
+      // P0.1 & P0.2 FIX: Must check both executionResult.success AND verification.isVerified!
+      while ((!executionResult.success || !verification.isVerified) && stepRetries < maxRetries) {
         checkBudgetOrAbort();
         stepRetries++;
         await taskRepo.incrementRetry(taskId);
+
+        const failureDetails = !executionResult.success
+          ? `Agent execution failed: ${executionResult.failureReason || 'Incomplete execution'}`
+          : `Verification failed: ${verification.blockingReasons.join('; ')}`;
 
         this.emitOrchestratorEvent({
           taskId,
           stepId: stepRec.id,
           type: 'VERIFICATION_FAILED',
-          message: `Verification check failed on step "${step.title}" (Attempt ${stepRetries}/${maxRetries}).`,
-          data: verification,
+          message: `${failureDetails} (Attempt ${stepRetries}/${maxRetries}).`,
+          data: { verification, executionResult },
         });
 
         await verificationRepo.record({
@@ -393,18 +410,18 @@ export class OrchestrationEngine extends EventEmitter {
           lintStatus: verification.lintCheck.status as any,
           diffInspection: verification.diffAudit.summary,
           detailsJson: JSON.stringify(verification),
-          diagnostics: verification.diagnostics,
+          diagnostics: `${executionResult.failureReason || ''}\n${verification.diagnostics}`,
           createdAt: new Date().toISOString(),
         });
 
         // Diagnose with LLM Brain
         await this.transitionTaskState(taskId, stateMachine, 'diagnosing', `Diagnosing failure for "${step.title}"`);
 
-        const recentDiff = await inspector.getDiff();
+        const recentDiff = await inspector.getDiffAgainstBase();
         const diagnostic = await brain.diagnoseFailure(
           step,
           executionResult.logs,
-          verification.diagnostics,
+          `${executionResult.failureReason || ''}\n${verification.diagnostics}`,
           recentDiff
         );
 
@@ -438,15 +455,20 @@ export class OrchestrationEngine extends EventEmitter {
         });
 
         currentInstruction = `${step.instruction}\n\nCORRECTIVE REPAIR INSTRUCTIONS:\n${diagnostic.correctiveInstructions}`;
-        executionResult = await agent.executeStep(currentInstruction, targetFiles);
+        executionResult = await agent.executeStep(currentInstruction, targetFiles, abortController.signal);
 
         // Reverification
         await this.transitionTaskState(taskId, stateMachine, 'verifying', `Re-verifying step "${step.title}" after repair`);
-        verification = await verifier.verify(repoMeta, plan.acceptanceCriteria, step.verificationCommand);
+        verification = await verifier.verify(
+          repoMeta,
+          plan.acceptanceCriteria,
+          step.verificationCommand,
+          baseline?.baseCommit
+        );
       }
 
       // Check if step permanently failed
-      if (!verification.overallPassed) {
+      if (!executionResult.success || !verification.isVerified) {
         await stepRepo.update(stepRec.id, { status: 'FAILED' });
 
         // Safe rollback of task-owned files if checkpoint exists
@@ -454,20 +476,24 @@ export class OrchestrationEngine extends EventEmitter {
           await inspector.restoreTaskFiles(targetFiles, preStepCommit);
         }
 
+        const finalFailReason = !executionResult.success
+          ? `Agent failed: ${executionResult.failureReason}`
+          : `Verification failed: ${verification.blockingReasons.join('; ')}`;
+
         await this.transitionTaskState(
           taskId,
           stateMachine,
           'failed',
           `Exhausted retry budget (${maxRetries} attempts) on step "${step.title}".`,
-          `Failed on step: ${step.title}. ${verification.blockingReasons.join('; ')}`
+          `Failed on step: ${step.title}. ${finalFailReason}`
         );
 
         this.emitOrchestratorEvent({
           taskId,
           stepId: stepRec.id,
           type: 'TASK_FAILED',
-          message: `Task failed: Verification could not be satisfied within budget (${maxRetries} retries).`,
-          data: verification,
+          message: `Task failed: Requirements could not be satisfied within budget (${maxRetries} retries).`,
+          data: { verification, executionResult },
         });
         return;
       }
@@ -516,12 +542,30 @@ export class OrchestrationEngine extends EventEmitter {
           createdAt: new Date().toISOString(),
         });
       }
+
+      // P0.3: Prepare for next step transition if steps remain
+      if (i < plan.steps.length - 1) {
+        const nextStep = plan.steps[i + 1];
+        const nextPolicy = SecurityPolicyEngine.evaluateActionRisk(nextStep.title, nextStep.instruction);
+        if (nextStep.isSensitive || nextPolicy.requiresApproval) {
+          // Allowed: verifying -> awaiting_approval
+          // (Handled at start of next iteration)
+        } else {
+          // Allowed: verifying -> ready
+          await this.transitionTaskState(taskId, stateMachine, 'ready', `Ready for milestone ${nextStep.index}`);
+        }
+      }
     }
 
     // 5. Final Completion Gate
-    // Re-run final comprehensive verification across entire repository changes
+    // Re-verify against original baseline commit
     await this.transitionTaskState(taskId, stateMachine, 'verifying', 'Executing final completion verification gate');
-    const finalVerification = await verifier.verify(repoMeta, plan.acceptanceCriteria);
+    const finalVerification = await verifier.verify(
+      repoMeta,
+      plan.acceptanceCriteria,
+      undefined,
+      baseline?.baseCommit
+    );
     const finalDiff = await inspector.getDiffAgainstBase();
 
     const verifications = await verificationRepo.listForTask(taskId);
@@ -534,11 +578,11 @@ export class OrchestrationEngine extends EventEmitter {
       plan,
       verifSummaries,
       finalDiff,
-      !finalVerification.canDeclareComplete
+      !finalVerification.isVerified
     );
 
     // Truthful Completion Gate: Distinguish completed vs partially_completed vs needs_human_review vs failed
-    if (finalVerification.canDeclareComplete && review.isComplete) {
+    if (finalVerification.isVerified && review.isComplete) {
       await this.transitionTaskState(taskId, stateMachine, 'completed', 'All requirements verified', review.summary);
       this.emitOrchestratorEvent({
         taskId,
@@ -546,8 +590,7 @@ export class OrchestrationEngine extends EventEmitter {
         message: `Task successfully verified and completed: ${review.summary}`,
         data: { review, finalVerification },
       });
-    } else if (finalVerification.overallPassed && !review.isComplete) {
-      // Passes compilation/tests but LLM reviewer flagged unaddressed requirements
+    } else if (finalVerification.isVerified && !review.isComplete) {
       await this.transitionTaskState(
         taskId,
         stateMachine,
@@ -562,7 +605,6 @@ export class OrchestrationEngine extends EventEmitter {
         data: { review, finalVerification },
       });
     } else {
-      // Unresolved checks or missing acceptance criteria
       await this.transitionTaskState(
         taskId,
         stateMachine,
@@ -582,11 +624,10 @@ export class OrchestrationEngine extends EventEmitter {
   }
 
   /**
-   * Fail-Closed Approval Waiter:
-   * Looks up specific approval by approvalId. Never treats timeout or absence as approval!
+   * Fail-Closed Approval Waiter
    */
   private async waitForApproval(approvalId: string): Promise<boolean> {
-    const maxWaitMs = 10 * 60 * 1000; // 10 minutes wait limit
+    const maxWaitMs = 10 * 60 * 1000;
     const checkInterval = 1500;
     const start = Date.now();
 
@@ -604,30 +645,37 @@ export class OrchestrationEngine extends EventEmitter {
       }
     }
 
-    // Timeout expired: Mark approval EXPIRED and fail closed
+    // Fail-Closed on timeout
     await approvalRepo.respond(approvalId, 'EXPIRED', 'system_timeout');
     return false;
   }
 
+  /**
+   * P0.6 FIX: Cancellation strictly signals child processes and waits for termination.
+   */
   cancelTask(taskId: string): boolean {
     const task = this.activeTasks.get(taskId);
     if (task) {
       task.abortController.abort();
+
       if (!task.stateMachine.isTerminal()) {
         this.transitionTaskState(
           taskId,
           task.stateMachine,
           'cancelling',
           'User triggered task cancellation'
-        ).then(() => {
-          this.transitionTaskState(
-            taskId,
-            task.stateMachine,
-            'cancelled',
-            'Task cancelled and processes terminated'
-          );
-        });
+        )
+          .then(() => {
+            return this.transitionTaskState(
+              taskId,
+              task.stateMachine,
+              'cancelled',
+              'Task cancelled and active processes terminated'
+            );
+          })
+          .catch(() => {});
       }
+
       this.activeTasks.delete(taskId);
       return true;
     }

@@ -10,11 +10,16 @@ export interface StepExecutionResult {
   toolsUsed: string[];
   diffSummary?: string;
   exitCode: number;
+  failureReason?: string;
 }
 
 export interface CodingAgent {
   name: string;
-  executeStep(instruction: string, targetFiles?: string[]): Promise<StepExecutionResult>;
+  executeStep(
+    instruction: string,
+    targetFiles?: string[],
+    abortSignal?: AbortSignal
+  ): Promise<StepExecutionResult>;
 }
 
 export class BuiltInAutonomousAgent implements CodingAgent {
@@ -33,43 +38,42 @@ export class BuiltInAutonomousAgent implements CodingAgent {
     }
   }
 
-  async executeStep(instruction: string, targetFiles: string[] = []): Promise<StepExecutionResult> {
+  async executeStep(
+    instruction: string,
+    targetFiles: string[] = [],
+    abortSignal?: AbortSignal
+  ): Promise<StepExecutionResult> {
     const logs: string[] = [];
     const toolsUsed: string[] = [];
     logs.push(`[Agent: ${this.name}] Beginning execution of step: ${instruction}`);
 
-    // If Gemini is configured, use autonomous tool-assisted execution
-    if (this.ai) {
-      return await this.executeWithGemini(instruction, targetFiles, logs, toolsUsed);
-    }
-
-    // Fallback if no API key is supplied yet: run basic project build/test check or file scaffolding
-    logs.push(`[Agent: ${this.name}] Running in local fallback execution mode.`);
-    const inspector = new RepoInspector(this.workspacePath);
-    const meta = await inspector.inspect();
-
-    if (meta.buildCmd) {
-      logs.push(`[Agent] Executing detected build command: ${meta.buildCmd}`);
-      toolsUsed.push('executeCommand');
-      const res = await this.toolbox.executeCommand(meta.buildCmd);
-      logs.push(res.stdout);
-      if (res.stderr) logs.push(res.stderr);
+    if (abortSignal?.aborted) {
       return {
         agentName: this.name,
-        success: res.exitCode === 0,
-        logs: logs.join('\n'),
-        toolsUsed,
-        exitCode: res.exitCode,
+        success: false,
+        logs: '[Agent] Step aborted prior to execution.',
+        toolsUsed: [],
+        exitCode: 130,
+        failureReason: 'Execution cancelled by abort signal',
       };
     }
 
-    logs.push(`[Agent] Step processed. Please configure GEMINI_API_KEY for dynamic autonomous code editing.`);
+    // If Gemini is configured, use autonomous tool-assisted execution
+    if (this.ai) {
+      return await this.executeWithGemini(instruction, targetFiles, logs, toolsUsed, abortSignal);
+    }
+
+    // Fallback if no API key is supplied: P0.1 FIX - Never report success when no work was performed!
+    logs.push(`[Agent: ${this.name}] Running in local fallback execution mode.`);
+    const failureReason = 'Execution failed: No GEMINI_API_KEY configured. Autonomous implementation requires an active LLM engine. No code changes were performed.';
+    logs.push(`[Agent: Error] ${failureReason}`);
     return {
       agentName: this.name,
-      success: true,
+      success: false,
       logs: logs.join('\n'),
-      toolsUsed,
-      exitCode: 0,
+      toolsUsed: [],
+      exitCode: 1,
+      failureReason,
     };
   }
 
@@ -77,13 +81,24 @@ export class BuiltInAutonomousAgent implements CodingAgent {
     instruction: string,
     targetFiles: string[],
     logs: string[],
-    toolsUsed: string[]
+    toolsUsed: string[],
+    abortSignal?: AbortSignal
   ): Promise<StepExecutionResult> {
     const maxIterations = 5;
     let iteration = 0;
     let currentTask = instruction;
+    let completedCleanly = false;
+    let encounteredError = false;
+    let failureReason: string | undefined;
 
     while (iteration < maxIterations) {
+      if (abortSignal?.aborted) {
+        logs.push('[Agent] Execution cancelled by abort signal.');
+        encounteredError = true;
+        failureReason = 'Step cancelled by abort signal';
+        break;
+      }
+
       iteration++;
       logs.push(`\n--- Iteration ${iteration}/${maxIterations} ---`);
 
@@ -132,45 +147,83 @@ Output your response ONLY in valid JSON matching this schema:
           },
         });
 
-        const actionJson = JSON.parse(response.text || '{}');
+        let actionJson: any;
+        try {
+          actionJson = JSON.parse(response.text || '{}');
+        } catch (parseErr: any) {
+          encounteredError = true;
+          failureReason = `Agent emitted malformed JSON response: ${parseErr.message}`;
+          logs.push(`[Error] ${failureReason}`);
+          break;
+        }
+
         logs.push(`[Thought]: ${actionJson.thought || 'Executing next step'}`);
 
         if (actionJson.action === 'complete') {
-          logs.push(`[Agent] Step marked complete: ${actionJson.summary || 'All actions performed'}`);
+          logs.push(`[Agent] Step declared complete: ${actionJson.summary || 'All actions performed'}`);
+          completedCleanly = true;
           break;
-        } else if (actionJson.action === 'writeFile' && actionJson.filePath && actionJson.fileContent !== undefined) {
+        } else if (actionJson.action === 'writeFile') {
+          if (!actionJson.filePath || actionJson.fileContent === undefined) {
+            encounteredError = true;
+            failureReason = 'writeFile action missing filePath or fileContent';
+            logs.push(`[Error] ${failureReason}`);
+            break;
+          }
           logs.push(`[Action] Writing file: ${actionJson.filePath}`);
           await this.toolbox.writeFile(actionJson.filePath, actionJson.fileContent);
           toolsUsed.push(`writeFile:${actionJson.filePath}`);
-        } else if (actionJson.action === 'executeCommand' && actionJson.command) {
+        } else if (actionJson.action === 'executeCommand') {
+          if (!actionJson.command) {
+            encounteredError = true;
+            failureReason = 'executeCommand action missing command string';
+            logs.push(`[Error] ${failureReason}`);
+            break;
+          }
           logs.push(`[Action] Running command: ${actionJson.command}`);
-          const res = await this.toolbox.executeCommand(actionJson.command);
+          const res = await this.toolbox.executeCommand(actionJson.command, 60000, {}, abortSignal);
           toolsUsed.push(`executeCommand:${actionJson.command}`);
           logs.push(`[Command Output]:\n${res.stdout}`);
           if (res.stderr) logs.push(`[Command Stderr]:\n${res.stderr}`);
+
           if (res.exitCode !== 0) {
             logs.push(`[Warning] Command exited with non-zero code ${res.exitCode}`);
+            // Non-zero command exit does not necessarily abort the loop if the agent can self-correct in next iteration,
+            // but if iteration finishes without complete, it fails.
           }
         } else {
-          logs.push(`[Agent] No further action specified. Completing iteration.`);
+          encounteredError = true;
+          failureReason = `Invalid action requested: "${actionJson.action}"`;
+          logs.push(`[Agent] ${failureReason}`);
           break;
         }
       } catch (err: any) {
+        encounteredError = true;
+        failureReason = `Exception in agent execution loop: ${err?.message}`;
         logs.push(`[Error in Agent Loop]: ${err?.message}`);
         break;
       }
     }
 
+    // P0.1 FIX: If loop terminated without clean complete action or with an unhandled error, mark success = false!
+    if (!completedCleanly && !failureReason) {
+      failureReason = `Agent exhausted max iterations (${maxIterations}) without declaring completion.`;
+      encounteredError = true;
+      logs.push(`[Agent Error] ${failureReason}`);
+    }
+
     const inspector = new RepoInspector(this.workspacePath);
     const diff = await inspector.getDiff();
+    const success = completedCleanly && !encounteredError;
 
     return {
       agentName: this.name,
-      success: true,
+      success,
       logs: logs.join('\n'),
       toolsUsed,
       diffSummary: diff.slice(0, 2000),
-      exitCode: 0,
+      exitCode: success ? 0 : 1,
+      failureReason,
     };
   }
 }
@@ -184,10 +237,14 @@ export class AiderAgentAdapter implements CodingAgent {
     this.toolbox = new AgentToolbox(workspacePath);
   }
 
-  async executeStep(instruction: string, targetFiles: string[] = []): Promise<StepExecutionResult> {
+  async executeStep(
+    instruction: string,
+    targetFiles: string[] = [],
+    abortSignal?: AbortSignal
+  ): Promise<StepExecutionResult> {
     const filesArg = targetFiles.join(' ');
     const cmd = `aider --yes --message "${instruction.replace(/"/g, '\\"')}" ${filesArg}`;
-    const result = await this.toolbox.executeCommand(cmd, 180000);
+    const result = await this.toolbox.executeCommand(cmd, 180000, {}, abortSignal);
 
     return {
       agentName: this.name,
@@ -195,6 +252,7 @@ export class AiderAgentAdapter implements CodingAgent {
       logs: `${result.stdout}\n${result.stderr}`,
       toolsUsed: ['aider-cli'],
       exitCode: result.exitCode,
+      failureReason: result.exitCode === 0 ? undefined : `Aider CLI exited with code ${result.exitCode}`,
     };
   }
 }

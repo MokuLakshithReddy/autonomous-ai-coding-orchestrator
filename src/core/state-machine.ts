@@ -37,8 +37,16 @@ export class TaskStateMachine {
     queued: ['discovering', 'cancelling', 'cancelled', 'failed'],
     discovering: ['planning', 'blocked', 'failed', 'cancelling'],
     planning: ['ready', 'awaiting_approval', 'blocked', 'failed', 'cancelling'],
-    awaiting_approval: ['ready', 'executing', 'blocked', 'needs_human_review', 'cancelling', 'failed'],
-    ready: ['executing', 'cancelling', 'failed'],
+    awaiting_approval: [
+      'ready',
+      'executing',
+      'verifying',
+      'blocked',
+      'needs_human_review',
+      'cancelling',
+      'failed',
+    ],
+    ready: ['executing', 'awaiting_approval', 'cancelling', 'failed'],
     executing: ['verifying', 'awaiting_approval', 'failed', 'cancelling'],
     verifying: [
       'completed',
@@ -48,16 +56,19 @@ export class TaskStateMachine {
       'blocked',
       'failed',
       'executing',
+      'ready',
+      'awaiting_approval',
       'cancelling',
     ],
     diagnosing: ['repairing', 'blocked', 'needs_human_review', 'failed', 'cancelling'],
     repairing: ['verifying', 'executing', 'blocked', 'failed', 'cancelling'],
     cancelling: ['cancelled', 'failed'],
+    // Non-terminal escalation states can transition to resume or cancel
+    blocked: ['planning', 'ready', 'cancelling', 'failed'],
+    needs_human_review: ['planning', 'ready', 'verifying', 'cancelling', 'failed'],
     // Terminal states have no forward transitions
     completed: [],
     partially_completed: [],
-    blocked: ['planning', 'ready', 'cancelling'], // Blocked tasks can be resumed or cancelled
-    needs_human_review: ['planning', 'ready', 'cancelling', 'failed'],
     failed: [],
     cancelled: [],
   };

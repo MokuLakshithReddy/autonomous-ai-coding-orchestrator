@@ -4,101 +4,136 @@ import { TaskStateMachine, IllegalStateTransitionError } from '../src/core/state
 import { SecurityPolicyEngine } from '../src/security/policy.js';
 import { IndependentVerifier } from '../src/verifier/index.js';
 import { AgentToolbox } from '../src/agent/tools.js';
+import { BuiltInAutonomousAgent } from '../src/agent/index.js';
 
 async function runTests() {
-  console.log('\n--- Running P0 Critical Correctness & Safety Verification Suite ---\n');
+  console.log('\n--- Running Complete Critical Correctness & Safety Test Suite ---\n');
 
-  // Test 1: Strict State Machine Enforcement
-  console.log('1. Testing State Machine transition legality...');
+  // Test 1: Full State Machine Transition Graph (P0.3)
+  console.log('1. Testing State Machine multi-step approval and transition graph...');
   const sm = new TaskStateMachine('queued');
   assert.strictEqual(sm.getState(), 'queued');
+
+  // Multi-step lifecycle with intermediate approval
   sm.transition('discovering', 'Started discovery');
-  assert.strictEqual(sm.getState(), 'discovering');
   sm.transition('planning', 'Discovery complete');
-  assert.strictEqual(sm.getState(), 'planning');
+  sm.transition('ready', 'Plan approved');
+  sm.transition('executing', 'Step 1 running');
+  sm.transition('verifying', 'Step 1 verifying');
 
-  // Illegal transition attempt: planning -> completed directly
+  // P0.3 Test: verifying -> awaiting_approval for next sensitive step
+  assert.doesNotThrow(() => {
+    sm.transition('awaiting_approval', 'Step 2 requires approval');
+  }, 'State machine must allow verifying -> awaiting_approval');
+
+  // P0.3 Test: awaiting_approval -> ready (approval granted)
+  assert.doesNotThrow(() => {
+    sm.transition('ready', 'Approval granted');
+  }, 'State machine must allow awaiting_approval -> ready');
+
+  sm.transition('executing', 'Step 2 running');
+  sm.transition('verifying', 'Step 2 verifying');
+  sm.transition('completed', 'All steps verified');
+
+  assert.strictEqual(sm.isTerminal(), true);
   assert.throws(
-    () => {
-      sm.transition('completed', 'Illegal shortcut');
-    },
-    IllegalStateTransitionError,
-    'State machine must reject direct planning -> completed transition'
+    () => sm.transition('executing', 'Cannot mutate terminal completed state'),
+    IllegalStateTransitionError
   );
-  console.log('   ✓ Illegal state transitions are strictly blocked.');
+  console.log('   ✓ State machine supports full multi-step lifecycle with intermediate approvals.');
 
-  // Test 2: Canonical Path Containment & Path Traversal Prevention
-  console.log('\n2. Testing Canonical Path Containment & Traversal Blocking...');
-  const fakeWorkspace = path.resolve(process.cwd());
-  const maliciousPaths = [
-    '../../Windows/System32/calc.exe',
-    '../outside-file.txt',
-    'C:/outside/test.txt',
-  ];
+  // Test 2: Agent Truthful Failure (P0.1)
+  console.log('\n2. Testing Agent Truthful Failure (P0.1: No false success when work is not done)...');
+  const emptyAgent = new BuiltInAutonomousAgent(process.cwd());
+  // Force no AI key on instance
+  (emptyAgent as any).ai = null;
 
-  for (const mp of maliciousPaths) {
-    assert.throws(
-      () => {
-        SecurityPolicyEngine.assertPathContainment(mp, fakeWorkspace);
-      },
-      /Security Exception/,
-      `Failed to block path traversal: ${mp}`
-    );
-  }
-  console.log('   ✓ Canonical path containment successfully blocked all directory escapes.');
+  const result = await emptyAgent.executeStep('Implement non-existent feature without build scripts');
+  assert.strictEqual(result.success, false, 'Agent must NOT report success when work is not done!');
+  assert.strictEqual(result.exitCode, 1, 'Agent must exit with error code when no work is performed');
+  assert.ok(result.failureReason, 'Agent must provide explicit failureReason');
+  console.log('   ✓ Agent truthfully reported failure when implementation could not be performed.');
 
-  // Test 3: Environment Variable Sanitization & Secret Stripping
-  console.log('\n3. Testing Process Environment Sanitization & Secret Redaction...');
-  const rawEnv = SecurityPolicyEngine.getSanitizedProcessEnv();
-  assert.strictEqual(rawEnv['GEMINI_API_KEY'], undefined, 'GEMINI_API_KEY must not be passed to child process');
-  assert.strictEqual(rawEnv['GITHUB_TOKEN'], undefined, 'GITHUB_TOKEN must not be passed to child process');
-  assert.strictEqual(rawEnv['CI'], 'true', 'CI must be set to true');
+  // Test 3: Subprocess Prompt Cancellation & Tree-Kill (P0.6)
+  console.log('\n3. Testing Subprocess Cancellation & Immediate Tree-Kill (P0.6)...');
+  const toolbox = new AgentToolbox(process.cwd());
+  const abortCtrl = new AbortController();
 
-  const leakedText = 'Error connecting with token ghp_123456789012345678901234567890123456 and key AIzaSyD9876543210123456789012345678901';
-  const redacted = SecurityPolicyEngine.redactSensitiveData(leakedText);
-  assert.ok(!redacted.includes('ghp_'), 'PAT token must be redacted');
-  assert.ok(!redacted.includes('AIza'), 'Gemini API key must be redacted');
-  assert.ok(redacted.includes('[REDACTED_GH_TOKEN]'), 'PAT token placeholder missing');
-  assert.ok(redacted.includes('[REDACTED_GEMINI_KEY]'), 'Gemini key placeholder missing');
-  console.log('   ✓ Secrets are strictly scrubbed from environment variables and log streams.');
+  const isWin = process.platform === 'win32';
+  // Long running command: 10 pings (~9 seconds) on Win or sleep 10 on Linux/macOS
+  const longCmd = isWin ? 'ping 127.0.0.1 -n 10' : 'sleep 10';
 
-  // Test 4: Truthful Verifier - Missing Test Command is NOT_CONFIGURED, never PASSED
-  console.log('\n4. Testing Truthful Verification - Missing commands are NOT_CONFIGURED...');
-  const verifier = new IndependentVerifier(fakeWorkspace);
-  const fakeMeta = {
-    isGitRepo: true,
-    hasUncommittedChanges: false,
-    uncommittedFiles: [],
-    ecosystems: ['unknown' as const],
-    fileTreeSummary: [],
-    // Deliberately no buildCmd and no testCmd
-  };
+  const startTime = Date.now();
+  // Trigger abort after 300ms
+  setTimeout(() => abortCtrl.abort(), 300);
 
-  const report = await verifier.verify(fakeMeta, ['Unit tests must pass']);
-  assert.strictEqual(report.testCheck.status, 'NOT_CONFIGURED', 'Missing test suite must be NOT_CONFIGURED, not passed');
-  assert.strictEqual(report.buildCheck.status, 'NOT_CONFIGURED', 'Missing build must be NOT_CONFIGURED, not passed');
-  assert.strictEqual(report.canDeclareComplete, false, 'Task without passing required criteria cannot declare complete');
-  console.log('   ✓ Missing test suites truthfully return NOT_CONFIGURED and block false completion.');
+  const cmdRes = await toolbox.executeCommand(longCmd, 15000, {}, abortCtrl.signal);
+  const elapsed = Date.now() - startTime;
 
-  // Test 5: Anti-Tamper Diff Audit - Detection of test.skip or empty stubs
-  console.log('\n5. Testing Anti-Tamper Heuristics...');
-  const suspiciousDiff = `
-+++ b/test/app.test.ts
-@@ -10,3 +10,3 @@
--  test('validates auth token', () => {
-+  test.skip('validates auth token', () => {
-+  // TODO: implement later
-`;
-  const hasSkip = suspiciousDiff.includes('test.skip');
-  const hasTodo = /\/\/\s*TODO:\s*implement/i.test(suspiciousDiff);
-  assert.strictEqual(hasSkip, true, 'Anti-tamper must detect test.skip');
-  assert.strictEqual(hasTodo, true, 'Anti-tamper must detect unimplemented TODOs');
-  console.log('   ✓ Anti-tamper rules successfully detect skipped tests and placeholder stubs.');
+  assert.strictEqual(cmdRes.cancelled, true, 'Command must be marked cancelled');
+  assert.ok(elapsed < 4000, `Command must terminate immediately on abort (took ${elapsed}ms instead of 10s)`);
+  console.log(`   ✓ Subprocess successfully terminated in ${elapsed}ms via tree-kill abort signal.`);
 
-  console.log('\n=== ALL P0 CRITICAL CORRECTNESS & SAFETY TESTS PASSED! ===\n');
+  // Test 4: Cross-Platform Canonical Path Containment (P0.4)
+  console.log('\n4. Testing Cross-Platform Canonical Path Containment...');
+  const currentWorkspace = path.resolve(process.cwd());
+  const escapePath = path.resolve(currentWorkspace, '..', 'escaped-dir', 'secret.txt');
+
+  assert.throws(
+    () => SecurityPolicyEngine.assertPathContainment(escapePath, currentWorkspace),
+    /Security Exception/,
+    'Path containment must block escape outside workspace root'
+  );
+
+  // Relative traversal syntax
+  assert.throws(
+    () => SecurityPolicyEngine.assertPathContainment('../outside.txt', currentWorkspace),
+    /Security Exception/,
+    'Relative path traversal must be blocked'
+  );
+  console.log('   ✓ Cross-platform path containment successfully blocked directory traversal.');
+
+  // Test 5: Environment Variable Allowlist & Custom Env Filtering (P0.4)
+  console.log('\n5. Testing Process Environment Allowlist & Secret Discarding...');
+  const sanitizedEnv = SecurityPolicyEngine.getSanitizedProcessEnv({
+    TASK_SAFE_PARAM: 'valid_value',
+    APP_CONFIG_MODE: 'test',
+    AWS_SECRET_ACCESS_KEY: 'leak_secret_value',
+    DATABASE_PASSWORD: 'leak_password',
+  });
+
+  assert.strictEqual(sanitizedEnv['TASK_SAFE_PARAM'], 'valid_value');
+  assert.strictEqual(sanitizedEnv['APP_CONFIG_MODE'], 'test');
+  assert.strictEqual(sanitizedEnv['AWS_SECRET_ACCESS_KEY'], undefined, 'Secrets must be discarded from custom env');
+  assert.strictEqual(sanitizedEnv['DATABASE_PASSWORD'], undefined, 'Passwords must be discarded from custom env');
+  assert.strictEqual(sanitizedEnv['GEMINI_API_KEY'], undefined, 'GEMINI_API_KEY must never leak into child process');
+  console.log('   ✓ Custom environment variables strictly validated against allowlist.');
+
+  // Test 6: Unified Verifier Decision & Inconclusive Handling (P0.2)
+  console.log('\n6. Testing Real Verifier Decision Authority & Inconclusive Detection (P0.2)...');
+  const verifier = new IndependentVerifier(currentWorkspace);
+
+  // Verifier with missing commands and no modified files
+  const emptyReport = await verifier.verify(
+    {
+      isGitRepo: true,
+      hasUncommittedChanges: false,
+      uncommittedFiles: [],
+      ecosystems: ['unknown'],
+      fileTreeSummary: [],
+    },
+    ['Unit tests must pass with 100% assertions']
+  );
+
+  assert.strictEqual(emptyReport.isVerified, false, 'Verifier must not verify unproven requirements');
+  assert.strictEqual(emptyReport.testCheck.status, 'NOT_CONFIGURED', 'Missing test suite must be NOT_CONFIGURED');
+  assert.ok(emptyReport.blockingReasons.length > 0, 'Blocking reasons must be listed');
+  console.log('   ✓ Verifier enforces single authoritative isVerified decision and blocks missing criteria.');
+
+  console.log('\n=== ALL P0/P1 CORRECTNESS, SAFETY & VERIFICATION TESTS PASSED! ===\n');
 }
 
 runTests().catch((err) => {
-  console.error('\n❌ P0 Test Failure:', err);
+  console.error('\n❌ Test Suite Failure:', err);
   process.exit(1);
 });

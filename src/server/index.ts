@@ -16,6 +16,7 @@ import {
 import { RepoInspector } from '../repo/inspector.js';
 import { orchestrator, type OrchestratorEvent } from '../orchestrator/engine.js';
 import { LLMBrain } from '../llm/index.js';
+import { SecurityPolicyEngine } from '../security/policy.js';
 
 export async function createServer() {
   await initDatabase();
@@ -24,13 +25,30 @@ export async function createServer() {
     logger: false,
   });
 
+  // P0.4 FIX: Replace wildcard CORS with strict origin validation
+  const allowedOrigins = [
+    `http://localhost:${config.port}`,
+    `http://127.0.0.1:${config.port}`,
+    'http://localhost:3000',
+    'http://127.0.0.1:3000',
+  ];
+
   await fastify.register(cors, {
-    origin: '*',
+    origin: (origin, cb) => {
+      // Allow requests with no origin (e.g. mobile apps, curl, server-to-server) or from allowed local origins
+      if (!origin || allowedOrigins.includes(origin)) {
+        cb(null, true);
+        return;
+      }
+      cb(new Error(`CORS blocked: Origin "${origin}" not authorized.`), false);
+    },
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    credentials: true,
   });
 
   await fastify.register(websocket);
 
+  // Serve static web frontend bundle if available
   const webDistPath = path.join(process.cwd(), 'web/dist');
   if (fs.existsSync(webDistPath)) {
     await fastify.register(fastifyStatic, {
@@ -52,7 +70,6 @@ export async function createServer() {
     const payload = JSON.stringify(event);
     for (const client of wsClients) {
       if (client.readyState === 1) {
-        // OPEN
         client.send(payload);
       }
     }
@@ -60,6 +77,13 @@ export async function createServer() {
 
   fastify.register(async function (fastifyInstance) {
     fastifyInstance.get('/ws', { websocket: true }, (socket, req) => {
+      // Validate origin if present
+      const origin = req.headers.origin;
+      if (origin && !allowedOrigins.includes(origin)) {
+        socket.close(1008, 'Origin not authorized');
+        return;
+      }
+
       wsClients.add(socket);
       socket.send(
         JSON.stringify({
@@ -103,9 +127,11 @@ export async function createServer() {
   // Repository Inspection Endpoint
   fastify.post<{ Body: { workspacePath?: string } }>('/api/repo/inspect', async (req) => {
     const targetPath = req.body?.workspacePath || process.cwd();
-    const inspector = new RepoInspector(targetPath);
+    // Validate workspace path safety
+    const safeWorkspace = SecurityPolicyEngine.assertPathContainment(targetPath, targetPath);
+    const inspector = new RepoInspector(safeWorkspace);
     const meta = await inspector.inspect();
-    return { workspacePath: targetPath, meta };
+    return { workspacePath: safeWorkspace, meta };
   });
 
   // Tasks Endpoints
@@ -155,7 +181,7 @@ export async function createServer() {
     return reply.status(201).send({ task });
   });
 
-  fastify.post<{ Params: { id: string } }>('/api/tasks/:id/cancel', async (req, reply) => {
+  fastify.post<{ Params: { id: string } }>('/api/tasks/:id/cancel', async (req) => {
     const cancelled = orchestrator.cancelTask(req.params.id);
     return { cancelled };
   });

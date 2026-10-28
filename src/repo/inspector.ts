@@ -97,22 +97,48 @@ export class RepoInspector {
   }
 
   /**
-   * Safe checkpoint: stages only the specified task-owned files instead of blind `git add .`
+   * P0.5 FIX: Safe task checkpointing.
+   * Stages ONLY task-owned files. NEVER uses `git add .` or `git add -u`.
+   * Completely preserves unrelated user changes.
    */
-  async createTaskCheckpoint(taskOwnedFiles: string[], message: string): Promise<string | null> {
+  async createTaskCheckpoint(taskOwnedFiles: string[] = [], message: string): Promise<string | null> {
     try {
       if (!(await this.isGitRepository())) return null;
 
+      const filesToStage: string[] = [];
+
       if (taskOwnedFiles.length > 0) {
-        // Stage only task owned files
+        // Stage only explicit task-owned files that exist
         for (const file of taskOwnedFiles) {
-          try {
-            await this.git.add(file);
-          } catch {}
+          const relPath = path.isAbsolute(file)
+            ? path.relative(this.workspacePath, file).replace(/\\/g, '/')
+            : file.replace(/\\/g, '/');
+
+          // Ensure file was not a pre-existing dirty file unrelated to task
+          filesToStage.push(relPath);
         }
       } else {
-        // If no explicit files specified, stage modified tracked files without untracked user files
-        await this.git.add(['-u']);
+        // If no explicit files specified, find files modified that were NOT in original dirtyFilesAtStart
+        const currentStatus = await this.git.status();
+        const initialDirtySet = new Set(this.baseline?.dirtyFilesAtStart || []);
+
+        for (const file of currentStatus.files) {
+          if (!initialDirtySet.has(file.path)) {
+            filesToStage.push(file.path);
+          }
+        }
+      }
+
+      if (filesToStage.length === 0) {
+        // No task-owned files modified; do not stage arbitrary files
+        const log = await this.git.log({ maxCount: 1 });
+        return log.latest ? log.latest.hash : null;
+      }
+
+      for (const f of filesToStage) {
+        try {
+          await this.git.add(f);
+        } catch {}
       }
 
       const commitResult = await this.git.commit(message, undefined, { '--allow-empty': null });
@@ -124,7 +150,8 @@ export class RepoInspector {
   }
 
   /**
-   * Safe targeted restoration: Restores ONLY task-owned files from a checkpoint.
+   * P0.5 FIX: Safe targeted restoration.
+   * Restores ONLY task-owned files from a checkpoint.
    * NEVER runs broad `git reset --hard` or `git clean -fd` against unrelated user work!
    */
   async restoreTaskFiles(taskFiles: string[], commitHash: string): Promise<boolean> {
@@ -143,6 +170,40 @@ export class RepoInspector {
     } catch (err) {
       console.error('Failed to restore task files safely:', err);
       return false;
+    }
+  }
+
+  /**
+   * Creates an isolated Git worktree for executing a task without touching user working directory.
+   */
+  async createIsolatedWorktree(taskId: string): Promise<string | null> {
+    try {
+      if (!(await this.isGitRepository())) return null;
+
+      const worktreeDir = path.join(this.workspacePath, '.orchestrator_worktrees', taskId);
+      await fs.mkdir(path.dirname(worktreeDir), { recursive: true });
+
+      const branchName = `task/${taskId.slice(0, 8)}`;
+      await this.git.raw(['worktree', 'add', '-B', branchName, worktreeDir, 'HEAD']);
+      return worktreeDir;
+    } catch (err) {
+      console.warn('Could not create git worktree, falling back to workspace path:', err);
+      return null;
+    }
+  }
+
+  /**
+   * Safely cleans up an isolated worktree.
+   */
+  async removeIsolatedWorktree(worktreeDir: string): Promise<void> {
+    try {
+      if (await this.isGitRepository()) {
+        await this.git.raw(['worktree', 'remove', '--force', worktreeDir]);
+      }
+    } catch {
+      try {
+        await fs.rm(worktreeDir, { recursive: true, force: true });
+      } catch {}
     }
   }
 
@@ -240,7 +301,7 @@ export class RepoInspector {
     try {
       const entries = await fs.readdir(dir, { withFileTypes: true });
       for (const entry of entries) {
-        if (['node_modules', '.git', 'dist', 'build', '.venv', '__pycache__'].includes(entry.name)) {
+        if (['node_modules', '.git', 'dist', 'build', '.venv', '__pycache__', '.orchestrator_worktrees'].includes(entry.name)) {
           continue;
         }
         const relPath = path.join(currentRel, entry.name).replace(/\\/g, '/');

@@ -20,8 +20,9 @@ export interface CriterionVerification {
 }
 
 export interface VerificationReport {
-  overallPassed: boolean;
-  canDeclareComplete: boolean;
+  // Authoritative single verdict
+  isVerified: boolean;
+  status: 'PASSED' | 'FAILED' | 'INCONCLUSIVE';
   buildCheck: VerificationCheckResult;
   testCheck: VerificationCheckResult;
   lintCheck: VerificationCheckResult;
@@ -51,7 +52,8 @@ export class IndependentVerifier {
   async verify(
     meta: ProjectMetadata,
     acceptanceCriteria: string[] = [],
-    customVerificationCmd?: string
+    customVerificationCmd?: string,
+    baseCommit?: string
   ): Promise<VerificationReport> {
     const blockingReasons: string[] = [];
     const diagnosticsList: string[] = [];
@@ -71,14 +73,13 @@ export class IndependentVerifier {
       };
       if (!passed) {
         blockingReasons.push(`Build failed with exit code ${res.exitCode}`);
-        diagnosticsList.push(`[BUILD FAILURE]: ${meta.buildCmd} failed.\n${res.stderr || res.stdout}`);
+        diagnosticsList.push(`[BUILD FAILURE]: ${meta.buildCmd} failed (exit ${res.exitCode}).\n${res.stderr || res.stdout}`);
       }
     } else {
-      // Truthful: If no build command is configured, state NOT_CONFIGURED, do not pretend it passed!
       buildCheck = {
         status: 'NOT_CONFIGURED',
         output: 'No build command configured for repository.',
-        reason: 'Project ecosystem does not declare a compilation build script.',
+        reason: 'Missing build command.',
       };
     }
 
@@ -97,18 +98,17 @@ export class IndependentVerifier {
       };
       if (!passed) {
         blockingReasons.push(`Automated test suite failed with exit code ${res.exitCode}`);
-        diagnosticsList.push(`[TEST FAILURE]: ${testCmdToRun} failed.\n${res.stderr || res.stdout}`);
+        diagnosticsList.push(`[TEST FAILURE]: ${testCmdToRun} failed (exit ${res.exitCode}).\n${res.stderr || res.stdout}`);
       }
     } else {
-      // Truthful: Missing test command is NOT_CONFIGURED / NOT_RUN, never "passed"!
       testCheck = {
         status: 'NOT_CONFIGURED',
         output: 'No test runner detected or configured.',
-        reason: 'Missing test suite command. Tasks requiring test validation cannot pass this check.',
+        reason: 'Missing test suite command.',
       };
     }
 
-    // 3. Lint / Static Analysis Check
+    // 3. Lint / Static Analysis Check (P0.2 FIX: Lint failures are BLOCKING)
     let lintCheck: VerificationCheckResult;
     if (meta.lintCmd && buildCheck.status !== 'FAILED') {
       const res = await this.toolbox.executeCommand(meta.lintCmd, 60000);
@@ -121,7 +121,8 @@ export class IndependentVerifier {
         durationMs: res.durationMs,
       };
       if (!passed) {
-        diagnosticsList.push(`[LINT WARNING]: ${meta.lintCmd} flagged code style or lint issues.`);
+        blockingReasons.push(`Static analysis / linter failed with exit code ${res.exitCode}`);
+        diagnosticsList.push(`[LINT FAILURE]: ${meta.lintCmd} failed.\n${res.stderr || res.stdout}`);
       }
     } else {
       lintCheck = {
@@ -130,8 +131,19 @@ export class IndependentVerifier {
       };
     }
 
-    // 4. Git Diff & Anti-Tampering Audit
-    const diff = await this.inspector.getDiff();
+    // 4. Git Diff Audit (P1.1 FIX: Diff against baseline commit, including committed checkpoint changes)
+    let diff = '';
+    if (baseCommit && baseCommit !== 'initial') {
+      try {
+        const git = (this.inspector as any).git;
+        diff = await git.diff([baseCommit]);
+      } catch {
+        diff = await this.inspector.getDiff();
+      }
+    } else {
+      diff = await this.inspector.getDiffAgainstBase();
+    }
+
     const gitStatus = await this.inspector.getGitStatus();
     const filesChanged = gitStatus ? gitStatus.files.map((f) => f.path) : [];
 
@@ -140,7 +152,7 @@ export class IndependentVerifier {
     let hasPlaceholderStubs = false;
     const diffNotes: string[] = [];
 
-    // Check for sensitive files
+    // Security check for sensitive secret files
     for (const f of filesChanged) {
       const lower = f.toLowerCase();
       if (lower.includes('.env') || lower.includes('credentials') || lower.includes('id_rsa') || lower.includes('.pem')) {
@@ -162,7 +174,7 @@ export class IndependentVerifier {
       blockingReasons.push('Test assertions were bypassed or marked skipped in diff.');
     }
 
-    // Placeholder Stubs Detection: Detect empty stubs or "TODO: implement" in modified files
+    // Placeholder Stubs Detection
     if (
       /\/\/\s*TODO:\s*implement/i.test(diff) ||
       /#\s*TODO:\s*implement/i.test(diff) ||
@@ -175,52 +187,77 @@ export class IndependentVerifier {
     }
 
     // 5. Explicit Acceptance Criteria Verification
-    for (const criterion of acceptanceCriteria) {
-      const lower = criterion.toLowerCase();
-      let satisfied = false;
-      let evidence = '';
-      let checkType: CriterionVerification['checkType'] = 'diff';
-
-      if (lower.includes('build') || lower.includes('compil')) {
-        checkType = 'build';
-        satisfied = buildCheck.status === 'PASSED';
-        evidence = `Build status: ${buildCheck.status} (exit ${buildCheck.exitCode ?? 'N/A'})`;
-      } else if (lower.includes('test') || lower.includes('spec') || lower.includes('unit')) {
-        checkType = 'test';
-        satisfied = testCheck.status === 'PASSED';
-        evidence = `Test status: ${testCheck.status} (exit ${testCheck.exitCode ?? 'N/A'})`;
-      } else if (lower.includes('file') || lower.includes('creat') || lower.includes('implement')) {
-        checkType = 'file_presence';
-        // Verify files were actually changed or created on disk
-        satisfied = filesChanged.length > 0;
-        evidence = `Observed modified files: ${filesChanged.join(', ') || 'None'}`;
-      } else {
-        checkType = 'diff';
-        satisfied = filesChanged.length > 0 && !hasSuspiciousDeletions && !hasPlaceholderStubs;
-        evidence = `Verified diff modified ${filesChanged.length} files without suspicious bypasses.`;
+    // P0.2 FIX: If no criteria provided, require at least one verified code change to prevent empty passes
+    if (!acceptanceCriteria || acceptanceCriteria.length === 0) {
+      if (filesChanged.length === 0 && (!diff || diff.trim().length === 0)) {
+        blockingReasons.push('No acceptance criteria specified and zero files were modified in workspace.');
       }
+    } else {
+      for (const criterion of acceptanceCriteria) {
+        const lower = criterion.toLowerCase();
+        let satisfied = false;
+        let evidence = '';
+        let checkType: CriterionVerification['checkType'] = 'diff';
 
-      criteriaResults.push({
-        criterion,
-        satisfied,
-        evidence,
-        checkType,
-      });
+        if (lower.includes('build') || lower.includes('compil')) {
+          checkType = 'build';
+          satisfied = buildCheck.status === 'PASSED';
+          evidence = `Build status: ${buildCheck.status} (exit ${buildCheck.exitCode ?? 'N/A'})`;
+        } else if (lower.includes('test') || lower.includes('spec') || lower.includes('unit')) {
+          checkType = 'test';
+          satisfied = testCheck.status === 'PASSED';
+          evidence = `Test status: ${testCheck.status} (exit ${testCheck.exitCode ?? 'N/A'})`;
+        } else if (lower.includes('file') || lower.includes('creat') || lower.includes('implement')) {
+          checkType = 'file_presence';
+          satisfied = filesChanged.length > 0 || Boolean(diff && diff.length > 0);
+          evidence = `Observed modified files: ${filesChanged.join(', ') || (diff ? 'Committed changes present' : 'None')}`;
+        } else {
+          checkType = 'diff';
+          satisfied = (filesChanged.length > 0 || diff.length > 0) && !hasSuspiciousDeletions && !hasPlaceholderStubs;
+          evidence = `Verified diff contains modifications without bypasses or stubs.`;
+        }
 
-      if (!satisfied) {
-        blockingReasons.push(`Acceptance criterion not verified: "${criterion}" (${evidence})`);
+        criteriaResults.push({
+          criterion,
+          satisfied,
+          evidence,
+          checkType,
+        });
+
+        if (!satisfied) {
+          blockingReasons.push(`Acceptance criterion not verified: "${criterion}" (${evidence})`);
+        }
       }
     }
 
-    // Determine Truthful Overall Verdict
-    // A task can only declare completion if NO blocking reasons exist AND at least one positive proof of implementation exists
-    const hasActiveFailures = buildCheck.status === 'FAILED' || testCheck.status === 'FAILED';
-    const overallPassed = !hasActiveFailures && !hasForbiddenModifications && !hasSuspiciousDeletions;
-    const canDeclareComplete = overallPassed && blockingReasons.length === 0;
+    // Authoritative Unified Verdict
+    const hasActiveFailures =
+      buildCheck.status === 'FAILED' ||
+      testCheck.status === 'FAILED' ||
+      lintCheck.status === 'FAILED' ||
+      hasForbiddenModifications ||
+      hasSuspiciousDeletions;
+
+    let status: VerificationReport['status'];
+    if (hasActiveFailures || blockingReasons.length > 0) {
+      status = 'FAILED';
+    } else if (
+      buildCheck.status === 'NOT_CONFIGURED' &&
+      testCheck.status === 'NOT_CONFIGURED' &&
+      filesChanged.length === 0 &&
+      diff.length === 0
+    ) {
+      status = 'INCONCLUSIVE';
+      blockingReasons.push('Inconclusive verification: No verification commands configured and no files modified.');
+    } else {
+      status = 'PASSED';
+    }
+
+    const isVerified = status === 'PASSED';
 
     return {
-      overallPassed,
-      canDeclareComplete,
+      isVerified,
+      status,
       buildCheck,
       testCheck,
       lintCheck,
@@ -230,7 +267,7 @@ export class IndependentVerifier {
         hasSuspiciousDeletions,
         hasForbiddenModifications,
         hasPlaceholderStubs,
-        summary: diffNotes.length > 0 ? diffNotes.join('; ') : `Changed ${filesChanged.length} files cleanly.`,
+        summary: diffNotes.length > 0 ? diffNotes.join('; ') : `Audited ${filesChanged.length} changed files cleanly.`,
       },
       diagnostics: diagnosticsList.join('\n\n'),
       blockingReasons,
