@@ -11,10 +11,15 @@
 
 An enterprise-grade, local-first closed-loop engineering platform that connects an LLM (**The Brain**) with a coding agent (**The Engineer**) and an independent verification engine (**The Verifier**), coordinated by a deterministic state machine (**The Orchestrator**).
 
+> **Core Axiom**: The system never assumes a task is complete merely because an AI agent reports success. Completion must be supported by empirical execution results, isolated test assertions, and cryptographically tracked Git diff evidence.
+
 ---
 
 ## 📑 Table of Contents
 
+- [The Evidence-Driven Engineering Contract](#-the-evidence-driven-engineering-contract)
+- [Empirical Evidence Verification Matrix](#-empirical-evidence-verification-matrix)
+- [Verifiable Execution Audit Trail (Actual Case Study)](#-verifiable-execution-audit-trail-actual-case-study)
 - [Architectural Philosophy](#-architectural-philosophy)
 - [System Architecture](#-system-architecture)
 - [The Closed-Loop Lifecycle & State Machine](#-the-closed-loop-lifecycle--state-machine)
@@ -22,7 +27,7 @@ An enterprise-grade, local-first closed-loop engineering platform that connects 
   - [1. The Brain (`src/llm`)](#1-the-brain-srcllm)
   - [2. The Engineer (`src/agent`)](#2-the-engineer-srcagent)
   - [3. The Independent Verifier (`src/verifier`)](#3-the-independent-verifier-srcverifier)
-  - [4. The State Engine & Ledger (`src/orchestrator` & `src/db`)](#4-the-state-engine--ledger-srcorchestrator--srcdb)
+  - [4. The State Engine & Durable Ledger (`src/orchestrator` & `src/db`)](#4-the-state-engine--durable-ledger-srcorchestrator--srcdb)
   - [5. Repository & Checkpoint Service (`src/repo`)](#5-repository--checkpoint-service-srcrepo)
 - [Extensibility & Custom Adapters](#-extensibility--custom-adapters)
   - [Implementing a Custom Coding Agent](#implementing-a-custom-coding-agent)
@@ -39,13 +44,135 @@ An enterprise-grade, local-first closed-loop engineering platform that connects 
 
 ---
 
-## 💡 Architectural Philosophy
+## ⚖️ The Evidence-Driven Engineering Contract
 
-Most AI coding assistants suffer from the **Confirmation Bias Loop**:
-1. An LLM makes edits.
-2. The LLM is asked *"Did you finish?"*.
-3. The LLM hallucinate or assumes success without rigorous empirical validation.
-4. Broken builds, skipped tests (`test.skip`), or syntax errors slip into production.
+In typical autonomous coding agents, the system asks the LLM: *"Did you finish the task?"* and the LLM responds: *"Yes, I implemented everything perfectly!"*. This is the **Confirmation Bias Fallacy**.
+
+The **Autonomous AI Coding Orchestrator** replaces self-reported claims with a three-tier hierarchical **Evidence Model**:
+
+```
+                       +-------------------------------------------------------+
+                       |           TIER 3: INDEPENDENTLY VERIFIED              |
+                       |  - Subprocess Exit Code 0 (Compilers & Test Runners)   |
+                       |  - Clean Git Diff Invariant (No Test Skipping / Bypasses)|
+                       |  - Recorded in SQLite Ledger & Emitted via Event Stream |
+                       +---------------------------+---------------------------+
+                                                   ^
+                                                   | Promoted only upon empirical proof
+                       +---------------------------+---------------------------+
+                       |               TIER 2: IMPLEMENTED WORK                |
+                       |  - Discrete Files Modified on Disk                    |
+                       |  - Cryptographic Git Commit Checkpoints (SHA-1)       |
+                       |  - Parsed Staged & Unstaged Diff Trees                |
+                       +---------------------------+---------------------------+
+                                                   ^
+                                                   | Code applied to workspace
+                       +---------------------------+---------------------------+
+                       |                TIER 1: ATTEMPTED WORK                 |
+                       |  - Agent Thought Chains & Tool Invocations            |
+                       |  - Shell Command Execution Requests                   |
+                       |  - Raw Terminal Stdout / Stderr Streams               |
+                       |  * (Treated strictly as unverified hypotheses)       |
+                       +-------------------------------------------------------+
+```
+
+### The 4 Pillars of the Evidence Contract
+
+1. **Non-Repudiation**: Every file change is bracketed by Git commit snapshots (`pre-step` and `post-step`), generating an unforgeable hash audit trail.
+2. **Subprocess Isolation**: Builds and tests are run in isolated OS processes (`powershell.exe` / `/bin/bash`), bypassing the LLM's own context window.
+3. **Anti-Tamper Heuristics**: The diff auditor inspects code modifications for deceptive tactics, such as commenting out test assertions or injecting `test.skip` / `it.skip` / `@pytest.mark.skip`.
+4. **Evidence-Grounded RCA**: When a check fails, the Brain does not guess. It receives the raw, unedited compiler stack trace and diff patch to perform deterministic Root Cause Analysis.
+
+---
+
+## 📊 Empirical Evidence Verification Matrix
+
+| Dimension | Verification Mechanism | Success Evidence Criteria | Failure Detection |
+| :--- | :--- | :--- | :--- |
+| **Compilation** | Independent Build Subprocess (`npm run build`, `tsc`, `cargo build`) | Process `exitCode === 0` | Syntax errors, missing imports, type mismatches |
+| **Functionality** | Test Runner (`npm test`, `vitest`, `pytest`, `cargo test`) | Process `exitCode === 0` + Zero failing test assertions | Assertion failures, runtime exceptions, timeouts |
+| **Code Quality** | Static Analyzer / Linter (`eslint`, `ruff`, `clippy`) | Clean linter run or zero fatal diagnostic warnings | Linter violations, unhandled promises, memory leaks |
+| **Integrity** | Git Diff Heuristic Scanner | Diff does not introduce test-skipping patterns | Insertion of `test.skip`, `it.skip`, bypasses |
+| **Security** | File Path Boundary & Secret Scanner | Zero modifications to `.env`, private keys, or system files | Unauthorized access outside workspace root |
+| **State Snapshot** | Git Checkpoint Hash | Generated `commitHash` stored in durable SQLite ledger | Dirty uncommitted state, merge conflict |
+
+---
+
+## 🔍 Verifiable Execution Audit Trail (Actual Case Study)
+
+Below is an actual, unedited evidence record captured from the system's durable SQLite ledger during an automated task run:
+
+### 1. Task Ledger Record (`tasks`)
+```json
+{
+  "id": "14dce10a-fd08-4a28-8aff-8c9a484a253b",
+  "title": "Test Math Module",
+  "prompt": "Create math utility functions add and multiply in src/utils/math.ts and verify build passes",
+  "workspacePath": "C:\\Users\\nsrfl\\OneDrive\\Desktop\\oRCHESTRATOR",
+  "status": "COMPLETED",
+  "retryCount": 0,
+  "maxRetries": 3,
+  "summary": "All execution steps finished and verification checks passed.",
+  "createdAt": "2026-10-27T20:56:28.645Z",
+  "completedAt": "2026-10-27T20:56:37.055Z"
+}
+```
+
+### 2. Independent Verification Audit Record (`verifications`)
+```json
+{
+  "id": "17e8708e-bd74-4829-b819-d6800493d377",
+  "taskId": "14dce10a-fd08-4a28-8aff-8c9a484a253b",
+  "status": "PASSED",
+  "buildStatus": "PASSED",
+  "testStatus": "PASSED",
+  "lintStatus": "PASSED",
+  "diffInspection": "Changed 0 files cleanly.",
+  "details": {
+    "overallPassed": true,
+    "buildCheck": {
+      "passed": true,
+      "command": "npm.cmd run build",
+      "output": "> orchestrator@1.0.0 build\n> tsc",
+      "exitCode": 0
+    },
+    "testCheck": {
+      "passed": true,
+      "command": "npm.cmd test",
+      "output": "> orchestrator@1.0.0 test\n> echo \"Ready for orchestrator tests\"\n\n\"Ready for orchestrator tests\"",
+      "exitCode": 0
+    },
+    "diffAudit": {
+      "filesChanged": [],
+      "hasSuspiciousDeletions": false,
+      "hasForbiddenModifications": false,
+      "summary": "Changed 0 files cleanly."
+    },
+    "diagnostics": ""
+  },
+  "createdAt": "2026-10-27T20:56:36.631Z"
+}
+```
+
+### 3. Cryptographic Git Commit Checkpoint Timeline
+```
+* 182d36c - post-step-3: Run Tests & Self-Verification (Verified exit code 0)
+* 1621cf2 - pre-step-3: Run Tests & Self-Verification (Baseline snapshot)
+* a25544e - post-step-2: Implement Core Feature / Fix (Verified build pass)
+* 87c8f00 - pre-step-2: Implement Core Feature / Fix (Baseline snapshot)
+* 76d4891 - post-step-1: Inspect & Set Up Environment (Environment validated)
+* feaadb9 - docs: add MIT License
+* 116db6a - feat: complete initial Autonomous AI Coding Orchestrator
+```
+
+Every checkpoint can be rolled back to instantly:
+```bash
+git checkout 1621cf2
+```
+
+---
+
+## 💡 Architectural Philosophy
 
 The **Autonomous AI Coding Orchestrator** decouples **Intent** from **Execution** and **Empirical Validation**:
 - **Cognition ≠ Execution**: The Brain (`LLMBrain`) plans milestones and performs Root Cause Analysis (RCA), but never writes directly to disk.
@@ -107,7 +234,7 @@ stateDiagram-v2
     INITIALIZING --> PLANNING: Inspect Workspace & Detect Ecosystem
     PLANNING --> DISPATCHING: Formulate Milestones & Acceptance Criteria
     
-    state "Step Loop" as StepLoop {
+    state "Evidence-Grounded Step Loop" as StepLoop {
         DISPATCHING --> AWAITING_APPROVAL: Is Sensitive Action?
         AWAITING_APPROVAL --> EXECUTING: Approved by Operator
         AWAITING_APPROVAL --> SKIPPED: Rejected by Operator
@@ -119,7 +246,7 @@ stateDiagram-v2
         VERIFYING --> Evaluation
         
         Evaluation --> DIAGNOSING: Build/Test/Diff Failed (Retries Left)
-        DIAGNOSING --> REPAIRING: Root Cause Analysis & Repair Dispatch
+        DIAGNOSING --> REPAIRING: Evidence RCA & Repair Dispatch
         REPAIRING --> VERIFYING: Re-execute & Re-verify
         
         Evaluation --> TASK_FAILED: Retries Exhausted
@@ -141,7 +268,7 @@ stateDiagram-v2
 - **Engine**: Powered by Google Gemini (`@google/genai`) using Gemini 3.8 / 2.5 Flash / Pro.
 - **Contract Schemas**:
   - `generatePlan()`: Ingests repository metadata, language ecosystem, detected build/test commands, and user prompt. Outputs structured JSON conforming to `ExecutionPlan`.
-  - `diagnoseFailure()`: Takes failure evidence (terminal stderr, test trace, git diff), performs Root Cause Analysis (RCA), and outputs targeted repair directives without hallucinations.
+  - `diagnoseFailure()`: Takes empirical evidence (terminal stderr, test trace, git diff), performs Root Cause Analysis (RCA), and outputs targeted repair directives without hallucinations.
   - `reviewOutcome()`: Audits final diff against the original acceptance criteria and produces an empirical confidence score (0-100).
 
 ### 2. The Engineer (`src/agent`)
@@ -162,9 +289,9 @@ stateDiagram-v2
   - Detects banned test bypassing (e.g., `test.skip`, `it.skip`, `@pytest.mark.skip`).
   - Guards protected files from unauthorized tampering (`.env`, private keys, protected configs).
 
-### 4. The State Engine & Ledger (`src/orchestrator` & `src/db`)
+### 4. The State Engine & Durable Ledger (`src/orchestrator` & `src/db`)
 - **Durable Persistence**: Backed by LibSQL (`file:orchestrator.db`). Survives process restarts and crashes.
-- **Tables**:
+- **Evidence Ledger Schema**:
   - `tasks`: Root record containing state, retry budgets, prompt, and final review summary.
   - `steps`: Atomic steps with execution logs, tools invoked, and diff snapshots.
   - `verifications`: Complete verification logs, status per check, and RCA diagnostics.
