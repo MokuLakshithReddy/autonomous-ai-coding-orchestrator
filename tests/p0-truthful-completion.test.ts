@@ -1,6 +1,8 @@
 import assert from 'node:assert';
 import path from 'node:path';
 import os from 'node:os';
+import fs from 'node:fs/promises';
+import { WebSocket } from 'ws';
 import { TaskStateMachine, IllegalStateTransitionError } from '../src/core/state-machine.js';
 import { SecurityPolicyEngine } from '../src/security/policy.js';
 import { IndependentVerifier } from '../src/verifier/index.js';
@@ -267,6 +269,130 @@ async function runTests() {
     'Unverified semantic criteria must block verification'
   );
   console.log('   ✓ Verifier strictly requires test proof for behavioral and implementation criteria.');
+
+  // Test 10: Empty Allowlist Fail-Closed Policy Enforcement
+  console.log('\n10. Testing Empty Workspace Allowlist Fail-Closed Policy...');
+  assert.throws(
+    () =>
+      SecurityPolicyEngine.validateWorkspaceAuthorization(currentWorkspace, [], {
+        allowUnrestricted: false,
+      }),
+    /Security Exception \[Workspace Forbidden\]: Workspace authorization failed\. Allowed workspace roots list is empty/,
+    'Empty allowlist must strictly fail closed when unrestricted mode is not enabled'
+  );
+  const allowedInUnrestricted = SecurityPolicyEngine.validateWorkspaceAuthorization(
+    currentWorkspace,
+    [],
+    { allowUnrestricted: true }
+  );
+  assert.strictEqual(
+    allowedInUnrestricted,
+    currentWorkspace,
+    'Explicit opt-in unrestricted mode must allow workspace'
+  );
+  console.log('   ✓ Workspace authorization strictly fails closed on empty allowlist unless unrestricted mode is opted into.');
+
+  // Test 11: Non-Git Sandbox Exact Directory Filtering
+  console.log('\n11. Testing Non-Git Sandbox Directory Filtering (.github preservation)...');
+  const { RepoInspector } = await import('../src/repo/inspector.js');
+  const tempBase = await fs.mkdtemp(path.join(os.tmpdir(), 'test-sandbox-'));
+  const testWorkspace = path.join(tempBase, 'workspace');
+  await fs.mkdir(path.join(testWorkspace, '.github', 'workflows'), { recursive: true });
+  await fs.mkdir(path.join(testWorkspace, '.git', 'objects'), { recursive: true });
+  await fs.mkdir(path.join(testWorkspace, 'node_modules', 'dep'), { recursive: true });
+  await fs.mkdir(path.join(testWorkspace, 'src'), { recursive: true });
+
+  await fs.writeFile(path.join(testWorkspace, '.github', 'workflows', 'ci.yml'), 'name: CI\n');
+  await fs.writeFile(path.join(testWorkspace, '.gitignore'), 'node_modules/\n');
+  await fs.writeFile(path.join(testWorkspace, '.git', 'HEAD'), 'ref: refs/heads/main\n');
+  await fs.writeFile(path.join(testWorkspace, 'node_modules', 'dep', 'package.json'), '{}');
+  await fs.writeFile(path.join(testWorkspace, 'src', 'index.js'), 'console.log("hello");');
+
+  const inspector = new RepoInspector(testWorkspace);
+  const sandboxTaskId = crypto.randomUUID();
+  const sandboxDir = await inspector.createIsolatedSandbox(sandboxTaskId);
+
+  const ciExists = await fs.stat(path.join(sandboxDir, '.github', 'workflows', 'ci.yml')).then(() => true).catch(() => false);
+  const gitignoreExists = await fs.stat(path.join(sandboxDir, '.gitignore')).then(() => true).catch(() => false);
+  const srcExists = await fs.stat(path.join(sandboxDir, 'src', 'index.js')).then(() => true).catch(() => false);
+  const gitExists = await fs.stat(path.join(sandboxDir, '.git')).then(() => true).catch(() => false);
+  const nodeModulesExists = await fs.stat(path.join(sandboxDir, 'node_modules')).then(() => true).catch(() => false);
+
+  assert.strictEqual(ciExists, true, '.github/workflows/ci.yml must be preserved in sandbox');
+  assert.strictEqual(gitignoreExists, true, '.gitignore must be preserved in sandbox');
+  assert.strictEqual(srcExists, true, 'src/index.js must be preserved in sandbox');
+  assert.strictEqual(gitExists, false, '.git directory must be excluded from sandbox');
+  assert.strictEqual(nodeModulesExists, false, 'node_modules must be excluded from sandbox');
+
+  await inspector.removeIsolatedSandbox(sandboxDir);
+  await fs.rm(tempBase, { recursive: true, force: true });
+  console.log('   ✓ Non-Git sandbox copying cleanly preserves .github/ and dotfiles while excluding .git metadata.');
+
+  // Test 12: WebSocket Authentication Security (Tokens in query string rejected; ticket/handshake required)
+  console.log('\n12. Testing WebSocket Authentication Security (Ticket & Handshake vs Query Token)...');
+  const serverPort = 4455;
+  await server.listen({ port: serverPort, host: '127.0.0.1' });
+
+  try {
+    // 12a: Long-lived token in query string is strictly rejected
+    const rejectedQueryWs = new WebSocket(`ws://127.0.0.1:${serverPort}/ws?token=${serverApiToken}`);
+    const queryRejectCode = await new Promise<number>((resolve) => {
+      rejectedQueryWs.on('close', (code) => resolve(code));
+      rejectedQueryWs.on('error', () => {});
+    });
+    assert.strictEqual(queryRejectCode, 1008, 'Query string token authentication must be rejected with 1008');
+
+    // 12b: Ticket authentication via POST /api/auth/ws-ticket
+    const ticketRes = await server.inject({
+      method: 'POST',
+      url: '/api/auth/ws-ticket',
+      headers: { 'x-api-token': serverApiToken },
+    });
+    assert.strictEqual(ticketRes.statusCode, 200, 'POST /api/auth/ws-ticket must succeed');
+    const { ticket } = JSON.parse(ticketRes.body);
+    assert.ok(ticket, 'Must receive a valid connection ticket');
+
+    // Connect with ticket in query string
+    const ticketWs = new WebSocket(`ws://127.0.0.1:${serverPort}/ws?ticket=${ticket}`);
+    const ticketConnected = await new Promise<boolean>((resolve) => {
+      ticketWs.on('message', (data) => {
+        const msg = JSON.parse(data.toString());
+        if (msg.type === 'CONNECTED') resolve(true);
+      });
+      ticketWs.on('close', () => resolve(false));
+      ticketWs.on('error', () => resolve(false));
+    });
+    assert.strictEqual(ticketConnected, true, 'WebSocket authenticated with ticket must connect successfully');
+    ticketWs.close();
+
+    // Replay ticket must be rejected (single-use)
+    const replayWs = new WebSocket(`ws://127.0.0.1:${serverPort}/ws?ticket=${ticket}`);
+    const replayCloseCode = await new Promise<number>((resolve) => {
+      replayWs.on('close', (code) => resolve(code));
+      replayWs.on('error', () => {});
+    });
+    assert.strictEqual(replayCloseCode, 1008, 'Replayed connection ticket must be rejected with 1008');
+
+    // 12c: Handshake authentication message
+    const handshakeWs = new WebSocket(`ws://127.0.0.1:${serverPort}/ws`);
+    const handshakeConnected = await new Promise<boolean>((resolve) => {
+      handshakeWs.on('open', () => {
+        handshakeWs.send(JSON.stringify({ type: 'AUTH', token: serverApiToken }));
+      });
+      handshakeWs.on('message', (data) => {
+        const msg = JSON.parse(data.toString());
+        if (msg.type === 'CONNECTED') resolve(true);
+      });
+      handshakeWs.on('close', () => resolve(false));
+      handshakeWs.on('error', () => resolve(false));
+    });
+    assert.strictEqual(handshakeConnected, true, 'WebSocket authenticated via AUTH handshake message must connect successfully');
+    handshakeWs.close();
+
+    console.log('   ✓ WebSocket authentication strictly rejects query tokens and enforces tickets / handshake auth.');
+  } finally {
+    await server.close();
+  }
 
   console.log('\n=== ALL P0/P1 CORRECTNESS, SAFETY & VERIFICATION TESTS PASSED! ===\n');
 }

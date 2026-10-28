@@ -24,20 +24,43 @@ export interface CodingAgent {
   setWorkspacePath?(workspacePath: string): void;
 }
 
+export interface GenAIClient {
+  models: {
+    generateContent(params: {
+      model: string;
+      contents: string;
+      config?: { responseMimeType?: string };
+    }): Promise<{ text?: string | null }>;
+  };
+}
+
 export class BuiltInAutonomousAgent implements CodingAgent {
   name = 'BuiltInAutonomousAgent';
   private toolbox: AgentToolbox;
   public workspacePath: string;
-  private ai: GoogleGenAI | null = null;
+  private ai: GenAIClient | GoogleGenAI | null = null;
   private modelName: string;
+  private onRequestApproval?: ApprovalCallback;
 
-  constructor(workspacePath: string, onRequestApproval?: ApprovalCallback) {
+  constructor(
+    workspacePath: string,
+    onRequestApproval?: ApprovalCallback,
+    modelClient?: GenAIClient
+  ) {
     this.workspacePath = workspacePath;
+    this.onRequestApproval = onRequestApproval;
     this.toolbox = new AgentToolbox(workspacePath, onRequestApproval);
     this.modelName = config.geminiModel || 'gemini-2.5-flash';
-    if (config.geminiApiKey) {
+    if (modelClient) {
+      this.ai = modelClient;
+    } else if (config.geminiApiKey) {
       this.ai = new GoogleGenAI({ apiKey: config.geminiApiKey });
     }
+  }
+
+  setWorkspacePath(workspacePath: string): void {
+    this.workspacePath = workspacePath;
+    this.toolbox = new AgentToolbox(workspacePath, this.onRequestApproval);
   }
 
   async executeStep(

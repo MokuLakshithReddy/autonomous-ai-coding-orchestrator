@@ -206,13 +206,20 @@ export class RepoInspector {
   async createIsolatedSandbox(taskId: string): Promise<string> {
     const sandboxDir = path.join(os.tmpdir(), 'orchestrator_sandboxes', taskId);
     await fs.mkdir(sandboxDir, { recursive: true });
+    const EXCLUDED_DIRS = new Set([
+      '.git',
+      'node_modules',
+      '.orchestrator_sandboxes',
+      '.orchestrator_worktrees',
+    ]);
     await fs.cp(this.workspacePath, sandboxDir, {
       recursive: true,
-      filter: (source) =>
-        !source.includes('.orchestrator_sandboxes') &&
-        !source.includes('.orchestrator_worktrees') &&
-        !source.includes('.git') &&
-        !source.includes('node_modules'),
+      filter: (source) => {
+        const rel = path.relative(this.workspacePath, source);
+        if (!rel) return true;
+        const segments = rel.split(/[\\/]/);
+        return !segments.some((seg) => EXCLUDED_DIRS.has(seg));
+      },
     });
     return sandboxDir;
   }

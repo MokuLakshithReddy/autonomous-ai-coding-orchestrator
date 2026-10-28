@@ -33,6 +33,7 @@ export interface OrchestratorEvent {
 
 export class OrchestrationEngine extends EventEmitter {
   private allowedWorkspaces?: string[];
+  private allowUnrestricted?: boolean;
   private activeTasks = new Map<
     string,
     {
@@ -42,9 +43,10 @@ export class OrchestrationEngine extends EventEmitter {
     }
   >();
 
-  constructor(options?: { allowedWorkspaces?: string[] }) {
+  constructor(options?: { allowedWorkspaces?: string[]; allowUnrestricted?: boolean }) {
     super();
     this.allowedWorkspaces = options?.allowedWorkspaces;
+    this.allowUnrestricted = options?.allowUnrestricted;
   }
 
   emitOrchestratorEvent(event: Omit<OrchestratorEvent, 'id' | 'timestamp'>): void {
@@ -97,10 +99,17 @@ export class OrchestrationEngine extends EventEmitter {
     maxRetries?: number;
     customAgent?: CodingAgent;
     allowedWorkspaces?: string[];
+    allowUnrestricted?: boolean;
   }): Promise<TaskRecord> {
     await initDatabase();
     const allowedRoots = params.allowedWorkspaces ?? this.allowedWorkspaces ?? config.allowedWorkspaces;
-    const authorizedWorkspace = SecurityPolicyEngine.validateWorkspaceAuthorization(params.workspacePath, allowedRoots);
+    const allowUnrestricted =
+      params.allowUnrestricted ?? this.allowUnrestricted ?? config.allowUnrestrictedWorkspaces;
+    const authorizedWorkspace = SecurityPolicyEngine.validateWorkspaceAuthorization(
+      params.workspacePath,
+      allowedRoots,
+      { allowUnrestricted }
+    );
     const resolvedWorkspace = SecurityPolicyEngine.assertPathContainment(authorizedWorkspace, authorizedWorkspace);
 
     const taskId = crypto.randomUUID();

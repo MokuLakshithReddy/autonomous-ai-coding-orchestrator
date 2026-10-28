@@ -94,7 +94,12 @@ export class SecurityPolicyEngine {
   static validateWorkspaceAuthorization(
     workspacePath: string,
     allowedRoots: string[] = config.allowedWorkspaces,
-    forceCaseSensitive = false
+    options?:
+      | {
+          allowUnrestricted?: boolean;
+          forceCaseSensitive?: boolean;
+        }
+      | boolean
   ): string {
     if (!workspacePath || workspacePath.trim() === '') {
       throw new Error('Security Exception: Workspace path cannot be empty or unspecified.');
@@ -115,6 +120,13 @@ export class SecurityPolicyEngine {
       throw new Error(`Security Exception: Cannot resolve canonical workspace path "${resolved}": ${err.message}`);
     }
 
+    const forceCaseSensitive =
+      typeof options === 'boolean' ? options : options?.forceCaseSensitive ?? false;
+    const allowUnrestricted =
+      typeof options === 'object' && options?.allowUnrestricted !== undefined
+        ? options.allowUnrestricted
+        : config.allowUnrestrictedWorkspaces;
+
     if (allowedRoots && allowedRoots.length > 0) {
       const isAuthorized = allowedRoots.some((allowedRoot) => {
         try {
@@ -130,6 +142,13 @@ export class SecurityPolicyEngine {
           `Security Exception [Workspace Forbidden]: Workspace path "${canonicalWorkspace}" is not within authorized workspace roots: [${allowedRoots.join(
             ', '
           )}]`
+        );
+      }
+    } else {
+      // Empty or unspecified allowed roots: Default is RESTRICTED (fail-closed)
+      if (!allowUnrestricted) {
+        throw new Error(
+          `Security Exception [Workspace Forbidden]: Workspace authorization failed. Allowed workspace roots list is empty and unrestricted workspace operation is disabled. Configure ALLOWED_DIRECTORIES or explicitly enable unrestricted mode.`
         );
       }
     }

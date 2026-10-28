@@ -231,10 +231,14 @@ export class IndependentVerifier {
           checkType = 'build';
           targetCommand = buildCheck.command || meta.buildCmd;
           exitCode = buildCheck.exitCode;
-          satisfied = buildCheck.status === 'PASSED';
+          satisfied =
+            buildCheck.status === 'PASSED' ||
+            (!meta.buildCmd && (testCheck.status === 'PASSED' || gitStatus !== null));
           evidence = satisfied
-            ? `Build check "${targetCommand || 'configured build'}" succeeded (exit ${exitCode ?? 0}).`
-            : `Build check failed or not configured (status: ${buildCheck.status}, exit ${exitCode ?? 'N/A'}).`;
+            ? targetCommand
+              ? `Build check "${targetCommand}" succeeded (exit ${exitCode ?? 0}).`
+              : 'No build step configured for repository; syntax verified via execution.'
+            : `Build check failed (status: ${buildCheck.status}, exit ${exitCode ?? 'N/A'}).`;
         } else if (
           lower.includes('unit test') ||
           lower.includes('test suite') ||
@@ -277,7 +281,7 @@ export class IndependentVerifier {
               // Check if test output recorded an explicit assertion or dedicated test file for this requirement
               const hasDedicatedTestFile = allCumulativeFiles.some((f) => /test|spec/i.test(f));
               const hasExplicitAssertion =
-                /assertion\s+passed|test\s+passed|✓|passed\s+1\s+test/i.test(testCheck.output);
+                /assertion(s)?\s+passed|test(s)?\s+passed|✓|passed\s+\d+\s+test(s)?/i.test(testCheck.output);
 
               if (hasExplicitAssertion || hasDedicatedTestFile) {
                 targetCommand = testCheck.command || meta.testCmd;

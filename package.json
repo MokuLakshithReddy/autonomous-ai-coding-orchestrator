@@ -9,8 +9,9 @@
     "start": "tsx src/index.ts",
     "build": "tsc",
     "cli": "tsx src/cli/index.ts",
-    "test": "tsx tests/p0-truthful-completion.test.ts && tsx tests/e2e-production-readiness.test.ts",
-    "test:e2e": "tsx tests/e2e-production-readiness.test.ts"
+    "test": "tsx tests/p0-truthful-completion.test.ts && tsx tests/e2e-production-readiness.test.ts && tsx tests/autonomous-repair-loop.test.ts",
+    "test:e2e": "tsx tests/e2e-production-readiness.test.ts",
+    "test:agent": "tsx tests/autonomous-repair-loop.test.ts"
   },
   "keywords": [
     "ai",

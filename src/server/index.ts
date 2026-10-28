@@ -22,13 +22,35 @@ import crypto from 'node:crypto';
 
 export const serverApiToken: string = config.apiToken || crypto.randomBytes(24).toString('hex');
 
+interface WsTicket {
+  ticket: string;
+  expiresAt: number;
+}
+export const wsTickets = new Map<string, WsTicket>();
+
+export function issueWsTicket(): string {
+  const ticket = crypto.randomBytes(32).toString('hex');
+  const expiresAt = Date.now() + 60_000;
+  wsTickets.set(ticket, { ticket, expiresAt });
+  return ticket;
+}
+
+export function consumeWsTicket(ticket: string): boolean {
+  const item = wsTickets.get(ticket);
+  if (!item) return false;
+  wsTickets.delete(ticket);
+  return Date.now() <= item.expiresAt;
+}
+
 export function validateWorkspacePath(requestedPath?: string): string {
   const targetRaw = requestedPath || process.cwd();
   const allowedRoots =
     config.allowedWorkspaces.length > 0 ? config.allowedWorkspaces : [process.cwd()];
 
   try {
-    const authorized = SecurityPolicyEngine.validateWorkspaceAuthorization(targetRaw, allowedRoots);
+    const authorized = SecurityPolicyEngine.validateWorkspaceAuthorization(targetRaw, allowedRoots, {
+      allowUnrestricted: config.allowUnrestrictedWorkspaces,
+    });
     return SecurityPolicyEngine.assertPathContainment(authorized, authorized);
   } catch (err: any) {
     throw new Error(`Forbidden: ${err.message}`);
@@ -125,6 +147,21 @@ export async function createServer() {
     }
   });
 
+  // Issue short-lived, single-use ticket for WebSocket authentication
+  fastify.post('/api/auth/ws-ticket', async (req, reply) => {
+    const authHeader = req.headers['authorization'];
+    const token =
+      req.headers['x-api-token'] ||
+      (typeof authHeader === 'string' && authHeader.startsWith('Bearer ')
+        ? authHeader.slice(7).trim()
+        : undefined);
+    if (token !== serverApiToken) {
+      return reply.status(401).send({ error: 'Unauthorized: Invalid API token' });
+    }
+    const ticket = issueWsTicket();
+    return { ticket, expiresInSeconds: 60 };
+  });
+
   fastify.register(async function (fastifyInstance) {
     fastifyInstance.get('/ws', { websocket: true }, (socket, req) => {
       // Validate origin if present
@@ -134,34 +171,86 @@ export async function createServer() {
         return;
       }
 
-      // P0 FIX: Authenticate WebSocket client connection
+      // Security Fix: Explicitly reject long-lived API tokens in query strings to prevent URL credential exposure
       const queryToken = (req.query as any)?.token;
+      if (queryToken) {
+        socket.close(
+          1008,
+          'Unauthorized: Long-lived API tokens in query strings are rejected. Use x-api-token header, POST /api/auth/ws-ticket, or AUTH handshake message.'
+        );
+        return;
+      }
+
+      const queryTicket = (req.query as any)?.ticket;
       const headerToken = req.headers['x-api-token'];
       const authHeader = req.headers['authorization'];
       const token =
-        queryToken ||
         headerToken ||
         (typeof authHeader === 'string' && authHeader.startsWith('Bearer ')
           ? authHeader.slice(7).trim()
           : undefined);
 
-      if (token !== serverApiToken) {
-        socket.close(1008, 'Unauthorized: Invalid API token');
-        return;
+      let isAuthenticated = false;
+
+      // Method 1: Single-use connection ticket in query string
+      if (queryTicket && consumeWsTicket(queryTicket)) {
+        isAuthenticated = true;
       }
 
-      wsClients.add(socket);
-      socket.send(
-        JSON.stringify({
-          type: 'CONNECTED',
-          message: 'Connected to Orchestrator Realtime Stream',
-          timestamp: new Date().toISOString(),
-        })
-      );
+      // Method 2: HTTP upgrade headers
+      if (!isAuthenticated && token && token === serverApiToken) {
+        isAuthenticated = true;
+      }
 
-      socket.on('close', () => {
-        wsClients.delete(socket);
-      });
+      const activateConnection = () => {
+        wsClients.add(socket);
+        socket.send(
+          JSON.stringify({
+            type: 'CONNECTED',
+            message: 'Connected to Orchestrator Realtime Stream',
+            timestamp: new Date().toISOString(),
+          })
+        );
+
+        socket.on('close', () => {
+          wsClients.delete(socket);
+        });
+      };
+
+      if (isAuthenticated) {
+        activateConnection();
+      } else {
+        // Method 3: Authenticated initial handshake message within 5 seconds
+        let authTimer: NodeJS.Timeout | null = setTimeout(() => {
+          if (!isAuthenticated) {
+            socket.close(1008, 'Unauthorized: Handshake authentication timed out');
+          }
+        }, 5000);
+
+        socket.on('message', (data: any) => {
+          if (isAuthenticated) return;
+          try {
+            const msg = JSON.parse(data.toString());
+            if (msg.type === 'AUTH') {
+              if (msg.ticket && consumeWsTicket(msg.ticket)) {
+                isAuthenticated = true;
+              } else if (msg.token && msg.token === serverApiToken) {
+                isAuthenticated = true;
+              }
+            }
+          } catch {}
+
+          if (isAuthenticated) {
+            if (authTimer) {
+              clearTimeout(authTimer);
+              authTimer = null;
+            }
+            activateConnection();
+          } else {
+            socket.close(1008, 'Unauthorized: Invalid handshake credentials');
+          }
+        });
+      }
     });
   });
 
