@@ -240,10 +240,36 @@ export async function initDatabase(): Promise<void> {
     { table: 'approvals', col: 'expiresAt TEXT' },
     { table: 'approvals', col: 'respondedAt TEXT' },
   ];
+  // P1 FIX: Inspect existing database schema and execute safe versioned column migrations
+  const tableColumnsCache = new Map<string, Set<string>>();
+
   for (const m of migrations) {
+    let existingCols = tableColumnsCache.get(m.table);
+    if (!existingCols) {
+      const tableInfo = await db.execute(`PRAGMA table_info(${m.table})`);
+      existingCols = new Set(tableInfo.rows.map((r) => String(r.name).toLowerCase()));
+      tableColumnsCache.set(m.table, existingCols);
+    }
+
+    const colName = m.col.split(/\s+/)[0].toLowerCase();
+    if (existingCols.has(colName)) {
+      // Column already exists cleanly
+      continue;
+    }
+
     try {
       await db.execute(`ALTER TABLE ${m.table} ADD COLUMN ${m.col}`);
-    } catch {}
+      existingCols.add(colName);
+    } catch (err: any) {
+      const errMsg = err?.message || String(err);
+      if (/duplicate column name/i.test(errMsg)) {
+        // Explicitly recognized safe duplicate column case
+        existingCols.add(colName);
+        continue;
+      }
+      console.error(`[Database Migration Error] Failed to alter table "${m.table}" adding "${m.col}":`, err);
+      throw new Error(`Database Migration Failure on table "${m.table}" adding "${m.col}": ${errMsg}`);
+    }
   }
 
   // Indexes for performance

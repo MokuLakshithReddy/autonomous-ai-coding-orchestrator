@@ -33,10 +33,116 @@ export class SecurityPolicyEngine {
   ]);
 
   /**
-   * P1 FIX: Enforces strict canonical containment within the authorized workspace.
-   * Resolves symlinks and prevents path traversal (e.g. `../` escapes, junctions, null bytes).
+   * Resolves the canonical path of a target, even if the destination file or intermediate
+   * directories do not exist yet. Traverses up to the nearest existing ancestor,
+   * canonicalizes it with native realpath, and appends the non-existent trail.
    */
-  static assertPathContainment(targetPath: string, workspacePath: string): string {
+  static resolveCanonicalPath(filePath: string): string {
+    const resolved = path.resolve(filePath);
+    let current = resolved;
+    const segments: string[] = [];
+
+    while (!fs.existsSync(current)) {
+      const parent = path.dirname(current);
+      if (parent === current) {
+        break;
+      }
+      segments.unshift(path.basename(current));
+      current = parent;
+    }
+
+    let canonicalAncestor = current;
+    try {
+      if (fs.existsSync(current)) {
+        canonicalAncestor = fs.realpathSync.native(current);
+      }
+    } catch {}
+
+    return segments.length > 0 ? path.join(canonicalAncestor, ...segments) : canonicalAncestor;
+  }
+
+  /**
+   * Platform-aware filesystem case-sensitivity check.
+   * Windows and macOS are case-insensitive by default.
+   * Linux and POSIX filesystems are case-sensitive.
+   */
+  static isCaseInsensitivePlatform(): boolean {
+    return process.platform === 'win32' || process.platform === 'darwin';
+  }
+
+  /**
+   * Checks whether childPath is contained inside parentPath, preserving exact case
+   * on case-sensitive filesystems (Linux / POSIX) to prevent case-variant directory bypasses.
+   */
+  static isPathInside(childPath: string, parentPath: string, forceCaseSensitive = false): boolean {
+    const normChild = path.normalize(childPath);
+    const normParent = path.normalize(parentPath);
+    const isCaseInsensitive = !forceCaseSensitive && this.isCaseInsensitivePlatform();
+
+    const c = isCaseInsensitive ? normChild.toLowerCase() : normChild;
+    const p = isCaseInsensitive ? normParent.toLowerCase() : normParent;
+
+    if (c === p) return true;
+    const pWithSep = p.endsWith(path.sep) ? p : p + path.sep;
+    return c.startsWith(pWithSep);
+  }
+
+  /**
+   * P0 FIX: Validates authorization to use a repository workspace root.
+   * Enforced across Server, CLI, and internal OrchestrationEngine entry points.
+   */
+  static validateWorkspaceAuthorization(
+    workspacePath: string,
+    allowedRoots: string[] = config.allowedWorkspaces,
+    forceCaseSensitive = false
+  ): string {
+    if (!workspacePath || workspacePath.trim() === '') {
+      throw new Error('Security Exception: Workspace path cannot be empty or unspecified.');
+    }
+    if (workspacePath.includes('\0')) {
+      throw new Error('Security Exception: Null byte injection detected in workspace path.');
+    }
+
+    const resolved = path.resolve(workspacePath);
+    if (!fs.existsSync(resolved)) {
+      throw new Error(`Security Exception: Workspace directory does not exist: "${resolved}".`);
+    }
+
+    let canonicalWorkspace: string;
+    try {
+      canonicalWorkspace = fs.realpathSync.native(resolved);
+    } catch (err: any) {
+      throw new Error(`Security Exception: Cannot resolve canonical workspace path "${resolved}": ${err.message}`);
+    }
+
+    if (allowedRoots && allowedRoots.length > 0) {
+      const isAuthorized = allowedRoots.some((allowedRoot) => {
+        try {
+          const canonicalRoot = this.resolveCanonicalPath(allowedRoot);
+          return this.isPathInside(canonicalWorkspace, canonicalRoot, forceCaseSensitive);
+        } catch {
+          return false;
+        }
+      });
+
+      if (!isAuthorized) {
+        throw new Error(
+          `Security Exception [Workspace Forbidden]: Workspace path "${canonicalWorkspace}" is not within authorized workspace roots: [${allowedRoots.join(
+            ', '
+          )}]`
+        );
+      }
+    }
+
+    return canonicalWorkspace;
+  }
+
+  /**
+   * P0 FIX: Enforces platform-aware canonical containment within the task's execution workspace.
+   * Preserves case on POSIX/Linux to block case-variant sibling directory escapes.
+   * Resolves symlinks and handles non-existent destination paths via ancestor resolution.
+   */
+  static assertPathContainment(targetPath: string, workspacePath: string, forceCaseSensitive = false): string {
     if (!targetPath || !workspacePath) {
       throw new Error('Security Exception: Target path and workspace path must be non-empty strings.');
     }
@@ -44,34 +150,14 @@ export class SecurityPolicyEngine {
       throw new Error('Security Exception: Null byte injection detected in path.');
     }
 
-    const resolvedWorkspace = path.resolve(workspacePath);
-    let canonicalWorkspace = resolvedWorkspace;
-    try {
-      if (fs.existsSync(resolvedWorkspace)) {
-        canonicalWorkspace = fs.realpathSync.native(resolvedWorkspace);
-      }
-    } catch {}
-
+    const canonicalWorkspace = this.resolveCanonicalPath(workspacePath);
     const resolvedTarget = path.resolve(canonicalWorkspace, targetPath);
-    let canonicalTarget = resolvedTarget;
-    try {
-      if (fs.existsSync(resolvedTarget)) {
-        canonicalTarget = fs.realpathSync.native(resolvedTarget);
-      } else {
-        const parentDir = path.dirname(resolvedTarget);
-        if (fs.existsSync(parentDir)) {
-          canonicalTarget = path.join(fs.realpathSync.native(parentDir), path.basename(resolvedTarget));
-        }
-      }
-    } catch {}
+    const canonicalTarget = this.resolveCanonicalPath(resolvedTarget);
 
-    const normTarget = path.normalize(canonicalTarget).toLowerCase();
-    const normWorkspace = path.normalize(canonicalWorkspace).toLowerCase();
-
-    const isInside = normTarget === normWorkspace || normTarget.startsWith(normWorkspace + path.sep);
+    const isInside = this.isPathInside(canonicalTarget, canonicalWorkspace, forceCaseSensitive);
     if (!isInside) {
       throw new Error(
-        `Security Exception [Path Traversal Blocked]: Attempted access to "${targetPath}" is outside authorized workspace "${workspacePath}".`
+        `Security Exception [Path Traversal Blocked]: Attempted access to "${targetPath}" resolves to "${canonicalTarget}", which is outside authorized workspace "${canonicalWorkspace}".`
       );
     }
 
@@ -177,20 +263,13 @@ export class SecurityPolicyEngine {
    * Evaluates action risk level for planning milestones or step instructions.
    */
   static evaluateActionRisk(actionDescription: string, commandOrPath?: string): ActionPolicy {
-    return this.evaluateCommandRisk(`${actionDescription} ${commandOrPath || ''}`);
-  }
+    const combined = `${actionDescription} ${commandOrPath || ''}`.trim();
+    const lower = combined.toLowerCase();
 
-  /**
-   * Enforces risk evaluation at the actual command execution boundary.
-   * Intercepts destructive commands, interpreters, and dynamic script runners.
-   */
-  static evaluateCommandRisk(command: string): ActionPolicy {
-    const text = command.toLowerCase().trim();
-
-    // Critical operations: deployments, forced pushes, system formatting
+    // 1. Critical operations
     if (
       /\b(git\s+push\s+.*--force|deploy|publish|production|drop\s+database|format\s+[a-z]:|rm\s+-rf\s+[\/\\]|dd\s+if=)/i.test(
-        text
+        lower
       )
     ) {
       return {
@@ -200,44 +279,126 @@ export class SecurityPolicyEngine {
       };
     }
 
-    // High risk: protected branch mutations, deleting files, permission alteration, system tampering
+    // 2. Destructive actions: deletion, drop table, clean
     if (
-      /\b(rm|del|unlink|rmdir|git\s+reset|git\s+clean|chmod|chown|curl\s+.*\|\s*sh|wget\s+.*\|\s*sh|npm\s+publish)\b/i.test(
-        text
+      /\b(rm\s+|del\s+|delete\s+file|unlink|drop\s+table|delete\s+from|git\s+clean\s+-fd)\b/i.test(lower)
+    ) {
+      return {
+        riskLevel: 'HIGH',
+        requiresApproval: true,
+        reason: 'Action involves file deletion or high-impact state mutation.',
+      };
+    }
+
+    // 3. Sensitive destinations
+    if (commandOrPath && this.isSensitiveDestination(commandOrPath)) {
+      return {
+        riskLevel: 'HIGH',
+        requiresApproval: true,
+        reason: `Action targets sensitive credential or configuration: ${commandOrPath}`,
+      };
+    }
+
+    return {
+      riskLevel: 'LOW',
+      requiresApproval: false,
+    };
+  }
+
+  /**
+   * P0 FIX: Strict execution-layer command authorization.
+   * Treats pattern matching as defense-in-depth and enforces a narrow safe policy (fail-closed):
+   * 1. Blocks command composition, pipelines, subshells, and redirection without approval.
+   * 2. Permits only an explicitly defined safe allowlist of build, test, and inspection tools.
+   * 3. Defaults all unrecognized, alternative, or compound commands to requiring operator approval.
+   */
+  static evaluateCommandRisk(command: string): ActionPolicy {
+    const text = command.trim();
+    const lower = text.toLowerCase();
+
+    // 1. Critical operations: deployments, forced pushes, system formatting
+    if (
+      /\b(git\s+push\s+.*--force|deploy|publish|production|drop\s+database|format\s+[a-z]:|rm\s+-rf\s+[\/\\]|dd\s+if=)/i.test(
+        lower
+      )
+    ) {
+      return {
+        riskLevel: 'CRITICAL',
+        requiresApproval: true,
+        reason: 'Potentially destructive or irreversible operation targeting external or production systems.',
+      };
+    }
+
+    // 2. Shell composition, command chaining, piping, redirection, and subshell injection
+    // E.g., `npm test; rm -rf /`, `npm test && echo bypass`, `cmd | sh`, `script > file`
+    if (/[;&|><`$\r\n]/.test(text)) {
+      return {
+        riskLevel: 'HIGH',
+        requiresApproval: true,
+        reason: 'Shell composition, pipeline, redirection, or subshell chaining operator detected.',
+      };
+    }
+
+    // 3. Dynamic interpreters, obfuscation, and unconstrained script evaluation
+    if (
+      /\b(python(\d)?\s+(-c|-m)|node\s+-e|perl\s+-e|ruby\s+-e|php\s+-r|eval\b|base64|iex\b)/i.test(
+        lower
+      ) ||
+      /(?:^|\s)(powershell(\.exe)?|pwsh(\.exe)?|bash|sh|zsh|cmd(\.exe)?)(?:\s|$)/i.test(
+        lower
       )
     ) {
       return {
         riskLevel: 'HIGH',
-        requiresApproval: config.requireApprovalForDestructive,
-        reason: 'Modification involves file deletion or high-impact state mutation.',
+        requiresApproval: true,
+        reason: 'Dynamic interpreter, shell invocation, or encoded evaluation detected.',
       };
     }
 
-    // P0 FIX: High risk: dynamic interpreters and unconstrained script execution
+    // 4. File deletions, state wipes, privilege alterations
     if (
-      /\b(python(\d)?\s+(-c|-m)|node\s+-e|perl\s+-e|ruby\s+-e|php\s+-r|powershell(\.exe)?\s+.*(-enc|-c|-command)|pwsh(\.exe)?\s+.*(-enc|-c|-command)|eval\b|base64\s+-d|iex\b)/i.test(
-        text
+      /\b(rm|del|unlink|rmdir|git\s+reset|git\s+clean|chmod|chown|curl|wget|npm\s+publish)\b/i.test(
+        lower
       )
     ) {
       return {
         riskLevel: 'HIGH',
-        requiresApproval: config.requireApprovalForDestructive,
-        reason: 'Dynamic interpreter execution or encoded script execution detected.',
+        requiresApproval: true,
+        reason: 'Operation involves file deletion or high-impact state mutation.',
       };
     }
 
-    // Moderate risk: file modification, installing dependencies, local build & test runs
-    if (/\b(npm\s+install|pnpm\s+add|pip\s+install|cargo\s+add|npm\s+run|npm\s+test|npx\s+|tsc|pytest)\b/i.test(text)) {
+    // 5. Narrow Safe Policy Allowlist: Only atomic, non-destructive tools
+    const isSafeGit = /^git\s+(status|diff|log|show|branch|rev-parse)(\s+.*)?$/i.test(lower);
+    const isSafeBuildTest =
+      /^(npm|npm\.cmd|pnpm|yarn)\s+(run\s+)?(build|test|lint)(\s+.*)?$/i.test(lower) ||
+      /^(npx|npx\.cmd)\s+(tsc|jest|vitest|eslint|prettier)(\s+.*)?$/i.test(lower) ||
+      /^(tsc|tsc\.cmd)(\s+.*)?$/i.test(lower) ||
+      /^(python|python3)\s+-m\s+(pytest|unittest)(\s+.*)?$/i.test(lower) ||
+      /^pytest(\s+.*)?$/i.test(lower) ||
+      /^cargo\s+(test|build|check|clippy)(\s+.*)?$/i.test(lower) ||
+      /^go\s+(test|build)(\s+.*)?$/i.test(lower) ||
+      /^node(\.exe)?\s+[a-zA-Z0-9_\-\.\/\\]+\.(js|mjs|cjs)(\s+.*)?$/i.test(lower);
+
+    if (isSafeGit) {
+      return {
+        riskLevel: 'LOW',
+        requiresApproval: false,
+      };
+    }
+
+    if (isSafeBuildTest) {
       return {
         riskLevel: 'MODERATE',
         requiresApproval: false,
       };
     }
 
-    // Low risk: read operations, inspection, git status, diff
+    // 6. Fail-Closed Default: Any command outside the narrow safe policy requires explicit operator approval
     return {
-      riskLevel: 'LOW',
-      requiresApproval: false,
+      riskLevel: 'HIGH',
+      requiresApproval: true,
+      reason: `Command "${text}" is outside the narrow safe execution policy and requires explicit operator authorization.`,
     };
   }
 }

@@ -24,51 +24,15 @@ export const serverApiToken: string = config.apiToken || crypto.randomBytes(24).
 
 export function validateWorkspacePath(requestedPath?: string): string {
   const targetRaw = requestedPath || process.cwd();
-  if (!targetRaw || targetRaw.trim() === '') {
-    throw new Error('Forbidden: Workspace path cannot be empty or unspecified.');
-  }
-
-  // Reject ambiguous null bytes or illegal characters
-  if (targetRaw.includes('\0')) {
-    throw new Error('Forbidden: Null byte injection detected in workspace path.');
-  }
-
-  const resolvedTarget = path.resolve(targetRaw);
-  if (!fs.existsSync(resolvedTarget)) {
-    throw new Error(`Forbidden: Requested workspace directory does not exist: "${resolvedTarget}".`);
-  }
-
-  let canonicalTarget: string;
-  try {
-    canonicalTarget = fs.realpathSync.native(resolvedTarget);
-  } catch (err: any) {
-    throw new Error(`Forbidden: Cannot canonicalize requested workspace path "${resolvedTarget}": ${err.message}`);
-  }
-
   const allowedRoots =
     config.allowedWorkspaces.length > 0 ? config.allowedWorkspaces : [process.cwd()];
 
-  const isContained = allowedRoots.some((allowedRoot) => {
-    try {
-      const canonicalRoot = fs.existsSync(allowedRoot)
-        ? fs.realpathSync.native(path.resolve(allowedRoot))
-        : path.resolve(allowedRoot);
-
-      const normTarget = path.normalize(canonicalTarget).toLowerCase();
-      const normRoot = path.normalize(canonicalRoot).toLowerCase();
-
-      return normTarget === normRoot || normTarget.startsWith(normRoot + path.sep);
-    } catch {
-      return false;
-    }
-  });
-
-  if (!isContained) {
-    throw new Error(
-      `Forbidden: Workspace path "${canonicalTarget}" is not within authorized workspace roots: [${allowedRoots.join(', ')}]`
-    );
+  try {
+    const authorized = SecurityPolicyEngine.validateWorkspaceAuthorization(targetRaw, allowedRoots);
+    return SecurityPolicyEngine.assertPathContainment(authorized, authorized);
+  } catch (err: any) {
+    throw new Error(`Forbidden: ${err.message}`);
   }
-  return canonicalTarget;
 }
 
 export async function createServer() {

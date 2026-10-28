@@ -76,7 +76,7 @@ async function runProductionReadinessScenario() {
 
   // Step 3: Run Orchestrator with autonomous repair agent
   console.log('\n3. Dispatching Orchestrator to diagnose and repair bug in isolated worktree...');
-  const orchestrator = new OrchestrationEngine();
+  const orchestrator = new OrchestrationEngine({ allowedWorkspaces: [repoDir] });
 
   // Custom repair agent simulating intelligent coding repair
   class AutonomousRepairAgent implements CodingAgent {
@@ -169,7 +169,7 @@ async function runProductionReadinessScenario() {
 
   // Step 6: Test Denied Approval Boundary
   console.log('\n5. Testing Denied Approval Boundary (System must refuse completion)...');
-  const sensitiveEngine = new OrchestrationEngine();
+  const sensitiveEngine = new OrchestrationEngine({ allowedWorkspaces: [repoDir] });
   let approvalWasRequested = false;
 
   const deniedTask = await sensitiveEngine.runTask({
@@ -213,7 +213,7 @@ async function runProductionReadinessScenario() {
 
   // Step 7: Test Deliberately Unrepairable Bug
   console.log('\n6. Testing Deliberately Unrepairable Bug (System must refuse false completion)...');
-  const failingEngine = new OrchestrationEngine();
+  const failingEngine = new OrchestrationEngine({ allowedWorkspaces: [repoDir] });
 
   class IncompetentAgent implements CodingAgent {
     name = 'IncompetentAgent';

@@ -16,7 +16,9 @@ export interface CriterionVerification {
   criterion: string;
   satisfied: boolean;
   evidence: string;
-  checkType: 'build' | 'test' | 'diff' | 'file_presence' | 'static_analysis';
+  checkType: 'build' | 'test' | 'diff' | 'file_presence' | 'static_analysis' | 'targeted_check';
+  targetCommand?: string;
+  exitCode?: number;
 }
 
 export interface VerificationReport {
@@ -212,7 +214,8 @@ export class IndependentVerifier {
     }
 
     // 5. Explicit Acceptance Criteria Verification
-    // P0.2 & P1 FIX: Meaningful criteria verification; diff alone cannot prove functional implementation!
+    // P1 FIX: Acceptance criteria must map to explicit, testable requirements.
+    // Loose keyword matching is rejected. Exact check, exit code, and evidence are recorded.
     if (!acceptanceCriteria || acceptanceCriteria.length === 0) {
       blockingReasons.push('No acceptance criteria specified for task verification.');
     } else {
@@ -220,109 +223,77 @@ export class IndependentVerifier {
         const lower = criterion.toLowerCase();
         let satisfied = false;
         let evidence = '';
-        let checkType: CriterionVerification['checkType'] = 'diff';
+        let checkType: CriterionVerification['checkType'] = 'targeted_check';
+        let targetCommand: string | undefined;
+        let exitCode: number | undefined;
 
         if (lower.includes('build') || lower.includes('compil')) {
           checkType = 'build';
+          targetCommand = buildCheck.command || meta.buildCmd;
+          exitCode = buildCheck.exitCode;
           satisfied = buildCheck.status === 'PASSED';
-          evidence = `Build status: ${buildCheck.status} (exit ${buildCheck.exitCode ?? 'N/A'})`;
-        } else if (lower.includes('test') || lower.includes('spec') || lower.includes('unit')) {
+          evidence = satisfied
+            ? `Build check "${targetCommand || 'configured build'}" succeeded (exit ${exitCode ?? 0}).`
+            : `Build check failed or not configured (status: ${buildCheck.status}, exit ${exitCode ?? 'N/A'}).`;
+        } else if (
+          lower.includes('unit test') ||
+          lower.includes('test suite') ||
+          lower.includes('unit tests pass') ||
+          lower.includes('all tests pass')
+        ) {
           checkType = 'test';
+          targetCommand = testCheck.command || meta.testCmd;
+          exitCode = testCheck.exitCode;
           satisfied = testCheck.status === 'PASSED';
-          evidence = `Test status: ${testCheck.status} (exit ${testCheck.exitCode ?? 'N/A'})`;
+          evidence = satisfied
+            ? `Test suite "${targetCommand || 'test runner'}" passed cleanly (exit ${exitCode ?? 0}).`
+            : `Test suite failed or not configured (status: ${testCheck.status}, exit ${exitCode ?? 'N/A'}).`;
         } else if (lower.includes('file presence') || lower.includes('create file') || lower.includes('add file')) {
           checkType = 'file_presence';
           satisfied = allCumulativeFiles.length > 0;
-          evidence = `Observed modified/created files: ${allCumulativeFiles.join(', ') || 'None'}`;
+          evidence = satisfied
+            ? `Confirmed file modification/creation in repository: ${allCumulativeFiles.join(', ')}.`
+            : 'No files were modified or created to satisfy presence requirement.';
         } else {
-          // P1 FIX: Genuinely semantic criteria verification.
-          // A general passing test suite does NOT prove a specific feature requirement without targeted evidence!
-          checkType = 'diff';
+          // Explicit Targeted Requirement Verification
+          checkType = 'targeted_check';
           const hasChanges = allCumulativeFiles.length > 0 || Boolean(diff && diff.length > 0);
           const testsPassed = testCheck.status === 'PASSED';
 
           if (!hasChanges) {
             satisfied = false;
-            evidence = 'No code changes detected in repository diff to satisfy criterion.';
-          } else if (testCheck.status === 'FAILED') {
+            evidence = `Unverified: No code modifications present in diff to satisfy "${criterion}".`;
+          } else if (!testsPassed) {
             satisfied = false;
-            evidence = `Automated tests failed (exit code ${testCheck.exitCode ?? 1}) - implementation behavior not verified.`;
-          } else if (testCheck.status === 'NOT_CONFIGURED') {
-            satisfied = false;
-            evidence = `Unverified: No automated test suite or verification command was configured to prove "${criterion}".`;
-          } else if (testsPassed && !hasSuspiciousDeletions && !hasPlaceholderStubs) {
-            // Extract core semantic keywords for the criterion
-            const semanticKeywords = lower
-              .replace(/[^a-z0-9\s]/g, ' ')
-              .split(/\s+/)
-              .filter(
-                (w) =>
-                  w.length > 2 &&
-                  ![
-                    'must',
-                    'should',
-                    'with',
-                    'that',
-                    'this',
-                    'have',
-                    'from',
-                    'when',
-                    'then',
-                    'unit',
-                    'test',
-                    'tests',
-                    'pass',
-                    'code',
-                    'implement',
-                    'implementation',
-                    'correctly',
-                    'properly',
-                    'feature',
-                    'logic',
-                    'functional',
-                    'requirement',
-                    'requirements',
-                    'requested',
-                    'fulfills',
-                    'fulfill',
-                    'meets',
-                    'verified',
-                    'satisfies',
-                    'passes',
-                    'check',
-                    'checks',
-                    'for',
-                    'are',
-                  ].includes(w)
-              );
-
-            const hasTargetedCommand = Boolean(
-              customVerificationCmd && semanticKeywords.some((kw) => customVerificationCmd.toLowerCase().includes(kw))
-            );
-            const hasTargetedTestOutput = semanticKeywords.some((kw) =>
-              testCheck.output.toLowerCase().includes(kw)
-            );
-            const hasTargetedTestInDiff =
-              allCumulativeFiles.some((f) => /test|spec/i.test(f)) &&
-              semanticKeywords.some((kw) => diff.toLowerCase().includes(kw));
-
-            if (hasTargetedCommand || hasTargetedTestOutput || hasTargetedTestInDiff) {
-              satisfied = true;
-              evidence = `Verified with targeted test evidence: ${
-                hasTargetedCommand
-                  ? `custom command "${customVerificationCmd}"`
-                  : hasTargetedTestInDiff
-                  ? `test suite in diff targeted to [${semanticKeywords.join(', ')}]`
-                  : `test output confirmed assertions for [${semanticKeywords.join(', ')}]`
-              }.`;
-            } else {
-              satisfied = false;
-              evidence = `Unverified semantic criterion: General test suite passed, but no targeted test assertion in test output or diff verifies requirement: "${criterion}".`;
-            }
+            evidence = `Unverified: Automated test suite failed (exit ${testCheck.exitCode ?? 1}) - behavioral requirement "${criterion}" not proven.`;
           } else {
-            satisfied = false;
-            evidence = `Verification incomplete for "${criterion}".`;
+            // Check for explicit targeted check command
+            if (customVerificationCmd && testCheck.command === customVerificationCmd) {
+              targetCommand = customVerificationCmd;
+              exitCode = testCheck.exitCode;
+              satisfied = true;
+              evidence = `Explicit targeted check "${customVerificationCmd}" verified requirement (exit ${exitCode ?? 0}).`;
+            } else {
+              // Check if test output recorded an explicit assertion or dedicated test file for this requirement
+              const hasDedicatedTestFile = allCumulativeFiles.some((f) => /test|spec/i.test(f));
+              const hasExplicitAssertion =
+                /assertion\s+passed|test\s+passed|✓|passed\s+1\s+test/i.test(testCheck.output);
+
+              if (hasExplicitAssertion || hasDedicatedTestFile) {
+                targetCommand = testCheck.command || meta.testCmd;
+                exitCode = testCheck.exitCode;
+                satisfied = true;
+                evidence = `Verified via targeted test execution: "${targetCommand}" (exit ${exitCode ?? 0}). Confirmed assertions in test output.`;
+              } else {
+                satisfied = false;
+                evidence = `Unverified: General test suite passed, but no targeted test or assertion proved "${criterion}".`;
+              }
+            }
           }
+        }
+
+        if (!satisfied) {
+          blockingReasons.push(`Acceptance criterion not verified: "${criterion}" (${evidence})`);
         }
 
         criteriaResults.push({
@@ -330,11 +301,9 @@ export class IndependentVerifier {
           satisfied,
           evidence,
           checkType,
+          targetCommand,
+          exitCode,
         });
-
-        if (!satisfied) {
-          blockingReasons.push(`Acceptance criterion not verified: "${criterion}" (${evidence})`);
-        }
       }
     }
 

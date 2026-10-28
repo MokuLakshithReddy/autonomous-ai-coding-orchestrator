@@ -32,6 +32,7 @@ export interface OrchestratorEvent {
 }
 
 export class OrchestrationEngine extends EventEmitter {
+  private allowedWorkspaces?: string[];
   private activeTasks = new Map<
     string,
     {
@@ -41,8 +42,9 @@ export class OrchestrationEngine extends EventEmitter {
     }
   >();
 
-  constructor() {
+  constructor(options?: { allowedWorkspaces?: string[] }) {
     super();
+    this.allowedWorkspaces = options?.allowedWorkspaces;
   }
 
   emitOrchestratorEvent(event: Omit<OrchestratorEvent, 'id' | 'timestamp'>): void {
@@ -94,9 +96,12 @@ export class OrchestrationEngine extends EventEmitter {
     title?: string;
     maxRetries?: number;
     customAgent?: CodingAgent;
+    allowedWorkspaces?: string[];
   }): Promise<TaskRecord> {
     await initDatabase();
-    const resolvedWorkspace = SecurityPolicyEngine.assertPathContainment(params.workspacePath, params.workspacePath);
+    const allowedRoots = params.allowedWorkspaces ?? this.allowedWorkspaces ?? config.allowedWorkspaces;
+    const authorizedWorkspace = SecurityPolicyEngine.validateWorkspaceAuthorization(params.workspacePath, allowedRoots);
+    const resolvedWorkspace = SecurityPolicyEngine.assertPathContainment(authorizedWorkspace, authorizedWorkspace);
 
     const taskId = crypto.randomUUID();
     const attemptId = crypto.randomUUID();
@@ -212,6 +217,8 @@ export class OrchestrationEngine extends EventEmitter {
 
     const taskInspector = taskWorktreePath ? new RepoInspector(taskWorktreePath) : inspector;
     const verifier = new IndependentVerifier(executionPath);
+
+    try {
 
     if (params.customAgent) {
       if (typeof (params.customAgent as any).setWorkspacePath === 'function') {
@@ -671,21 +678,29 @@ export class OrchestrationEngine extends EventEmitter {
       });
     }
 
-    // P0 FIX: Cleanup isolated worktree or sandbox on completion while preserving task branch commits
-    if (taskWorktreePath) {
-      if (isWorktree) {
-        await inspector.removeIsolatedWorktree(taskWorktreePath);
-      } else {
-        await inspector.removeIsolatedSandbox(taskWorktreePath);
+    } finally {
+      // P1 FIX: Guaranteed resource cleanup in finally block
+      if (taskWorktreePath) {
+        try {
+          if (isWorktree) {
+            await inspector.removeIsolatedWorktree(taskWorktreePath);
+          } else {
+            await inspector.removeIsolatedSandbox(taskWorktreePath);
+          }
+          this.emitOrchestratorEvent({
+            taskId,
+            type: 'LOG',
+            message: `Isolated environment cleaned up. Task changes preserved ${
+              taskBranchName ? `on branch: ${taskBranchName}` : 'in sandbox snapshot'
+            }. User working tree left untouched.`,
+          });
+        } catch (cleanupErr: any) {
+          console.warn(`[Cleanup Warning] Could not remove isolated environment "${taskWorktreePath}": ${cleanupErr?.message}`);
+        }
       }
-      this.emitOrchestratorEvent({
-        taskId,
-        type: 'LOG',
-        message: `Isolated environment cleaned up. Task changes preserved ${taskBranchName ? `on branch: ${taskBranchName}` : 'in sandbox snapshot'}. User working tree left untouched.`,
-      });
-    }
 
-    this.activeTasks.delete(taskId);
+      this.activeTasks.delete(taskId);
+    }
   }
 
   private async requestCommandApproval(

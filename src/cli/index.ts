@@ -5,6 +5,7 @@ import { createServer } from '../server/index.js';
 import { orchestrator, type OrchestratorEvent } from '../orchestrator/engine.js';
 import { initDatabase, taskRepo } from '../db/index.js';
 import { RepoInspector } from '../repo/inspector.js';
+import { SecurityPolicyEngine } from '../security/policy.js';
 import { config } from '../config/index.js';
 
 const program = new Command();
@@ -44,7 +45,8 @@ program
   .option('-r, --retries <number>', 'Maximum self-repair retry budget', String(config.maxRetryBudget))
   .action(async (opts) => {
     await initDatabase();
-    const resolvedWorkspace = path.resolve(opts.workspace);
+    const authorizedWorkspace = SecurityPolicyEngine.validateWorkspaceAuthorization(opts.workspace);
+    const resolvedWorkspace = SecurityPolicyEngine.assertPathContainment(authorizedWorkspace, authorizedWorkspace);
     const maxRetries = parseInt(opts.retries, 10);
 
     console.log(chalk.bold.magenta('\n======================================================'));

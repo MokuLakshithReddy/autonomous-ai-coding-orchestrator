@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import os from 'node:os';
 import { simpleGit, type SimpleGit, type StatusResult } from 'simple-git';
 
 export interface ProjectMetadata {
@@ -200,10 +201,10 @@ export class RepoInspector {
   }
 
   /**
-   * P0 FIX: Creates an isolated filesystem sandbox copy for non-Git workspaces.
+   * P1 FIX: Creates an isolated filesystem sandbox copy for non-Git workspaces in a dedicated temp root.
    */
   async createIsolatedSandbox(taskId: string): Promise<string> {
-    const sandboxDir = path.join(this.workspacePath, '.orchestrator_sandboxes', taskId);
+    const sandboxDir = path.join(os.tmpdir(), 'orchestrator_sandboxes', taskId);
     await fs.mkdir(sandboxDir, { recursive: true });
     await fs.cp(this.workspacePath, sandboxDir, {
       recursive: true,
