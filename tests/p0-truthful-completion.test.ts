@@ -130,6 +130,86 @@ async function runTests() {
   assert.ok(emptyReport.blockingReasons.length > 0, 'Blocking reasons must be listed');
   console.log('   ✓ Verifier enforces single authoritative isVerified decision and blocks missing criteria.');
 
+  // Test 7: Action-Level Command Approval Gate (P0 Fix)
+  console.log('\n7. Testing Action-Level Command Approval Gate (P0)...');
+  const unapprovedToolbox = new AgentToolbox(currentWorkspace);
+  
+  // Attempting high-risk command without approval handler must fail closed
+  await assert.rejects(
+    async () => unapprovedToolbox.executeCommand('rm -rf temp_folder'),
+    /Security Exception \[Approval Required\]/,
+    'High-risk command must fail closed without approval handler'
+  );
+
+  // Rejection by operator
+  const rejectingToolbox = new AgentToolbox(currentWorkspace, async () => false);
+  await assert.rejects(
+    async () => rejectingToolbox.executeCommand('rm -rf temp_folder'),
+    /Security Exception \[Approval Denied\]/,
+    'Rejected command must not execute'
+  );
+
+  // Approval granted by operator
+  let approvalCalled = false;
+  const approvingToolbox = new AgentToolbox(currentWorkspace, async (cmd, risk) => {
+    approvalCalled = true;
+    assert.strictEqual(risk.requiresApproval, true);
+    return true;
+  });
+  // Use a benign command that matches risk pattern but is safe
+  const approvedRes = await approvingToolbox.executeCommand('echo "safe test" && rm --help');
+  assert.strictEqual(approvalCalled, true, 'Approval callback must be triggered for command');
+  console.log('   ✓ Command-level safety gate strictly enforces approve-or-reject before execution.');
+
+  // Test 8: Server API Token Authentication & Workspace Authorization (P0 Fix)
+  console.log('\n8. Testing Server API Token Authentication & Workspace Authorization (P0)...');
+  const { createServer, serverApiToken, validateWorkspacePath } = await import('../src/server/index.js');
+  const server = await createServer();
+
+  // Test unauthenticated request is rejected with 401
+  const unauthRes = await server.inject({
+    method: 'GET',
+    url: '/api/tasks',
+  });
+  assert.strictEqual(unauthRes.statusCode, 401, 'Unauthenticated API access must return 401');
+
+  // Test authenticated request succeeds
+  const authRes = await server.inject({
+    method: 'GET',
+    url: '/api/tasks',
+    headers: {
+      'x-api-token': serverApiToken,
+    },
+  });
+  assert.strictEqual(authRes.statusCode, 200, 'Authenticated API access must succeed');
+
+  // Test workspace containment validation
+  assert.throws(
+    () => validateWorkspacePath(path.resolve(currentWorkspace, '..', 'unauthorized-external-dir')),
+    /Forbidden/,
+    'Unauthorized workspace path outside roots must be strictly rejected'
+  );
+  console.log('   ✓ Server API strictly requires session token and blocks unauthorized workspace paths.');
+
+  // Test 9: Semantic Acceptance Criteria Validation (P1 Fix)
+  console.log('\n9. Testing Semantic Acceptance Criteria Proof (P1)...');
+  const semanticReport = await verifier.verify(
+    {
+      isGitRepo: true,
+      hasUncommittedChanges: false,
+      uncommittedFiles: [],
+      ecosystems: ['nodejs'],
+      fileTreeSummary: [],
+    },
+    ['Implement core payment processing logic']
+  );
+  assert.strictEqual(semanticReport.isVerified, false, 'Semantic implementation criteria must not pass without test proof');
+  assert.ok(
+    semanticReport.blockingReasons.some((r) => r.includes('Acceptance criterion not verified')),
+    'Unverified semantic criteria must block verification'
+  );
+  console.log('   ✓ Verifier strictly requires test proof for behavioral and implementation criteria.');
+
   console.log('\n=== ALL P0/P1 CORRECTNESS, SAFETY & VERIFICATION TESTS PASSED! ===\n');
 }
 

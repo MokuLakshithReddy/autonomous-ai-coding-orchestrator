@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import treeKill from 'tree-kill';
-import { SecurityPolicyEngine } from '../security/policy.js';
+import { SecurityPolicyEngine, type ActionPolicy } from '../security/policy.js';
 
 export interface CommandResult {
   stdout: string;
@@ -13,12 +13,16 @@ export interface CommandResult {
   cancelled?: boolean;
 }
 
+export type ApprovalCallback = (commandOrAction: string, risk: ActionPolicy) => Promise<boolean>;
+
 export class AgentToolbox {
   private workspacePath: string;
+  private onRequestApproval?: ApprovalCallback;
   private maxOutputBytes = 500 * 1024; // 500 KB output limit per command
 
-  constructor(workspacePath: string) {
+  constructor(workspacePath: string, onRequestApproval?: ApprovalCallback) {
     this.workspacePath = path.resolve(workspacePath);
+    this.onRequestApproval = onRequestApproval;
   }
 
   resolveSafePath(targetRelPath: string): string {
@@ -49,6 +53,16 @@ export class AgentToolbox {
 
   async deleteFile(filePath: string): Promise<boolean> {
     const fullPath = this.resolveSafePath(filePath);
+    const policy = SecurityPolicyEngine.evaluateActionRisk('delete file', filePath);
+    if (policy.requiresApproval) {
+      if (!this.onRequestApproval) {
+        throw new Error(`Security Exception [Approval Required]: Deletion of "${filePath}" requires operator approval.`);
+      }
+      const isApproved = await this.onRequestApproval(`delete ${filePath}`, policy);
+      if (!isApproved) {
+        throw new Error(`Security Exception [Approval Denied]: Deletion of "${filePath}" was rejected by the operator.`);
+      }
+    }
     try {
       await fs.unlink(fullPath);
       return true;
@@ -110,7 +124,21 @@ export class AgentToolbox {
     customEnv: Record<string, string> = {},
     abortSignal?: AbortSignal
   ): Promise<CommandResult> {
-    this.assertCommandSafety(commandStr);
+    // P0 FIX: High and critical operations must flow through consistent approve-or-reject action gate
+    const policy = SecurityPolicyEngine.evaluateCommandRisk(commandStr);
+    if (policy.requiresApproval) {
+      if (!this.onRequestApproval) {
+        throw new Error(
+          `Security Exception [Approval Required]: Command "${commandStr}" requires approval (${policy.riskLevel}: ${policy.reason}), but no approval handler is configured.`
+        );
+      }
+      const isApproved = await this.onRequestApproval(commandStr, policy);
+      if (!isApproved) {
+        throw new Error(
+          `Security Exception [Approval Denied]: Execution of command "${commandStr}" was rejected by the operator.`
+        );
+      }
+    }
 
     if (abortSignal?.aborted) {
       return {
@@ -221,28 +249,5 @@ export class AgentToolbox {
         });
       });
     });
-  }
-
-  private assertCommandSafety(command: string): void {
-    const policy = SecurityPolicyEngine.evaluateCommandRisk(command);
-    if (policy.riskLevel === 'CRITICAL') {
-      throw new Error(`Security Exception [Action Policy]: Destructive command blocked by safety engine: "${command}". Reason: ${policy.reason}`);
-    }
-
-    const normalized = command.toLowerCase().trim();
-    const forbiddenPatterns = [
-      /\brm\s+-rf\s+[\/\\]/i,
-      /\bformat\s+[a-z]:/i,
-      /\bdiskpart\b/i,
-      /\bgit\s+push\s+.*--force/i,
-      /\bdrop\s+database\b/i,
-      /\bshutdown\b/i,
-    ];
-
-    for (const pattern of forbiddenPatterns) {
-      if (pattern.test(normalized)) {
-        throw new Error(`Security policy blocked potentially destructive command: "${command}"`);
-      }
-    }
   }
 }

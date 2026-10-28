@@ -15,7 +15,7 @@ import {
   type StepRecord,
 } from '../db/index.js';
 import { TaskStateMachine, type TaskState } from '../core/state-machine.js';
-import { SecurityPolicyEngine } from '../security/policy.js';
+import { SecurityPolicyEngine, type ActionPolicy } from '../security/policy.js';
 import { config } from '../config/index.js';
 
 export interface OrchestratorEvent {
@@ -177,8 +177,30 @@ export class OrchestrationEngine extends EventEmitter {
 
     const inspector = new RepoInspector(params.workspacePath);
     const brain = new LLMBrain();
-    const verifier = new IndependentVerifier(params.workspacePath);
-    const agent = params.customAgent || new BuiltInAutonomousAgent(params.workspacePath);
+
+    // P0 FIX: Run autonomous execution in an isolated git worktree to protect user checkout
+    let executionPath = params.workspacePath;
+    let taskWorktreePath: string | null = null;
+    let taskBranchName: string | undefined;
+
+    if (await inspector.isGitRepository()) {
+      taskWorktreePath = await inspector.createIsolatedWorktree(taskId);
+      if (taskWorktreePath) {
+        executionPath = taskWorktreePath;
+        taskBranchName = `task/${taskId.slice(0, 8)}`;
+      }
+    }
+
+    const taskInspector = taskWorktreePath ? new RepoInspector(taskWorktreePath) : inspector;
+    const verifier = new IndependentVerifier(executionPath);
+
+    let currentExecutingStepId: string | undefined;
+
+    const agent =
+      params.customAgent ||
+      new BuiltInAutonomousAgent(executionPath, async (commandOrAction, policy) => {
+        return await this.requestCommandApproval(taskId, currentExecutingStepId, commandOrAction, policy);
+      });
     const maxRetries = params.maxRetries ?? config.maxRetryBudget;
     const maxTotalDurationMs = config.stepTimeoutSeconds * 10 * 1000;
 
@@ -329,8 +351,10 @@ export class OrchestrationEngine extends EventEmitter {
         data: step,
       });
 
+      currentExecutingStepId = stepRec.id;
+
       // Safe targeted checkpoint before executing step
-      const preStepCommit = await inspector.createTaskCheckpoint(
+      const preStepCommit = await taskInspector.createTaskCheckpoint(
         targetFiles,
         `pre-step-${step.index}: ${step.title}`
       );
@@ -473,7 +497,7 @@ export class OrchestrationEngine extends EventEmitter {
 
         // Safe rollback of task-owned files if checkpoint exists
         if (preStepCommit && targetFiles.length > 0) {
-          await inspector.restoreTaskFiles(targetFiles, preStepCommit);
+          await taskInspector.restoreTaskFiles(targetFiles, preStepCommit);
         }
 
         const finalFailReason = !executionResult.success
@@ -526,7 +550,7 @@ export class OrchestrationEngine extends EventEmitter {
       });
 
       // Post-step checkpoint
-      const postStepCommit = await inspector.createTaskCheckpoint(
+      const postStepCommit = await taskInspector.createTaskCheckpoint(
         targetFiles,
         `post-step-${step.index}: ${step.title}`
       );
@@ -566,7 +590,7 @@ export class OrchestrationEngine extends EventEmitter {
       undefined,
       baseline?.baseCommit
     );
-    const finalDiff = await inspector.getDiffAgainstBase();
+    const finalDiff = await taskInspector.getDiffAgainstBase();
 
     const verifications = await verificationRepo.listForTask(taskId);
     const verifSummaries = verifications.map(
@@ -620,7 +644,71 @@ export class OrchestrationEngine extends EventEmitter {
       });
     }
 
+    // P0 FIX: Cleanup isolated worktree folder on completion while preserving task branch commits
+    if (taskWorktreePath) {
+      await inspector.removeIsolatedWorktree(taskWorktreePath);
+      this.emitOrchestratorEvent({
+        taskId,
+        type: 'LOG',
+        message: `Isolated worktree cleaned up. Task commits preserved on branch: ${taskBranchName || 'task branch'}. User working tree left untouched.`,
+      });
+    }
+
     this.activeTasks.delete(taskId);
+  }
+
+  private async requestCommandApproval(
+    taskId: string,
+    stepId: string | undefined,
+    commandOrAction: string,
+    policy: ActionPolicy
+  ): Promise<boolean> {
+    const approvalId = crypto.randomUUID();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+
+    await approvalRepo.create({
+      id: approvalId,
+      taskId,
+      stepId,
+      actionType: policy.riskLevel,
+      targetResource: 'terminal_command',
+      parametersJson: JSON.stringify({ command: commandOrAction }),
+      details: policy.reason || `Action approval requested for: "${commandOrAction}"`,
+      status: 'PENDING',
+      expiresAt,
+      createdAt: new Date().toISOString(),
+    });
+
+    this.emitOrchestratorEvent({
+      taskId,
+      stepId,
+      type: 'APPROVAL_REQUIRED',
+      message: `Approval required for command: "${commandOrAction}" (${policy.riskLevel})`,
+      data: { approvalId, command: commandOrAction, policy, expiresAt },
+    });
+
+    const active = this.activeTasks.get(taskId);
+    if (active) {
+      await this.transitionTaskState(
+        taskId,
+        active.stateMachine,
+        'awaiting_approval',
+        `Awaiting approval for command: ${commandOrAction}`
+      );
+    }
+
+    const isApproved = await this.waitForApproval(approvalId);
+
+    if (active && isApproved) {
+      await this.transitionTaskState(
+        taskId,
+        active.stateMachine,
+        'executing',
+        `Command approved by operator: ${commandOrAction}`
+      );
+    }
+
+    return isApproved;
   }
 
   /**

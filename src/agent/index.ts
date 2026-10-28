@@ -1,5 +1,5 @@
 import { GoogleGenAI } from '@google/genai';
-import { AgentToolbox, type CommandResult } from './tools.js';
+import { AgentToolbox, type CommandResult, type ApprovalCallback } from './tools.js';
 import { config } from '../config/index.js';
 import { RepoInspector } from '../repo/inspector.js';
 
@@ -29,9 +29,9 @@ export class BuiltInAutonomousAgent implements CodingAgent {
   private ai: GoogleGenAI | null = null;
   private modelName: string;
 
-  constructor(workspacePath: string) {
+  constructor(workspacePath: string, onRequestApproval?: ApprovalCallback) {
     this.workspacePath = workspacePath;
-    this.toolbox = new AgentToolbox(workspacePath);
+    this.toolbox = new AgentToolbox(workspacePath, onRequestApproval);
     this.modelName = config.geminiModel || 'gemini-2.5-flash';
     if (config.geminiApiKey) {
       this.ai = new GoogleGenAI({ apiKey: config.geminiApiKey });

@@ -16,6 +16,7 @@ const ConfigSchema = z.object({
   requireApprovalForDestructive: z.boolean().default(true),
   protectedBranches: z.array(z.string()).default(['main', 'master', 'production']),
   allowedWorkspaces: z.array(z.string()).default([]),
+  apiToken: z.string().optional(),
 });
 
 export type AppConfig = z.infer<typeof ConfigSchema>;
@@ -36,6 +37,7 @@ export function loadConfig(): AppConfig {
     requireApprovalForDestructive: process.env.REQUIRE_APPROVAL_FOR_DESTRUCTIVE !== 'false',
     protectedBranches: protectedBranchesRaw.split(',').map((s) => s.trim()).filter(Boolean),
     allowedWorkspaces: allowedWorkspacesRaw.split(';').map((s) => path.resolve(s.trim())).filter(Boolean),
+    apiToken: process.env.ORCHESTRATOR_API_TOKEN || process.env.API_TOKEN,
   });
 
   return parsed;

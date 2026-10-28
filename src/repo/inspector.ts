@@ -107,20 +107,25 @@ export class RepoInspector {
 
       const filesToStage: string[] = [];
 
+      const initialDirtySet = new Set(this.baseline?.dirtyFilesAtStart || []);
+
       if (taskOwnedFiles.length > 0) {
-        // Stage only explicit task-owned files that exist
+        // Stage only explicit task-owned files that were NOT in initial dirty baseline
         for (const file of taskOwnedFiles) {
           const relPath = path.isAbsolute(file)
             ? path.relative(this.workspacePath, file).replace(/\\/g, '/')
             : file.replace(/\\/g, '/');
 
-          // Ensure file was not a pre-existing dirty file unrelated to task
-          filesToStage.push(relPath);
+          // Strict P0 Protection: Do not stage files that already had pre-existing user modifications!
+          if (!initialDirtySet.has(relPath)) {
+            filesToStage.push(relPath);
+          } else {
+            console.warn(`[Checkpoint Protection] Skipping pre-existing dirty user file: ${relPath}`);
+          }
         }
       } else {
         // If no explicit files specified, find files modified that were NOT in original dirtyFilesAtStart
         const currentStatus = await this.git.status();
-        const initialDirtySet = new Set(this.baseline?.dirtyFilesAtStart || []);
 
         for (const file of currentStatus.files) {
           if (!initialDirtySet.has(file.path)) {
@@ -243,11 +248,12 @@ export class RepoInspector {
       packageManager = 'npm';
 
       if (pkg.scripts) {
-        if (pkg.scripts.build) buildCmd = 'npm.cmd run build';
+        const npmBin = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+        if (pkg.scripts.build) buildCmd = `${npmBin} run build`;
         if (pkg.scripts.test && !pkg.scripts.test.includes('no test specified')) {
-          testCmd = 'npm.cmd test';
+          testCmd = `${npmBin} test`;
         }
-        if (pkg.scripts.lint) lintCmd = 'npm.cmd run lint';
+        if (pkg.scripts.lint) lintCmd = `${npmBin} run lint`;
       }
     } catch {}
 

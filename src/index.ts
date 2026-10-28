@@ -1,4 +1,4 @@
-import { createServer } from './server/index.js';
+import { createServer, serverApiToken } from './server/index.js';
 import { config } from './config/index.js';
 
 export * from './config/index.js';
@@ -22,6 +22,7 @@ async function bootstrap() {
   console.log(`======================================================`);
   console.log(`Server URL:        ${address}`);
   console.log(`Realtime Stream:   ws://${config.host}:${config.port}/ws`);
+  console.log(`API Auth Token:    ${serverApiToken}`);
   console.log(`SQLite Database:   ${config.databaseUrl}`);
   console.log(`Brain Model:       ${config.geminiModel}`);
   console.log(`Auto Repair:       ${config.autoRepairEnabled ? 'Enabled' : 'Disabled'}`);

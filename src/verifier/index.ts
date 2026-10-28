@@ -147,17 +147,42 @@ export class IndependentVerifier {
     const gitStatus = await this.inspector.getGitStatus();
     const filesChanged = gitStatus ? gitStatus.files.map((f) => f.path) : [];
 
+    // P1 FIX: Inspect entire cumulative commit history from baseCommit, not just working tree
+    const allFilesChangedSet = new Set<string>(filesChanged);
+    if (baseCommit && baseCommit !== 'initial') {
+      try {
+        const git = (this.inspector as any).git;
+        const nameOnly: string = await git.diff(['--name-only', baseCommit, 'HEAD']);
+        for (const line of nameOnly.split('\n')) {
+          const trimmed = line.trim();
+          if (trimmed) allFilesChangedSet.add(trimmed);
+        }
+      } catch {}
+    }
+    // Parse filenames from diff headers as well
+    const diffFileMatches = diff.matchAll(/^diff --git a\/(.+?) b\/(.+?)$/gm);
+    for (const match of diffFileMatches) {
+      if (match[2]) allFilesChangedSet.add(match[2].trim());
+    }
+    const allCumulativeFiles = Array.from(allFilesChangedSet);
+
     let hasSuspiciousDeletions = false;
     let hasForbiddenModifications = false;
     let hasPlaceholderStubs = false;
     const diffNotes: string[] = [];
 
-    // Security check for sensitive secret files
-    for (const f of filesChanged) {
+    // Security check for sensitive secret files across ALL cumulative changes
+    for (const f of allCumulativeFiles) {
       const lower = f.toLowerCase();
-      if (lower.includes('.env') || lower.includes('credentials') || lower.includes('id_rsa') || lower.includes('.pem')) {
+      if (
+        lower.includes('.env') ||
+        lower.includes('credentials') ||
+        lower.includes('id_rsa') ||
+        lower.includes('.pem') ||
+        lower.includes('.key')
+      ) {
         hasForbiddenModifications = true;
-        diffNotes.push(`Sensitive secret file modified: ${f}`);
+        diffNotes.push(`Sensitive secret file modified in task history: ${f}`);
         blockingReasons.push(`Unauthorized modification of sensitive secret file: ${f}`);
       }
     }
@@ -187,11 +212,9 @@ export class IndependentVerifier {
     }
 
     // 5. Explicit Acceptance Criteria Verification
-    // P0.2 FIX: If no criteria provided, require at least one verified code change to prevent empty passes
+    // P0.2 & P1 FIX: Meaningful criteria verification; diff alone cannot prove functional implementation!
     if (!acceptanceCriteria || acceptanceCriteria.length === 0) {
-      if (filesChanged.length === 0 && (!diff || diff.trim().length === 0)) {
-        blockingReasons.push('No acceptance criteria specified and zero files were modified in workspace.');
-      }
+      blockingReasons.push('No acceptance criteria specified for task verification.');
     } else {
       for (const criterion of acceptanceCriteria) {
         const lower = criterion.toLowerCase();
@@ -207,14 +230,29 @@ export class IndependentVerifier {
           checkType = 'test';
           satisfied = testCheck.status === 'PASSED';
           evidence = `Test status: ${testCheck.status} (exit ${testCheck.exitCode ?? 'N/A'})`;
-        } else if (lower.includes('file') || lower.includes('creat') || lower.includes('implement')) {
+        } else if (lower.includes('file presence') || lower.includes('create file') || lower.includes('add file')) {
           checkType = 'file_presence';
-          satisfied = filesChanged.length > 0 || Boolean(diff && diff.length > 0);
-          evidence = `Observed modified files: ${filesChanged.join(', ') || (diff ? 'Committed changes present' : 'None')}`;
+          satisfied = allCumulativeFiles.length > 0;
+          evidence = `Observed modified/created files: ${allCumulativeFiles.join(', ') || 'None'}`;
         } else {
+          // P1 FIX: Behavioral, feature, and implementation criteria require passing test proof
           checkType = 'diff';
-          satisfied = (filesChanged.length > 0 || diff.length > 0) && !hasSuspiciousDeletions && !hasPlaceholderStubs;
-          evidence = `Verified diff contains modifications without bypasses or stubs.`;
+          const hasChanges = allCumulativeFiles.length > 0 || Boolean(diff && diff.length > 0);
+          const testsPassed = testCheck.status === 'PASSED';
+
+          if (testsPassed && hasChanges && !hasSuspiciousDeletions && !hasPlaceholderStubs) {
+            satisfied = true;
+            evidence = `Verified: passing test suite confirms expected behavior for "${criterion}".`;
+          } else if (!hasChanges) {
+            satisfied = false;
+            evidence = 'No code changes detected in repository diff to satisfy criterion.';
+          } else if (testCheck.status === 'FAILED') {
+            satisfied = false;
+            evidence = `Automated tests failed (exit code ${testCheck.exitCode ?? 1}) - implementation behavior not verified.`;
+          } else {
+            satisfied = false;
+            evidence = `Unverified semantic criterion: No automated test or verification command was provided to prove behavioral correctness for "${criterion}".`;
+          }
         }
 
         criteriaResults.push({

@@ -159,7 +159,7 @@ export class SecurityPolicyEngine {
 
     // Critical operations: deployments, forced pushes, system formatting
     if (
-      /\b(git\s+push\s+.*--force|deploy|publish|production|drop\s+database|format\s+[a-z]:|rm\s+-rf\s+[\/\\]|dd\s+if=)\b/i.test(
+      /\b(git\s+push\s+.*--force|deploy|publish|production|drop\s+database|format\s+[a-z]:|rm\s+-rf\s+[\/\\]|dd\s+if=)/i.test(
         text
       )
     ) {
@@ -172,7 +172,7 @@ export class SecurityPolicyEngine {
 
     // High risk: protected branch mutations, deleting files, permission alteration, system changes
     if (
-      /\b(rm\s+|del\s+|unlink\s+|rmdir\s+|git\s+reset|git\s+clean|chmod\s+|chown\s+|curl\s+.*\|\s*sh|wget\s+.*\|\s*sh|npm\s+publish)\b/i.test(
+      /\b(rm|del|unlink|rmdir|git\s+reset|git\s+clean|chmod|chown|curl\s+.*\|\s*sh|wget\s+.*\|\s*sh|npm\s+publish)\b/i.test(
         text
       )
     ) {

@@ -18,6 +18,32 @@ import { orchestrator, type OrchestratorEvent } from '../orchestrator/engine.js'
 import { LLMBrain } from '../llm/index.js';
 import { SecurityPolicyEngine } from '../security/policy.js';
 
+import crypto from 'node:crypto';
+
+export const serverApiToken: string = config.apiToken || crypto.randomBytes(24).toString('hex');
+
+export function validateWorkspacePath(requestedPath?: string): string {
+  const target = path.resolve(requestedPath || process.cwd());
+  const allowed =
+    config.allowedWorkspaces.length > 0 ? config.allowedWorkspaces : [path.resolve(process.cwd())];
+
+  const isContained = allowed.some((allowedRoot) => {
+    try {
+      SecurityPolicyEngine.assertPathContainment(target, allowedRoot);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+
+  if (!isContained) {
+    throw new Error(
+      `Forbidden: Workspace path "${target}" is not within authorized workspace roots: [${allowed.join(', ')}]`
+    );
+  }
+  return target;
+}
+
 export async function createServer() {
   await initDatabase();
 
@@ -44,6 +70,41 @@ export async function createServer() {
     },
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     credentials: true,
+  });
+
+  // P0 FIX: Token-based authentication middleware on sensitive and mutating endpoints
+  fastify.addHook('onRequest', async (req, reply) => {
+    const url = req.raw.url || '';
+    // Public paths: health check, root, static assets
+    if (
+      url === '/api/system/status' ||
+      url === '/' ||
+      url.startsWith('/index.html') ||
+      (!url.startsWith('/api') && !url.startsWith('/ws'))
+    ) {
+      return;
+    }
+
+    const authHeader = req.headers['authorization'];
+    const tokenHeader = req.headers['x-api-token'];
+    const queryToken = (req.query as any)?.token;
+
+    let providedToken: string | undefined;
+    if (typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) {
+      providedToken = authHeader.slice(7).trim();
+    } else if (typeof tokenHeader === 'string') {
+      providedToken = tokenHeader.trim();
+    } else if (typeof queryToken === 'string') {
+      providedToken = queryToken.trim();
+    }
+
+    if (!providedToken || providedToken !== serverApiToken) {
+      return reply.status(401).send({
+        error: 'Unauthorized',
+        message:
+          'A valid API token is required via Authorization: Bearer <token>, x-api-token header, or ?token= query parameter.',
+      });
+    }
   });
 
   await fastify.register(websocket);
@@ -84,6 +145,22 @@ export async function createServer() {
         return;
       }
 
+      // P0 FIX: Authenticate WebSocket client connection
+      const queryToken = (req.query as any)?.token;
+      const headerToken = req.headers['x-api-token'];
+      const authHeader = req.headers['authorization'];
+      const token =
+        queryToken ||
+        headerToken ||
+        (typeof authHeader === 'string' && authHeader.startsWith('Bearer ')
+          ? authHeader.slice(7).trim()
+          : undefined);
+
+      if (token !== serverApiToken) {
+        socket.close(1008, 'Unauthorized: Invalid API token');
+        return;
+      }
+
       wsClients.add(socket);
       socket.send(
         JSON.stringify({
@@ -110,6 +187,7 @@ export async function createServer() {
       stepTimeoutSeconds: config.stepTimeoutSeconds,
       autoRepairEnabled: config.autoRepairEnabled,
       defaultWorkspace: process.cwd(),
+      allowedWorkspaces: config.allowedWorkspaces.length > 0 ? config.allowedWorkspaces : [process.cwd()],
       version: '1.0.0',
     };
   });
@@ -125,13 +203,16 @@ export async function createServer() {
   });
 
   // Repository Inspection Endpoint
-  fastify.post<{ Body: { workspacePath?: string } }>('/api/repo/inspect', async (req) => {
-    const targetPath = req.body?.workspacePath || process.cwd();
-    // Validate workspace path safety
-    const safeWorkspace = SecurityPolicyEngine.assertPathContainment(targetPath, targetPath);
-    const inspector = new RepoInspector(safeWorkspace);
-    const meta = await inspector.inspect();
-    return { workspacePath: safeWorkspace, meta };
+  fastify.post<{ Body: { workspacePath?: string } }>('/api/repo/inspect', async (req, reply) => {
+    try {
+      // P0 FIX: Validate against authorized workspace roots
+      const safeWorkspace = validateWorkspacePath(req.body?.workspacePath);
+      const inspector = new RepoInspector(safeWorkspace);
+      const meta = await inspector.inspect();
+      return { workspacePath: safeWorkspace, meta };
+    } catch (err: any) {
+      return reply.status(403).send({ error: err.message });
+    }
   });
 
   // Tasks Endpoints
@@ -170,7 +251,14 @@ export async function createServer() {
       return reply.status(400).send({ error: 'Prompt is required' });
     }
 
-    const resolvedWorkspace = path.resolve(workspacePath || process.cwd());
+    // P0 FIX: Verify workspace is within authorized boundaries
+    let resolvedWorkspace: string;
+    try {
+      resolvedWorkspace = validateWorkspacePath(workspacePath);
+    } catch (err: any) {
+      return reply.status(403).send({ error: err.message });
+    }
+
     const task = await orchestrator.runTask({
       prompt,
       workspacePath: resolvedWorkspace,

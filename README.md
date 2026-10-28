@@ -528,12 +528,15 @@ const task = await engine.runTask({
 
 | Guard | Mechanism | Failure Action |
 | :--- | :--- | :--- |
-| **Path Sandboxing** | `AgentToolbox.resolveSafePath()` checks against `path.resolve(workspacePath)` | Throws `Security Exception`, blocks write |
-| **Command Blacklist** | Regex interceptor blocks `rm -rf /`, `format`, `shutdown`, `git push --force` | Rejects subprocess spawn immediately |
-| **Protected Branches** | Git service blocks direct pushes to `main`, `master`, `production` | Enforces feature branch creation |
-| **Secret Protection** | Verifier flags modifications to `.env`, credentials, or private keys | Fails verification immediately |
+| **API Authentication** | Cryptographic session token required via `Authorization: Bearer <token>` or `x-api-token` | Rejects unauthenticated requests with HTTP 401 |
+| **Workspace Sandboxing**| `validateWorkspacePath()` validates against explicit `allowedWorkspaces` (defaulting strictly to server root) | Rejects unauthorized directory traversal with HTTP 403 |
+| **Git Worktree Isolation**| Tasks execute within isolated Git worktrees (`.orchestrator_worktrees/task-<id>`) on dedicated branch | Leaves user's checkout, dirty files, and uncommitted edits 100% untouched |
+| **Action-Level Approval**| Real-time command risk evaluator intercepts high/critical operations (`rm`, `del`, `chmod`, `git reset`) | Pauses execution and requires explicit operator approval before spawn |
+| **Process Tree Termination**| Task cancellation propagates `tree-kill(pid, 'SIGKILL')` to terminate process hierarchies | Halts rogue subprocesses immediately (<1s) |
+| **Path Sandboxing** | `AgentToolbox.resolveSafePath()` checks against canonical workspace path | Throws `Security Exception`, blocks file access |
+| **Secret Protection** | Verifier scans cumulative commit diff history for modifications to `.env`, credentials, or keys | Blocks completion gate with security violation |
+| **Semantic Criteria Proof**| Criteria requiring functional implementation must have passing automated test verification | Blocks premature completion; prevents declaring success without test proof |
 | **Infinite Loop Guard**| Max retry budget + step execution timeouts (default 300s) | Halts step, triggers `TASK_BLOCKED` state |
-| **Human-in-the-Loop** | Sensitive milestones marked `isSensitive` pause execution | Waits for operator approval via UI / API |
 
 ---
 
