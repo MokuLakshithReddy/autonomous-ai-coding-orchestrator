@@ -124,9 +124,24 @@ try {
     'completed',
     `Live LLM task must achieve COMPLETED status; current: ${latestTask.status}`
   );
-  assert.ok(verifs.length > 0, 'Task must have produced verification records');
-  const finalVerif = verifs[verifs.length - 1];
-  assert.strictEqual(finalVerif.passed, true, 'Final verification record must have passed');
+  
+  // Find the final relevant verification record for this task
+  const taskVerifs = verifs.filter((v) => v.taskId === task.id);
+  assert.ok(taskVerifs.length > 0, 'Task must have produced verification records');
+  const sortedVerifs = [...taskVerifs].sort(
+    (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+  );
+  const finalVerif = sortedVerifs[sortedVerifs.length - 1];
+  assert.strictEqual(
+    finalVerif.status,
+    'PASSED',
+    `Final verification status must be PASSED; got ${finalVerif.status}`
+  );
+  assert.strictEqual(
+    finalVerif.testStatus,
+    'PASSED',
+    `Final testStatus must be PASSED; got ${finalVerif.testStatus}`
+  );
 
   // 4b. Primary acceptance criterion: target repository test suite passes on the task branch
   const taskBranch = `task/${task.id.slice(0, 8)}`;
@@ -144,18 +159,37 @@ try {
     `Seeded test suite must pass cleanly; got: ${testSuiteOutput}`
   );
 
-  // 4c. Semantic git diff inspection (not brittle string matching)
+  // 4c. Semantic git diff inspection (evaluates additions and deletions separately)
   const diff = await git.diff(['HEAD~1', 'HEAD', '--', 'math.js']);
   assert.ok(diff.includes('--- a/math.js') && diff.includes('+++ b/math.js'), 'Diff must touch math.js');
+
+  const diffLines = diff.split('\n');
+  const deletedLines = diffLines.filter((l) => l.startsWith('-') && !l.startsWith('---'));
+  const addedLines = diffLines.filter((l) => l.startsWith('+') && !l.startsWith('+++'));
+
   assert.ok(
-    diff.includes('-') && !diff.includes('return a - b;'),
-    'Diff must show removal of the buggy subtraction logic'
+    deletedLines.some((l) => l.includes('return a - b;')),
+    'Git diff deletions must include the buggy line (- return a - b;)'
   );
-  assert.ok(diff.includes('+'), 'Diff must show introduction of the repaired implementation');
+  assert.ok(
+    !addedLines.some((l) => l.includes('return a - b;')),
+    'Git diff additions must not reintroduce the buggy line'
+  );
+  assert.ok(
+    addedLines.length > 0,
+    'Git diff additions must introduce the repaired implementation'
+  );
+
+  // Confirm repaired file on disk no longer contains the buggy logic
+  const repairedMathOnDisk = await fs.readFile(path.join(repoDir, 'math.js'), 'utf-8');
+  assert.ok(
+    !repairedMathOnDisk.includes('return a - b;'),
+    'Repaired math.js must not contain the buggy return statement'
+  );
 
   console.log('   ✓ Seeded test suite cleanly passed on task branch.');
-  console.log('   ✓ Semantic diff verified: math.js bug removed and implementation corrected.');
-  console.log('   ✓ Task reached genuinely verified completed terminal state.');
+  console.log('   ✓ Semantic diff verified: buggy deletion and valid repair addition verified.');
+  console.log('   ✓ Task reached genuinely verified completed terminal state with status: PASSED.');
 
   // Cleanup
   try {

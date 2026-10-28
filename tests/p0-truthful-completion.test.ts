@@ -287,6 +287,34 @@ async function runTests() {
     // If symlinks require privilege on Windows, create a directory for fallback testing
   }
 
+  // Set up real git repository in allowedChild for end-to-end task execution
+  const { simpleGit } = await import('simple-git');
+  const allowedGit = simpleGit(allowedChild);
+  await allowedGit.init();
+  await allowedGit.addConfig('user.name', 'Security Test');
+  await allowedGit.addConfig('user.email', 'security@orchestrator.local');
+  await fs.writeFile(
+    path.join(allowedChild, 'package.json'),
+    JSON.stringify({ name: 'security-test-app', scripts: { test: 'node -e "process.exit(0)"' } }, null, 2)
+  );
+  await fs.writeFile(path.join(allowedChild, 'index.js'), 'console.log("secure");');
+  await allowedGit.add('.');
+  await allowedGit.commit('Initial security test commit');
+
+  // Deterministic mock agent to execute tasks without external LLM calls
+  const deterministicMockAgent = {
+    name: 'DeterministicSecurityAgent',
+    async executeStep() {
+      return {
+        agentName: 'DeterministicSecurityAgent',
+        success: true,
+        logs: 'Deterministic execution in authorized workspace',
+        toolsUsed: ['mockTool'],
+        exitCode: 0,
+      };
+    },
+  };
+
   const entryPoints = [
     {
       name: 'Server API (validateWorkspacePath)',
@@ -305,7 +333,11 @@ async function runTests() {
       name: 'Engine Execution Boundary (OrchestrationEngine.runTask)',
       run: async (target: string, roots: string[], unres: boolean) => {
         const engineInstance = new OrchestrationEngine({ allowedWorkspaces: roots, allowUnrestricted: unres });
-        await engineInstance.runTask({ prompt: 'test', workspacePath: target });
+        return await engineInstance.runTask({
+          prompt: 'Execute deterministic security test',
+          workspacePath: target,
+          customAgent: deterministicMockAgent,
+        });
       },
     },
   ];
@@ -318,14 +350,19 @@ async function runTests() {
       `${ep.name} must fail closed when allowlist is empty and unrestricted mode is false`
     );
 
-    // 10b: Explicit opt-in unrestricted mode must consistently permit valid workspace
+    // 10b: Explicit opt-in unrestricted mode must execute real task and consistently permit workspace
     await assert.doesNotReject(
       async () => {
+        const result: any = await ep.run(allowedChild, [], true);
         if (ep.name.includes('Engine Execution')) {
-          const eng = new OrchestrationEngine({ allowedWorkspaces: [], allowUnrestricted: true });
-          assert.strictEqual(eng['allowUnrestricted'], true);
+          assert.ok(result && result.id, 'Engine must create and execute real task record in unrestricted mode');
+          assert.strictEqual(
+            result.workspacePath,
+            allowedChild,
+            'Engine task record must target authorized workspace path'
+          );
         } else {
-          await ep.run(allowedChild, [], true);
+          assert.strictEqual(result, allowedChild, `${ep.name} must return canonical authorized path`);
         }
       },
       `${ep.name} must permit valid workspace in explicit unrestricted mode`
@@ -357,8 +394,10 @@ async function runTests() {
     }
   }
 
-  await fs.rm(tempAuthBase, { recursive: true, force: true });
-  console.log('   ✓ Workspace authorization parity verified: empty allowlist fail-closed, opt-in unrestricted, outside paths, path-traversal & symlinks strictly enforced.');
+  try {
+    await fs.rm(tempAuthBase, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  } catch {}
+  console.log('   ✓ Workspace authorization parity verified: empty allowlist fail-closed, opt-in unrestricted real task execution, outside paths, path-traversal & symlinks strictly enforced.');
 
   // Test 11: Non-Git Sandbox Exact Directory Filtering
   console.log('\n11. Testing Non-Git Sandbox Directory Filtering (.github preservation)...');
