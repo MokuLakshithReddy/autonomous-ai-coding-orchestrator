@@ -1,25 +1,28 @@
 # Autonomous AI Coding Orchestrator
 
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
-[![Node.js](https://img.shields.io/badge/Node.js-v20%2B%20%7C%20v24-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
+[![Node.js](https://img.shields.io/badge/Node.js-%3E%3D22.12.0-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![Fastify](https://img.shields.io/badge/Fastify-v5.x-000000?logo=fastify&logoColor=white)](https://fastify.dev/)
 [![SQLite](https://img.shields.io/badge/LibSQL%20%2F%20SQLite-003B57?logo=sqlite&logoColor=white)](https://turso.tech/libsql)
 [![Vite](https://img.shields.io/badge/Vite-6.x-646CFF?logo=vite&logoColor=white)](https://vitejs.dev/)
 [![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)](https://react.dev/)
-[![Gemini 3.8 / 2.5](https://img.shields.io/badge/Brain-Google%20Gemini-4285F4?logo=google&logoColor=white)](https://ai.google.dev/)
+[![Google Gemini](https://img.shields.io/badge/Brain-Google%20Gemini-4285F4?logo=google&logoColor=white)](https://ai.google.dev/)
+[![CI Status](https://img.shields.io/github/actions/workflow/status/MokuLakshithReddy/autonomous-ai-coding-orchestrator/ci.yml?branch=main&label=CI)](https://github.com/MokuLakshithReddy/autonomous-ai-coding-orchestrator/actions/workflows/ci.yml)
+[![Live LLM Evaluation](https://img.shields.io/github/actions/workflow/status/MokuLakshithReddy/autonomous-ai-coding-orchestrator/live-llm.yml?branch=main&label=Live%20LLM%20Evaluation)](https://github.com/MokuLakshithReddy/autonomous-ai-coding-orchestrator/actions/workflows/live-llm.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-An enterprise-grade, local-first closed-loop engineering platform that connects an LLM (**The Brain**) with a coding agent (**The Engineer**) and an independent verification engine (**The Verifier**), coordinated by a deterministic state machine (**The Orchestrator**).
+An enterprise-grade, closed-loop engineering platform that connects an LLM (**The Brain**) with a coding agent (**The Engineer**) and an independent verification engine (**The Verifier**), coordinated by an authoritative deterministic state machine (**The Orchestrator**).
 
-> **Core Axiom**: The system never assumes a task is complete merely because an AI agent reports success. Completion must be supported by empirical execution results, isolated test assertions, and cryptographically tracked Git diff evidence.
+> **Core Axiom**: The system never assumes a task is complete merely because an AI model claims success. Completion is an empirical property verified strictly through subprocess exit codes, isolated test assertions, cryptographic workspace integrity fingerprints, and audited Git diffs.
 
 ---
 
 ## 📑 Table of Contents
 
 - [The Evidence-Driven Engineering Contract](#-the-evidence-driven-engineering-contract)
+- [Empirical Benchmark Evaluation (Live Gemini Model)](#-empirical-benchmark-evaluation-live-gemini-model)
+- [Deterministic & Adversarial Benchmark Suite](#-deterministic--adversarial-benchmark-suite)
 - [Empirical Evidence Verification Matrix](#-empirical-evidence-verification-matrix)
-- [Verifiable Execution Audit Trail (Actual Case Study)](#-verifiable-execution-audit-trail-actual-case-study)
 - [Architectural Philosophy](#-architectural-philosophy)
 - [System Architecture](#-system-architecture)
 - [The Closed-Loop Lifecycle & State Machine](#-the-closed-loop-lifecycle--state-machine)
@@ -28,18 +31,19 @@ An enterprise-grade, local-first closed-loop engineering platform that connects 
   - [2. The Engineer (`src/agent`)](#2-the-engineer-srcagent)
   - [3. The Independent Verifier (`src/verifier`)](#3-the-independent-verifier-srcverifier)
   - [4. The State Engine & Durable Ledger (`src/orchestrator` & `src/db`)](#4-the-state-engine--durable-ledger-srcorchestrator--srcdb)
-  - [5. Repository & Checkpoint Service (`src/repo`)](#5-repository--checkpoint-service-srcrepo)
+  - [5. Repository & Worktree Inspector (`src/repo`)](#5-repository--worktree-inspector-srcrepo)
+  - [6. Security Policy Engine (`src/security`)](#6-security-policy-engine-srcsecurity)
 - [Extensibility & Custom Adapters](#-extensibility--custom-adapters)
   - [Implementing a Custom Coding Agent](#implementing-a-custom-coding-agent)
   - [Plugging in Alternative LLM Providers](#plugging-in-alternative-llm-providers)
 - [Developer Setup & Local Development](#-developer-setup--local-development)
+- [Test Suites & CI/CD Pipeline](#-test-suites--cicd-pipeline)
 - [REST & WebSocket API Specification](#-rest--websocket-api-specification)
   - [REST Endpoints](#rest-endpoints)
   - [WebSocket Realtime Event Stream](#websocket-realtime-event-stream)
 - [CLI Reference](#-cli-reference)
 - [Programmatic Library Usage](#-programmatic-library-usage)
-- [Security Model & Invariants](#-security-model--invariants)
-- [Contributing & Testing](#-contributing--testing)
+- [Security Invariants & Boundary Guards](#-security-invariants--boundary-guards)
 - [License](#-license)
 
 ---
@@ -48,13 +52,14 @@ An enterprise-grade, local-first closed-loop engineering platform that connects 
 
 In typical autonomous coding agents, the system asks the LLM: *"Did you finish the task?"* and the LLM responds: *"Yes, I implemented everything perfectly!"*. This is the **Confirmation Bias Fallacy**.
 
-The **Autonomous AI Coding Orchestrator** replaces self-reported claims with a three-tier hierarchical **Evidence Model**:
+The **Autonomous AI Coding Orchestrator** replaces model self-reporting with a hierarchical **Evidence Model**:
 
 ```
                        +-------------------------------------------------------+
                        |           TIER 3: INDEPENDENTLY VERIFIED              |
-                       |  - Subprocess Exit Code 0 (Compilers & Test Runners)   |
-                       |  - Clean Git Diff Invariant (No Test Skipping / Bypasses)|
+                       |  - Subprocess Exit Code 0 (Compilers & Test Suites)   |
+                       |  - Clean Git Diff Invariant (No Test Skipping/Bypasses)|
+                       |  - Workspace Integrity Fingerprint Verified           |
                        |  - Recorded in SQLite Ledger & Emitted via Event Stream |
                        +---------------------------+---------------------------+
                                                    ^
@@ -63,7 +68,7 @@ The **Autonomous AI Coding Orchestrator** replaces self-reported claims with a t
                        |               TIER 2: IMPLEMENTED WORK                |
                        |  - Discrete Files Modified on Disk                    |
                        |  - Cryptographic Git Commit Checkpoints (SHA-1)       |
-                       |  - Parsed Staged & Unstaged Diff Trees                |
+                       |  - Tracked, Untracked & Ignored File Fingerprints     |
                        +---------------------------+---------------------------+
                                                    ^
                                                    | Code applied to workspace
@@ -76,12 +81,47 @@ The **Autonomous AI Coding Orchestrator** replaces self-reported claims with a t
                        +-------------------------------------------------------+
 ```
 
-### The 4 Pillars of the Evidence Contract
+### The 5 Pillars of the Evidence Contract
 
-1. **Non-Repudiation**: Every file change is bracketed by Git commit snapshots (`pre-step` and `post-step`), generating an unforgeable hash audit trail.
-2. **Subprocess Isolation**: Builds and tests are run in isolated OS processes (`powershell.exe` / `/bin/bash`), bypassing the LLM's own context window.
-3. **Anti-Tamper Heuristics**: The diff auditor inspects code modifications for deceptive tactics, such as commenting out test assertions or injecting `test.skip` / `it.skip` / `@pytest.mark.skip`.
-4. **Evidence-Grounded RCA**: When a check fails, the Brain does not guess. It receives the raw, unedited compiler stack trace and diff patch to perform deterministic Root Cause Analysis.
+1. **Non-Repudiation**: Every file change is bracketed by cryptographic Git commit snapshots (`pre-step` and `post-step`), generating an unforgeable hash audit trail.
+2. **Worktree Isolation**: Tasks run exclusively inside isolated Git worktrees (`.orchestrator_worktrees/<taskId>`) on dedicated task branches (`task/<shortId>`). The user's active branch, dirty files, and uncommitted edits are 100% untouched.
+3. **Subprocess Isolation**: Builds and tests are run in isolated OS processes (`powershell.exe` / `/bin/bash`), completely outside the LLM's context window.
+4. **Anti-Tamper & Workspace Fingerprinting**: The verifier computes full recursive SHA-256 fingerprints across tracked, untracked, and non-ephemeral ignored files before and after verification. Out-of-band mutations fail closed.
+5. **Truthful Reviewer Fallback**: If the LLM review call fails, times out, or is offline, completion is authorized **only** if backed by authoritative passing test records (`Test: PASSED`) and a valid, non-empty diff. Missing or unconfigured tests strictly fail closed.
+
+---
+
+## 🚀 Empirical Benchmark Evaluation (Live Gemini Model)
+
+The repository includes a diverse, unscripted live-LLM benchmark evaluation suite executed against Google Gemini (`gemini-flash-lite-latest`). Each benchmark tests general coding, multi-file coordination, regression avoidance, and packaging without scripted hints:
+
+### Live Evaluation Report (CI Workflow Run [#40747734183](https://github.com/MokuLakshithReddy/autonomous-ai-coding-orchestrator/actions/runs/40747734183))
+
+| Benchmark | Category | Result | Task Status | Agent Resolution | Verif Outcome | Attempts | Duration | Hidden Tests Passed | Measured Spend / Tokens |
+| :--- | :--- | :---: | :---: | :--- | :---: | :---: | :---: | :---: | :--- |
+| **Interval Merger Algorithm** | Algorithmic Synthesis | **PASSED** | `COMPLETED` | Declared Complete | `PASSED` | 1 | 46.6s | **5/5** | Measured: **$0.000469** (3,929 tok) |
+| **Tiered Pricing Calculator** | Regression Prevention | **PASSED** | `COMPLETED` | Declared Complete | `PASSED` | 1 | 50.1s | **4/4** | Measured: **$0.000445** (3,698 tok) |
+| **Multi-File Service Contract** | Coordinated Multi-File | **PASSED** | `COMPLETED` | Declared Complete | `PASSED` | 1 | 47.1s | **4/4** | Measured: **$0.000463** (3,969 tok) |
+| **ESM Dependency Configuration** | Package & Resolution | **PASSED** | `COMPLETED` | Declared Complete | `PASSED` | 1 | 37.1s | **4/4** | Measured: **$0.000373** (3,243 tok) |
+
+- **Live Benchmark Pass Rate**: **100% (4/4)**
+- **Total Metered Tokens**: **14,839 tokens** across all 4 scenarios
+- **Audited Disambiguation**: The report independently derives `Task Status` (durable state), `Agent Resolution` (recorded agent logs), and `Verification Outcome` (independent verifier results) directly from SQLite records.
+- **Zero-Tolerance Process Exit Gate**: In `tests/live-llm-benchmarks.test.ts`, if any benchmark fails, the process immediately exits with code `1`.
+- **Permanent CI Report Artifact**: Automatically uploaded on every run as [live-llm-benchmark-report.zip](https://github.com/MokuLakshithReddy/autonomous-ai-coding-orchestrator/actions/runs/40747734183/artifacts/12841899045).
+
+---
+
+## 🛡 Deterministic & Adversarial Benchmark Suite
+
+For local and air-gapped CI environments, a deterministic regression and security benchmark suite runs without external API dependencies:
+
+| Benchmark Scenario | Objective | Validation Mechanism | Result |
+| :--- | :--- | :--- | :---: |
+| **1. Syntax / Compilation Error** | Broken JavaScript/TypeScript syntax | Verifier detects compilation failure; agent autonomously diagnoses and repairs closing brace | **PASSED** |
+| **2. Multi-File Service Contract** | Cross-module interface drift between caller and callee | Coordinated refactoring across caller and callee with contract consistency verification | **PASSED** |
+| **3. Adversarial Partial Fix** | Agent attempts partial fix that satisfies visible tests but breaks edge cases | Verifier detects regression against hidden suite; forces retry until full fix verified | **PASSED** |
+| **4. Malicious / Unfulfillable Task** | Prompt attempts shell injection, path traversal, or out-of-boundary access | Security policy engine intercepts dangerous actions; task safely blocked without executing | **PASSED** |
 
 ---
 
@@ -90,114 +130,20 @@ The **Autonomous AI Coding Orchestrator** replaces self-reported claims with a t
 | Dimension | Verification Mechanism | Success Evidence Criteria | Failure Detection |
 | :--- | :--- | :--- | :--- |
 | **Compilation** | Independent Build Subprocess (`npm run build`, `tsc`, `cargo build`) | Process `exitCode === 0` | Syntax errors, missing imports, type mismatches |
-| **Functionality** | Test Runner (`npm test`, `vitest`, `pytest`, `cargo test`) | Process `exitCode === 0` + Zero failing test assertions | Assertion failures, runtime exceptions, timeouts |
+| **Functionality** | Test Runner (`npm test`, `vitest`, `pytest`, `cargo test`) | Process `exitCode === 0` + Zero failing assertions | Assertion failures, runtime exceptions, timeouts |
 | **Code Quality** | Static Analyzer / Linter (`eslint`, `ruff`, `clippy`) | Clean linter run or zero fatal diagnostic warnings | Linter violations, unhandled promises, memory leaks |
 | **Integrity** | Git Diff Heuristic Scanner | Diff does not introduce test-skipping patterns | Insertion of `test.skip`, `it.skip`, bypasses |
 | **Security** | File Path Boundary & Secret Scanner | Zero modifications to `.env`, private keys, or system files | Unauthorized access outside workspace root |
-| **State Snapshot** | Git Checkpoint Hash | Generated `commitHash` stored in durable SQLite ledger | Dirty uncommitted state, merge conflict |
-
----
-
-## 🔍 Verifiable Execution Audit Trail (Reproducible Test Suite)
-
-Below is an empirical execution report produced by the automated critical correctness and verification suite (`npm test`):
-
-### 1. Automated Suite Execution Logs
-```
-> orchestrator@1.0.0 test
-> tsx tests/p0-truthful-completion.test.ts
-
---- Running Complete Critical Correctness & Safety Test Suite ---
-
-1. Testing State Machine multi-step approval and transition graph...
-   ✓ State machine supports full multi-step lifecycle with intermediate approvals.
-
-2. Testing Agent Truthful Failure (P0.1: No false success when work is not done)...
-   ✓ Agent truthfully reported failure when implementation could not be performed.
-
-3. Testing Subprocess Cancellation & Immediate Tree-Kill (P0.6)...
-   ✓ Subprocess successfully terminated in 656ms via tree-kill abort signal.
-
-4. Testing Cross-Platform Canonical Path Containment...
-   ✓ Cross-platform path containment successfully blocked directory traversal.
-
-5. Testing Process Environment Allowlist & Secret Discarding...
-   ✓ Custom environment variables strictly validated against allowlist.
-
-6. Testing Real Verifier Decision Authority & Inconclusive Detection (P0.2)...
-   ✓ Verifier enforces single authoritative isVerified decision and blocks missing criteria.
-
-=== ALL P0/P1 CORRECTNESS, SAFETY & VERIFICATION TESTS PASSED! ===
-```
-
-### 2. Independent Verification Audit Schema (`verifications`)
-```json
-{
-  "id": "17e8708e-bd74-4829-b819-d6800493d377",
-  "taskId": "14dce10a-fd08-4a28-8aff-8c9a484a253b",
-  "status": "PASSED",
-  "buildStatus": "PASSED",
-  "testStatus": "PASSED",
-  "lintStatus": "NOT_CONFIGURED",
-  "diffInspection": "Audited 3 changed files cleanly.",
-  "details": {
-    "isVerified": true,
-    "buildCheck": {
-      "status": "PASSED",
-      "command": "npm.cmd run build",
-      "exitCode": 0
-    },
-    "testCheck": {
-      "status": "PASSED",
-      "command": "npm.cmd test",
-      "exitCode": 0
-    },
-    "criteriaResults": [
-      {
-        "criterion": "Code compiles with zero errors",
-        "satisfied": true,
-        "evidence": "Build status: PASSED (exit 0)"
-      },
-      {
-        "criterion": "All unit tests pass",
-        "satisfied": true,
-        "evidence": "Test status: PASSED (exit 0)"
-      }
-    ],
-    "diffAudit": {
-      "filesChanged": ["src/agent/index.ts", "src/verifier/index.ts", "src/orchestrator/engine.ts"],
-      "hasSuspiciousDeletions": false,
-      "hasForbiddenModifications": false,
-      "hasPlaceholderStubs": false,
-      "summary": "Audited 3 changed files cleanly."
-    }
-  },
-  "createdAt": "2026-10-28T08:50:35.000Z"
-}
-```
-
-### 3. Cryptographic Git Commit Checkpoint Timeline
-```
-* 636702e - feat(p0-p1): implement truthful completion, strict state machine, security policy engine
-* 214e9dc - docs: ground README in evidence-driven verification model and execution case study
-* b531506 - docs: enrich README with comprehensive developer guide, architecture, and API specs
-* feaadb9 - docs: add MIT License
-* 116db6a - feat: complete initial Autonomous AI Coding Orchestrator
-```
-
-Every checkpoint can be rolled back to instantly:
-```bash
-git checkout 636702e
-```
+| **State Snapshot** | Full Recursive Workspace Fingerprint | SHA-256 fingerprint matches pre-verification state | Untracked file mutation, uncommitted workspace drift |
 
 ---
 
 ## 💡 Architectural Philosophy
 
 The **Autonomous AI Coding Orchestrator** decouples **Intent** from **Execution** and **Empirical Validation**:
-- **Cognition ≠ Execution**: The Brain (`LLMBrain`) plans milestones and performs Root Cause Analysis (RCA), but never writes directly to disk.
-- **Execution ≠ Verification**: The Agent (`BuiltInAutonomousAgent`) executes edits and tools, but its self-reported success is **untrusted data**.
-- **Empirical Ground Truth**: The Verifier (`IndependentVerifier`) executes builds, test suites, and git diff audits outside the agent's context. A step is only marked `COMPLETED` when exit codes equal `0` and diff invariants hold.
+- **Cognition ≠ Execution**: The Brain (`LLMBrain`) formulates execution plans and performs Root Cause Analysis (RCA), but never writes directly to disk.
+- **Execution ≠ Verification**: The Agent (`BuiltInAutonomousAgent`) executes edits and tools, but its self-reported claims are **untrusted data**.
+- **Empirical Ground Truth**: The Verifier (`IndependentVerifier`) executes builds, test suites, and git diff audits outside the agent's context. A step is only marked `COMPLETED` when exit codes equal `0`, diff invariants hold, and workspace integrity is intact.
 
 ---
 
@@ -207,7 +153,7 @@ The **Autonomous AI Coding Orchestrator** decouples **Intent** from **Execution*
                              +-------------------------------+
                              |    Developer / CLI / Web UI   |
                              +---------------+---------------+
-                                             | HTTP / WS
+                                             | HTTP / WS (Bearer Token / Ticket)
                                              v
                              +-------------------------------+
                              |      Fastify Server Gateway   |
@@ -229,8 +175,9 @@ The **Autonomous AI Coding Orchestrator** decouples **Intent** from **Execution*
       +---------------------------+ +---------------------------+ +-----------------------+
       |      THE BRAIN (LLM)      | |   THE ENGINEER (AGENT)    | | INDEPENDENT VERIFIER  |
       | - Plan Decomposer         | | - Tool Loop (read/write)  | | - Native Build Runner |
-      | - Diagnostic RCA Engine   | | - Regex & AST Search      | | - Test Suite Runner   |
-      | - Objective Reviewer      | | - Sandbox Shell Exec      | | - Diff Invariant Audit|
+      | - Diagnostic RCA Engine   | | - JSON Parse Sanitizer    | | - Test Suite Runner   |
+      | - Truthful Review Gate    | | - Cross-File Context      | | - Diff Invariant Audit|
+      | - Token / Cost Metering   | | - Sandbox Shell Exec      | | - Integrity Fingerprint|
       +---------------------------+ +---------------------------+ +-----------------------+
                     ^                            |                            |
                     |      Failure Diagnostics   | Actual Modifications       |
@@ -238,9 +185,9 @@ The **Autonomous AI Coding Orchestrator** decouples **Intent** from **Execution*
                                                  |
                                                  v
                                    +---------------------------+
-                                   |    Target Repository      |
-                                   |  - Git Checkpoint Commits |
-                                   |  - Isolated File Trees    |
+                                   |    Isolated Worktree      |
+                                   |  - Branch: task/<shortId> |
+                                   |  - Untouched User Tree    |
                                    +---------------------------+
 ```
 
@@ -250,33 +197,34 @@ The **Autonomous AI Coding Orchestrator** decouples **Intent** from **Execution*
 
 ```mermaid
 stateDiagram-v2
-    [*] --> INITIALIZING
-    INITIALIZING --> PLANNING: Inspect Workspace & Detect Ecosystem
-    PLANNING --> DISPATCHING: Formulate Milestones & Acceptance Criteria
+    [*] --> DISCOVERING: Baseline Capture & Ecosystem Detection
+    DISCOVERING --> PLANNING: Inspect Workspace State
+    PLANNING --> READY: Formulate Milestones & Criteria
     
     state "Evidence-Grounded Step Loop" as StepLoop {
-        DISPATCHING --> AWAITING_APPROVAL: Is Sensitive Action?
-        AWAITING_APPROVAL --> EXECUTING: Approved by Operator
-        AWAITING_APPROVAL --> SKIPPED: Rejected by Operator
-        DISPATCHING --> EXECUTING: Safe Action
+        READY --> AWAITING_APPROVAL: Sensitive Step?
+        AWAITING_APPROVAL --> EXECUTING: Operator Approved
+        AWAITING_APPROVAL --> READY: Operator Rejected (Step Skipped)
+        READY --> EXECUTING: Safe Step
         
-        EXECUTING --> VERIFYING: Pre-Commit Checkpoint & Agent Dispatched
+        EXECUTING --> VERIFYING: Step Checkpoint & Agent Dispatched
         
         state Evaluation <<choice>>
         VERIFYING --> Evaluation
         
-        Evaluation --> DIAGNOSING: Build/Test/Diff Failed (Retries Left)
-        DIAGNOSING --> REPAIRING: Evidence RCA & Repair Dispatch
+        Evaluation --> DIAGNOSING: Build / Test / Diff Failed
+        DIAGNOSING --> REPAIRING: Root Cause Analysis & Corrective Plan
         REPAIRING --> VERIFYING: Re-execute & Re-verify
         
-        Evaluation --> TASK_FAILED: Retries Exhausted
-        Evaluation --> STEP_COMPLETED: Exit Code 0 & Clean Diff
+        Evaluation --> FAILED: Retries Exhausted
+        Evaluation --> READY: Step Verified Cleanly
     }
 
-    STEP_COMPLETED --> StepLoop: Next Step Remaining
-    STEP_COMPLETED --> OUTCOME_REVIEW: All Steps Satisfied
-    OUTCOME_REVIEW --> COMPLETED: Final Quality Audit Passed
-    TASK_FAILED --> [*]
+    READY --> FINAL_VERIFYING: All Milestones Completed
+    FINAL_VERIFYING --> OUTCOME_REVIEW: Authoritative Test & Diff Proof
+    OUTCOME_REVIEW --> COMPLETED: Truthful Verification Gate Passed
+    OUTCOME_REVIEW --> NEEDS_HUMAN_REVIEW: Verification Incomplete or Untrusted
+    FAILED --> [*]
     COMPLETED --> [*]
 ```
 
@@ -285,53 +233,60 @@ stateDiagram-v2
 ## 🔬 Subsystem Deep Dive
 
 ### 1. The Brain (`src/llm`)
-- **Engine**: Powered by Google Gemini (`@google/genai`) using Gemini 3.8 / 2.5 Flash / Pro.
-- **Contract Schemas**:
-  - `generatePlan()`: Ingests repository metadata, language ecosystem, detected build/test commands, and user prompt. Outputs structured JSON conforming to `ExecutionPlan`.
-  - `diagnoseFailure()`: Takes empirical evidence (terminal stderr, test trace, git diff), performs Root Cause Analysis (RCA), and outputs targeted repair directives without hallucinations.
-  - `reviewOutcome()`: Audits final diff against the original acceptance criteria and produces an empirical confidence score (0-100).
+- **Model Engine**: Powered by Google Gemini via `@google/genai` (defaults to `gemini-flash-lite-latest` or `gemini-2.5-flash`).
+- **Structured Contracts**:
+  - `generatePlan()`: Ingests repository metadata, language ecosystems, detected build/test commands, and workspace tree. Outputs an `ExecutionPlan` with concrete milestones. Never produces hollow "inspection-only" steps.
+  - `diagnoseFailure()`: Takes empirical evidence (terminal stderr, test trace, git diff), performs Root Cause Analysis (RCA), and outputs actionable repair directives without hallucinations.
+  - `reviewOutcome()`: Audits final diff and verification records against acceptance criteria.
+  - `hasTrustedVerificationEvidence()`: Fail-closed verification gate. Authorizes completion when offline or when model reviews fail **only** if authoritative passing test records (`Test: PASSED`) and a valid, non-empty diff exist.
+  - `getTokenUsage()`: Micro-cent cost calculation ($0.075 / 1M prompt, $0.30 / 1M candidate tokens) from Gemini `usageMetadata`.
 
 ### 2. The Engineer (`src/agent`)
-- **Interface**: `CodingAgent` contract requiring `executeStep(instruction, targetFiles)`.
-- **BuiltInAutonomousAgent**: Iterative tool-calling runtime with local safety boundaries:
+- **Interface**: `CodingAgent` contract requiring `executeStep(instruction, targetFiles, abortSignal)`.
+- **BuiltInAutonomousAgent**: Iterative tool runtime with safety boundaries:
   - `readFile(path)`: Safe read within workspace bounds.
   - `writeFile(path, content)`: Creates parent directories and writes atomic content.
   - `replaceInFile(path, target, replacement)`: Surgical string replacement.
-  - `deleteFile(path)`: Controlled file deletion.
+  - `deleteFile(path)`: Controlled file deletion with security approval gates.
   - `listFiles(relDir)`: Non-recursive and recursive file tree scanner.
   - `searchCode(regexQuery)`: Ripgrep-style in-memory file search.
-  - `executeCommand(cmd, timeoutMs)`: Spawned subprocess under PowerShell / Bash with timeout handling.
+  - `executeCommand(cmd, timeoutMs)`: Subprocess under PowerShell / Bash with tree-kill termination.
+  - **Recent Action Feedback**: Injects command outputs (`npm test` exit 0) into subsequent iteration prompts to eliminate repetitive command looping.
+  - **Cross-File Context Discovery**: Automatically reads caller and callee modules into context for cross-file contract consistency.
+  - **Resilient JSON Sanitization**: Character-by-character control character parser salvages unescaped newlines in LLM code responses without aborting steps.
 
 ### 3. The Independent Verifier (`src/verifier`)
 - **Build Verifier**: Runs auto-detected compilation pipelines (`npm run build`, `cargo build`, `go build`).
 - **Test Runner**: Runs test suites (`npm test`, `pytest`, `cargo test`) and captures exit codes and stack traces.
-- **Diff & Invariant Auditor**:
-  - Detects banned test bypassing (e.g., `test.skip`, `it.skip`, `@pytest.mark.skip`).
-  - Guards protected files from unauthorized tampering (`.env`, private keys, protected configs).
+- **Diff & Invariant Auditor**: Detects banned test bypassing (`test.skip`, `it.skip`, `@pytest.mark.skip`) and guards protected files (`.env`, private keys).
+- **Intermediate vs. Final Verification**: Intermediate steps verify build/syntax checks; the final completion gate authoritatively runs the entire project test suite.
 
 ### 4. The State Engine & Durable Ledger (`src/orchestrator` & `src/db`)
 - **Durable Persistence**: Backed by LibSQL (`file:orchestrator.db`). Survives process restarts and crashes.
 - **Evidence Ledger Schema**:
-  - `tasks`: Root record containing state, retry budgets, prompt, and final review summary.
+  - `tasks`: State, retry budgets, prompt, and final review summary.
   - `steps`: Atomic steps with execution logs, tools invoked, and diff snapshots.
   - `verifications`: Complete verification logs, status per check, and RCA diagnostics.
   - `checkpoints`: Git commit hashes before and after every step for rollback support.
-  - `approvals`: Suspended actions awaiting human interaction.
+  - `approvals`: Suspended actions awaiting operator approval.
+  - `task_events`: Fully awaited append-only event stream.
 
-### 5. Repository & Checkpoint Service (`src/repo`)
+### 5. Repository & Worktree Inspector (`src/repo`)
 - Powered by `simple-git`.
-- Automatically initializes git repositories if none exist.
-- Performs atomic checkpoint commits:
-  - `pre-step-<index>: <step_title>`
-  - `post-step-<index>: <step_title>`
-- Supports one-click hard rollback: `inspector.rollbackToCommit(commitHash)`.
+- **Git Worktree Isolation**: Executes tasks in `.orchestrator_worktrees/<taskId>` on branch `task/<shortId>`. Leaves user workspace 100% untouched.
+- **Recursive Content Fingerprinting**: Computes SHA-256 fingerprints of Git HEAD, git status, tracked diffs, and full recursive contents of untracked files and non-ephemeral ignored files.
+
+### 6. Security Policy Engine (`src/security`)
+- Evaluates actions against three risk levels: `SAFE`, `CAUTION`, and `CRITICAL`.
+- Intercepts destructive commands (`rm`, `del`, `chmod`, `git reset`, format operations).
+- Cross-platform case-insensitive canonical path containment.
 
 ---
 
 ## 🔌 Extensibility & Custom Adapters
 
 ### Implementing a Custom Coding Agent
-You can replace or wrap the built-in agent with external CLI agents like **Aider**, **Claude Code**, or a custom sandbox:
+You can replace or wrap the built-in agent with external CLI agents or sandboxes:
 
 ```typescript
 import { type CodingAgent, type StepExecutionResult } from './src/agent/index.js';
@@ -353,26 +308,23 @@ export class CustomDockerAgent implements CodingAgent {
 }
 
 // Pass to the orchestrator:
-await orchestrator.runTask({
+await engine.runTask({
   prompt: 'Add JWT authentication',
   workspacePath: '/path/to/project',
   customAgent: new CustomDockerAgent(),
 });
 ```
 
-### Plugging in Alternative LLM Providers
-The LLM Brain is structured around standard schemas. To plug in Anthropic Claude, OpenAI, or local Ollama instances, implement the planner and diagnostic interfaces in `src/llm/index.ts`.
-
 ---
 
 ## 🛠 Developer Setup & Local Development
 
 ### Prerequisites
-- Node.js `v20.x` or `v24.x`
-- Git `2.40+`
-- PowerShell (Windows) or Bash (macOS/Linux)
+- **Node.js**: `>= 22.12.0` (Active LTS)
+- **Git**: `2.40+`
+- **Shell**: PowerShell (Windows) or Bash (macOS/Linux)
 
-### 1. Clone & Install Dependencies
+### 1. Clone & Install
 ```bash
 git clone https://github.com/MokuLakshithReddy/autonomous-ai-coding-orchestrator.git
 cd autonomous-ai-coding-orchestrator
@@ -381,21 +333,18 @@ cd autonomous-ai-coding-orchestrator
 npm install
 
 # Install web dashboard dependencies
-cd web
-npm install
-cd ..
+cd web && npm install && cd ..
 ```
 
 ### 2. Environment Configuration
-Create your `.env` file:
 ```bash
 cp .env.example .env
 ```
-Fill in your configuration:
+Configure your environment variables:
 ```env
-# Google Gemini API Key (Get one from https://aistudio.google.com/)
+# Google Gemini API Key (Get from https://aistudio.google.com/)
 GEMINI_API_KEY=your_gemini_api_key_here
-GEMINI_MODEL=gemini-2.5-flash
+GEMINI_MODEL=gemini-flash-lite-latest
 
 # Orchestrator Server Settings
 PORT=4000
@@ -407,28 +356,43 @@ AUTO_REPAIR_ENABLED=true
 REQUIRE_APPROVAL_FOR_DESTRUCTIVE=true
 ```
 
-### 3. Running in Development Mode
-Run backend and frontend concurrently with hot-reloading:
-
-```bash
-# Terminal 1: Backend Watch Mode
-npm run dev
-
-# Terminal 2: Web Dashboard Dev Server
-cd web
-npm run dev
-```
-
-### 4. Production Build & Execution
+### 3. Build & Run
 ```bash
 # Compile backend TypeScript and build Vite production bundle
 npm run build
 cd web && npm run build && cd ..
 
-# Start the unified server (serves API, WebSockets, and Web UI on port 4000)
+# Start the unified server (API, WebSockets, and Web UI on port 4000)
 npm start
 ```
 Navigate to **`http://localhost:4000`** in your browser.
+
+---
+
+## 🧪 Test Suites & CI/CD Pipeline
+
+The repository includes a comprehensive, multi-tiered test suite:
+
+```bash
+# 1. Run Complete Correctness, Security & Deterministic Benchmark Suite
+npm test
+
+# 2. Run Reviewer Fallback Safety Test Suite (7 safety scenarios)
+npm run test:reviewer
+
+# 3. Run Deterministic Autonomous Repair Benchmarks (4 categories)
+npm run test:benchmarks
+
+# 4. Run Unscripted Live LLM Autonomous Repair Test (requires GEMINI_API_KEY)
+npm run test:llm
+
+# 5. Run Live LLM Diverse Benchmark Suite (4 unscripted benchmarks with spend metering)
+npm run test:benchmarks:live
+```
+
+### Continuous Integration (GitHub Actions)
+- **CI Workflow (`.github/workflows/ci.yml`)**: Tests all matrix combinations on **Ubuntu** and **Windows** across **Node.js 22.12.0** and **Node.js 22.x**.
+- **Live LLM Workflow (`.github/workflows/live-llm.yml`)**: Safely executes live autonomous code repair and the 4-task benchmark suite against the Gemini API using repository secrets, archiving the evaluation report.
 
 ---
 
@@ -439,16 +403,17 @@ Navigate to **`http://localhost:4000`** in your browser.
 | Method | Endpoint | Description | Payload Example |
 | :--- | :--- | :--- | :--- |
 | `GET` | `/api/system/status` | System health & LLM model status | — |
-| `POST` | `/api/config/gemini` | Dynamically update API key/model | `{ "apiKey": "...", "model": "gemini-2.5-flash" }` |
+| `POST` | `/api/config/gemini` | Dynamically update API key/model | `{ "apiKey": "...", "model": "gemini-flash-lite-latest" }` |
 | `POST` | `/api/repo/inspect` | Inspect ecosystem & detection suites | `{ "workspacePath": "C:/projects/app" }` |
 | `GET` | `/api/tasks` | List historical and active tasks | — |
 | `POST` | `/api/tasks` | Dispatch a new autonomous task | `{ "prompt": "...", "workspacePath": "...", "maxRetries": 3 }` |
 | `GET` | `/api/tasks/:id` | Fetch task details, steps, verifications | — |
 | `POST` | `/api/tasks/:id/cancel` | Cancel an in-flight task | — |
 | `POST` | `/api/approvals/:id/respond`| Human approval response | `{ "status": "APPROVED" \| "REJECTED" }` |
+| `GET` | `/api/auth/ws-ticket` | Generate short-lived ticket for WebSocket | — |
 
 ### WebSocket Realtime Event Stream
-Connect to `ws://localhost:4000/ws` to receive live JSON event streams:
+Connect to `ws://localhost:4000/ws?ticket=<ticket>` to stream live JSON events:
 
 ```typescript
 interface OrchestratorEvent {
@@ -463,12 +428,12 @@ interface OrchestratorEvent {
     | 'APPROVAL_REQUIRED'
     | 'APPROVAL_RESOLVED'
     | 'STEP_EXECUTED'
-    | 'STEP_VERIFYING'
+    | 'STATE_VERIFYING'
     | 'VERIFICATION_PASSED'
     | 'VERIFICATION_FAILED'
-    | 'DIAGNOSING_ERROR'
+    | 'STATE_DIAGNOSING'
     | 'REPAIR_ATTEMPT'
-    | 'STEP_COMPLETED'
+    | 'STATE_COMPLETED'
     | 'TASK_COMPLETED'
     | 'TASK_FAILED'
     | 'TASK_BLOCKED';
@@ -482,16 +447,14 @@ interface OrchestratorEvent {
 
 ## 💻 CLI Reference
 
-The CLI provides full autonomous execution capabilities directly in your terminal:
-
 ```bash
-# Run an autonomous task in the current directory:
-npm run cli -- run -p "Implement health check endpoint and verify tests"
+# Run an autonomous repair in the current directory:
+npm run cli -- run -p "Fix calculateSum function in math.js so node test.js passes"
 
-# Run in an external repository workspace with custom retry budget:
+# Run in an external workspace with custom retry budget:
 npm run cli -- run -p "Fix JWT expiration bug" -w "C:/workspace/my-api" -r 5
 
-# Inspect repository ecosystem and detected verification suites:
+# Inspect repository ecosystem and detected verification commands:
 npm run cli -- inspect -w "."
 
 # Start the API and WebSocket server on a custom port:
@@ -502,21 +465,22 @@ npm run cli -- serve -p 8080 -h 0.0.0.0
 
 ## 📦 Programmatic Library Usage
 
-You can import the orchestrator directly as a TypeScript library:
-
 ```typescript
-import { OrchestrationEngine, RepoInspector } from './src/index.js';
+import { OrchestrationEngine } from './src/orchestrator/engine.js';
+import { BuiltInAutonomousAgent } from './src/agent/index.js';
 
-const engine = new OrchestrationEngine();
-
-// Subscribe to live events
-engine.on('event', (event) => {
-  console.log(`[${event.type}] ${event.message}`);
+const engine = new OrchestrationEngine({
+  allowedWorkspaces: [process.cwd()],
 });
 
-// Run an autonomous task programmatically
+// Subscribe to real-time events
+engine.on('event', (evt) => {
+  console.log(`[${evt.type}] ${evt.message}`);
+});
+
+// Run task with live model or custom agent
 const task = await engine.runTask({
-  prompt: 'Build a rate limiting middleware with unit tests',
+  prompt: 'In src/service.js, update UserService to call this.logger.log so tests pass cleanly',
   workspacePath: process.cwd(),
   maxRetries: 3,
 });
@@ -524,34 +488,21 @@ const task = await engine.runTask({
 
 ---
 
-## 🛡 Security Model & Invariants
+## 🛡 Security Invariants & Boundary Guards
 
 | Guard | Mechanism | Failure Action |
 | :--- | :--- | :--- |
 | **API Authentication** | Cryptographic session token required via `Authorization: Bearer <token>` or `x-api-token` | Rejects unauthenticated requests with HTTP 401 |
-| **Workspace Sandboxing**| `validateWorkspacePath()` validates against explicit `allowedWorkspaces` (defaulting strictly to server root) | Rejects unauthorized directory traversal with HTTP 403 |
-| **Git Worktree Isolation**| Tasks execute within isolated Git worktrees (`.orchestrator_worktrees/task-<id>`) on dedicated branch | Leaves user's checkout, dirty files, and uncommitted edits 100% untouched |
-| **Action-Level Approval**| Real-time command risk evaluator intercepts high/critical operations (`rm`, `del`, `chmod`, `git reset`) | Pauses execution and requires explicit operator approval before spawn |
+| **WebSocket Tickets** | Short-lived single-use browser tickets (`/api/auth/ws-ticket`) | Rejects raw tokens in query params; expires in 60s |
+| **Workspace Sandboxing**| `validateWorkspacePath()` validates against explicit `allowedWorkspaces` | Rejects directory traversal with HTTP 403 |
+| **Git Worktree Isolation**| Tasks execute in `.orchestrator_worktrees/<taskId>` on dedicated task branch | Leaves user's checkout, dirty files, and uncommitted edits 100% untouched |
+| **Action-Level Approval**| Real-time command risk evaluator intercepts high/critical operations (`rm`, `del`, `chmod`) | Pauses execution and requires explicit operator approval before spawn |
 | **Process Tree Termination**| Task cancellation propagates `tree-kill(pid, 'SIGKILL')` to terminate process hierarchies | Halts rogue subprocesses immediately (<1s) |
 | **Path Sandboxing** | `AgentToolbox.resolveSafePath()` checks against canonical workspace path | Throws `Security Exception`, blocks file access |
-| **Secret Protection** | Verifier scans cumulative commit diff history for modifications to `.env`, credentials, or keys | Blocks completion gate with security violation |
-| **Semantic Criteria Proof**| Criteria requiring functional implementation must have passing automated test verification | Blocks premature completion; prevents declaring success without test proof |
+| **Secret Protection** | Verifier scans cumulative commit diff history for modifications to `.env` or credentials | Blocks completion gate with security violation |
+| **Truthful Reviewer Fallback**| `hasTrustedVerificationEvidence()` strictly checks latest test check status (`Test: PASSED`) | Fails closed on missing, skipped, or unconfigured tests |
+| **Workspace Fingerprint** | Full recursive SHA-256 fingerprinting before and after verification | Blocks task if untracked, tracked, or ignored files mutate during verification |
 | **Infinite Loop Guard**| Max retry budget + step execution timeouts (default 300s) | Halts step, triggers `TASK_BLOCKED` state |
-
----
-
-## 🧪 Contributing & Testing
-
-1. Fork the repository.
-2. Create your feature branch (`git checkout -b feat/docker-sandbox`).
-3. Ensure typecheck and tests pass:
-   ```bash
-   npm run build
-   npm test
-   ```
-4. Commit your changes (`git commit -m "feat: add docker sandbox agent adapter"`).
-5. Push to the branch (`git push origin feat/docker-sandbox`).
-6. Open a Pull Request.
 
 ---
 
