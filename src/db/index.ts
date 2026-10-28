@@ -104,6 +104,11 @@ export function getDb(): Client {
 export async function initDatabase(): Promise<void> {
   const db = getDb();
 
+  try {
+    await db.execute('PRAGMA journal_mode = WAL;');
+    await db.execute('PRAGMA busy_timeout = 5000;');
+  } catch {}
+
   await db.execute(`
     CREATE TABLE IF NOT EXISTS tasks (
       id TEXT PRIMARY KEY,
@@ -208,6 +213,38 @@ export async function initDatabase(): Promise<void> {
       FOREIGN KEY (taskId) REFERENCES tasks(id) ON DELETE CASCADE
     )
   `);
+
+  // Safe schema migrations for existing databases
+  const migrations = [
+    { table: 'tasks', col: 'attemptId TEXT DEFAULT "initial"' },
+    { table: 'tasks', col: 'budgetsJson TEXT' },
+    { table: 'tasks', col: 'summary TEXT' },
+    { table: 'tasks', col: 'planJson TEXT' },
+    { table: 'tasks', col: 'completedAt TEXT' },
+    { table: 'checkpoints', col: 'attemptId TEXT' },
+    { table: 'checkpoints', col: 'stepId TEXT' },
+    { table: 'checkpoints', col: 'baseCommit TEXT' },
+    { table: 'checkpoints', col: 'commitHash TEXT' },
+    { table: 'checkpoints', col: 'branchName TEXT' },
+    { table: 'checkpoints', col: 'diffContent TEXT' },
+    { table: 'steps', col: 'durationMs INTEGER' },
+    { table: 'steps', col: 'exitCode INTEGER' },
+    { table: 'steps', col: 'diffSummary TEXT' },
+    { table: 'steps', col: 'toolsUsedJson TEXT' },
+    { table: 'steps', col: 'outputLog TEXT' },
+    { table: 'approvals', col: 'targetResource TEXT' },
+    { table: 'approvals', col: 'stepId TEXT' },
+    { table: 'approvals', col: 'parametersJson TEXT' },
+    { table: 'approvals', col: 'requestedBy TEXT' },
+    { table: 'approvals', col: 'approvedBy TEXT' },
+    { table: 'approvals', col: 'expiresAt TEXT' },
+    { table: 'approvals', col: 'respondedAt TEXT' },
+  ];
+  for (const m of migrations) {
+    try {
+      await db.execute(`ALTER TABLE ${m.table} ADD COLUMN ${m.col}`);
+    } catch {}
+  }
 
   // Indexes for performance
   await db.execute(`CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)`);

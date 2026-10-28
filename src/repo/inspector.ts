@@ -179,22 +179,41 @@ export class RepoInspector {
   }
 
   /**
-   * Creates an isolated Git worktree for executing a task without touching user working directory.
+   * P0 FIX: Creates an isolated Git worktree for executing a task without touching user working directory.
+   * Throws strictly on failure so the orchestrator never silently falls back to the user workspace.
    */
-  async createIsolatedWorktree(taskId: string): Promise<string | null> {
-    try {
-      if (!(await this.isGitRepository())) return null;
-
-      const worktreeDir = path.join(this.workspacePath, '.orchestrator_worktrees', taskId);
-      await fs.mkdir(path.dirname(worktreeDir), { recursive: true });
-
-      const branchName = `task/${taskId.slice(0, 8)}`;
-      await this.git.raw(['worktree', 'add', '-B', branchName, worktreeDir, 'HEAD']);
-      return worktreeDir;
-    } catch (err) {
-      console.warn('Could not create git worktree, falling back to workspace path:', err);
-      return null;
+  async createIsolatedWorktree(taskId: string): Promise<string> {
+    if (!(await this.isGitRepository())) {
+      throw new Error(`Cannot create Git worktree: Workspace "${this.workspacePath}" is not a Git repository.`);
     }
+
+    const worktreeDir = path.join(this.workspacePath, '.orchestrator_worktrees', taskId);
+    await fs.mkdir(path.dirname(worktreeDir), { recursive: true });
+
+    const branchName = `task/${taskId.slice(0, 8)}`;
+    try {
+      await this.git.raw(['worktree', 'add', '-B', branchName, worktreeDir, 'HEAD']);
+    } catch (err: any) {
+      throw new Error(`Git worktree allocation failed: ${err.message || String(err)}`);
+    }
+    return worktreeDir;
+  }
+
+  /**
+   * P0 FIX: Creates an isolated filesystem sandbox copy for non-Git workspaces.
+   */
+  async createIsolatedSandbox(taskId: string): Promise<string> {
+    const sandboxDir = path.join(this.workspacePath, '.orchestrator_sandboxes', taskId);
+    await fs.mkdir(sandboxDir, { recursive: true });
+    await fs.cp(this.workspacePath, sandboxDir, {
+      recursive: true,
+      filter: (source) =>
+        !source.includes('.orchestrator_sandboxes') &&
+        !source.includes('.orchestrator_worktrees') &&
+        !source.includes('.git') &&
+        !source.includes('node_modules'),
+    });
+    return sandboxDir;
   }
 
   /**
@@ -210,6 +229,15 @@ export class RepoInspector {
         await fs.rm(worktreeDir, { recursive: true, force: true });
       } catch {}
     }
+  }
+
+  /**
+   * Safely cleans up an isolated sandbox.
+   */
+  async removeIsolatedSandbox(sandboxDir: string): Promise<void> {
+    try {
+      await fs.rm(sandboxDir, { recursive: true, force: true });
+    } catch {}
   }
 
   async inspect(): Promise<ProjectMetadata> {

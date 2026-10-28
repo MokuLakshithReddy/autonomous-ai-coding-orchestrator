@@ -5,6 +5,7 @@ import { LLMBrain, type ExecutionPlan, type PlanStep } from '../llm/index.js';
 import { BuiltInAutonomousAgent, type CodingAgent } from '../agent/index.js';
 import { IndependentVerifier, type VerificationReport } from '../verifier/index.js';
 import {
+  initDatabase,
   taskRepo,
   stepRepo,
   verificationRepo,
@@ -94,6 +95,7 @@ export class OrchestrationEngine extends EventEmitter {
     maxRetries?: number;
     customAgent?: CodingAgent;
   }): Promise<TaskRecord> {
+    await initDatabase();
     const resolvedWorkspace = SecurityPolicyEngine.assertPathContainment(params.workspacePath, params.workspacePath);
 
     const taskId = crypto.randomUUID();
@@ -178,21 +180,46 @@ export class OrchestrationEngine extends EventEmitter {
     const inspector = new RepoInspector(params.workspacePath);
     const brain = new LLMBrain();
 
-    // P0 FIX: Run autonomous execution in an isolated git worktree to protect user checkout
-    let executionPath = params.workspacePath;
+    // P0 FIX: Strict isolation enforcement - NEVER silently fall back to user working tree!
+    let executionPath: string;
     let taskWorktreePath: string | null = null;
+    let isWorktree = false;
     let taskBranchName: string | undefined;
 
-    if (await inspector.isGitRepository()) {
-      taskWorktreePath = await inspector.createIsolatedWorktree(taskId);
-      if (taskWorktreePath) {
+    const isGit = await inspector.isGitRepository();
+    if (isGit) {
+      try {
+        taskWorktreePath = await inspector.createIsolatedWorktree(taskId);
         executionPath = taskWorktreePath;
+        isWorktree = true;
         taskBranchName = `task/${taskId.slice(0, 8)}`;
+      } catch (err: any) {
+        const errMsg = `Safety Exception [Isolation Failure]: Mandatory Git worktree isolation failed for task ${taskId}: ${err.message}. Execution aborted to prevent altering user workspace.`;
+        await this.transitionTaskState(taskId, stateMachine, 'failed', errMsg, errMsg);
+        throw new Error(errMsg);
+      }
+    } else {
+      try {
+        taskWorktreePath = await inspector.createIsolatedSandbox(taskId);
+        executionPath = taskWorktreePath;
+        isWorktree = false;
+      } catch (err: any) {
+        const errMsg = `Safety Exception [Sandbox Failure]: Mandatory sandbox isolation failed for non-git task ${taskId}: ${err.message}. Execution aborted.`;
+        await this.transitionTaskState(taskId, stateMachine, 'failed', errMsg, errMsg);
+        throw new Error(errMsg);
       }
     }
 
     const taskInspector = taskWorktreePath ? new RepoInspector(taskWorktreePath) : inspector;
     const verifier = new IndependentVerifier(executionPath);
+
+    if (params.customAgent) {
+      if (typeof (params.customAgent as any).setWorkspacePath === 'function') {
+        (params.customAgent as any).setWorkspacePath(executionPath);
+      } else if ('workspacePath' in (params.customAgent as any)) {
+        (params.customAgent as any).workspacePath = executionPath;
+      }
+    }
 
     let currentExecutingStepId: string | undefined;
 
@@ -644,13 +671,17 @@ export class OrchestrationEngine extends EventEmitter {
       });
     }
 
-    // P0 FIX: Cleanup isolated worktree folder on completion while preserving task branch commits
+    // P0 FIX: Cleanup isolated worktree or sandbox on completion while preserving task branch commits
     if (taskWorktreePath) {
-      await inspector.removeIsolatedWorktree(taskWorktreePath);
+      if (isWorktree) {
+        await inspector.removeIsolatedWorktree(taskWorktreePath);
+      } else {
+        await inspector.removeIsolatedSandbox(taskWorktreePath);
+      }
       this.emitOrchestratorEvent({
         taskId,
         type: 'LOG',
-        message: `Isolated worktree cleaned up. Task commits preserved on branch: ${taskBranchName || 'task branch'}. User working tree left untouched.`,
+        message: `Isolated environment cleaned up. Task changes preserved ${taskBranchName ? `on branch: ${taskBranchName}` : 'in sandbox snapshot'}. User working tree left untouched.`,
       });
     }
 

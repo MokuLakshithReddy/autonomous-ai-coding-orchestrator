@@ -15,17 +15,19 @@ export interface StepExecutionResult {
 
 export interface CodingAgent {
   name: string;
+  workspacePath?: string;
   executeStep(
     instruction: string,
     targetFiles?: string[],
     abortSignal?: AbortSignal
   ): Promise<StepExecutionResult>;
+  setWorkspacePath?(workspacePath: string): void;
 }
 
 export class BuiltInAutonomousAgent implements CodingAgent {
   name = 'BuiltInAutonomousAgent';
   private toolbox: AgentToolbox;
-  private workspacePath: string;
+  public workspacePath: string;
   private ai: GoogleGenAI | null = null;
   private modelName: string;
 

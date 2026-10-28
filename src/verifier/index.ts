@@ -235,23 +235,93 @@ export class IndependentVerifier {
           satisfied = allCumulativeFiles.length > 0;
           evidence = `Observed modified/created files: ${allCumulativeFiles.join(', ') || 'None'}`;
         } else {
-          // P1 FIX: Behavioral, feature, and implementation criteria require passing test proof
+          // P1 FIX: Genuinely semantic criteria verification.
+          // A general passing test suite does NOT prove a specific feature requirement without targeted evidence!
           checkType = 'diff';
           const hasChanges = allCumulativeFiles.length > 0 || Boolean(diff && diff.length > 0);
           const testsPassed = testCheck.status === 'PASSED';
 
-          if (testsPassed && hasChanges && !hasSuspiciousDeletions && !hasPlaceholderStubs) {
-            satisfied = true;
-            evidence = `Verified: passing test suite confirms expected behavior for "${criterion}".`;
-          } else if (!hasChanges) {
+          if (!hasChanges) {
             satisfied = false;
             evidence = 'No code changes detected in repository diff to satisfy criterion.';
           } else if (testCheck.status === 'FAILED') {
             satisfied = false;
             evidence = `Automated tests failed (exit code ${testCheck.exitCode ?? 1}) - implementation behavior not verified.`;
+          } else if (testCheck.status === 'NOT_CONFIGURED') {
+            satisfied = false;
+            evidence = `Unverified: No automated test suite or verification command was configured to prove "${criterion}".`;
+          } else if (testsPassed && !hasSuspiciousDeletions && !hasPlaceholderStubs) {
+            // Extract core semantic keywords for the criterion
+            const semanticKeywords = lower
+              .replace(/[^a-z0-9\s]/g, ' ')
+              .split(/\s+/)
+              .filter(
+                (w) =>
+                  w.length > 2 &&
+                  ![
+                    'must',
+                    'should',
+                    'with',
+                    'that',
+                    'this',
+                    'have',
+                    'from',
+                    'when',
+                    'then',
+                    'unit',
+                    'test',
+                    'tests',
+                    'pass',
+                    'code',
+                    'implement',
+                    'implementation',
+                    'correctly',
+                    'properly',
+                    'feature',
+                    'logic',
+                    'functional',
+                    'requirement',
+                    'requirements',
+                    'requested',
+                    'fulfills',
+                    'fulfill',
+                    'meets',
+                    'verified',
+                    'satisfies',
+                    'passes',
+                    'check',
+                    'checks',
+                    'for',
+                    'are',
+                  ].includes(w)
+              );
+
+            const hasTargetedCommand = Boolean(
+              customVerificationCmd && semanticKeywords.some((kw) => customVerificationCmd.toLowerCase().includes(kw))
+            );
+            const hasTargetedTestOutput = semanticKeywords.some((kw) =>
+              testCheck.output.toLowerCase().includes(kw)
+            );
+            const hasTargetedTestInDiff =
+              allCumulativeFiles.some((f) => /test|spec/i.test(f)) &&
+              semanticKeywords.some((kw) => diff.toLowerCase().includes(kw));
+
+            if (hasTargetedCommand || hasTargetedTestOutput || hasTargetedTestInDiff) {
+              satisfied = true;
+              evidence = `Verified with targeted test evidence: ${
+                hasTargetedCommand
+                  ? `custom command "${customVerificationCmd}"`
+                  : hasTargetedTestInDiff
+                  ? `test suite in diff targeted to [${semanticKeywords.join(', ')}]`
+                  : `test output confirmed assertions for [${semanticKeywords.join(', ')}]`
+              }.`;
+            } else {
+              satisfied = false;
+              evidence = `Unverified semantic criterion: General test suite passed, but no targeted test assertion in test output or diff verifies requirement: "${criterion}".`;
+            }
           } else {
             satisfied = false;
-            evidence = `Unverified semantic criterion: No automated test or verification command was provided to prove behavioral correctness for "${criterion}".`;
+            evidence = `Verification incomplete for "${criterion}".`;
           }
         }
 

@@ -4,6 +4,9 @@ dist
 *.db
 *.db-journal
 *.db-wal
+*.db-shm
+.orchestrator_worktrees
+.orchestrator_sandboxes
 .DS_Store
 Thumbs.db
 coverage

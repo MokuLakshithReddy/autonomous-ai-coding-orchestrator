@@ -23,14 +23,41 @@ import crypto from 'node:crypto';
 export const serverApiToken: string = config.apiToken || crypto.randomBytes(24).toString('hex');
 
 export function validateWorkspacePath(requestedPath?: string): string {
-  const target = path.resolve(requestedPath || process.cwd());
-  const allowed =
-    config.allowedWorkspaces.length > 0 ? config.allowedWorkspaces : [path.resolve(process.cwd())];
+  const targetRaw = requestedPath || process.cwd();
+  if (!targetRaw || targetRaw.trim() === '') {
+    throw new Error('Forbidden: Workspace path cannot be empty or unspecified.');
+  }
 
-  const isContained = allowed.some((allowedRoot) => {
+  // Reject ambiguous null bytes or illegal characters
+  if (targetRaw.includes('\0')) {
+    throw new Error('Forbidden: Null byte injection detected in workspace path.');
+  }
+
+  const resolvedTarget = path.resolve(targetRaw);
+  if (!fs.existsSync(resolvedTarget)) {
+    throw new Error(`Forbidden: Requested workspace directory does not exist: "${resolvedTarget}".`);
+  }
+
+  let canonicalTarget: string;
+  try {
+    canonicalTarget = fs.realpathSync.native(resolvedTarget);
+  } catch (err: any) {
+    throw new Error(`Forbidden: Cannot canonicalize requested workspace path "${resolvedTarget}": ${err.message}`);
+  }
+
+  const allowedRoots =
+    config.allowedWorkspaces.length > 0 ? config.allowedWorkspaces : [process.cwd()];
+
+  const isContained = allowedRoots.some((allowedRoot) => {
     try {
-      SecurityPolicyEngine.assertPathContainment(target, allowedRoot);
-      return true;
+      const canonicalRoot = fs.existsSync(allowedRoot)
+        ? fs.realpathSync.native(path.resolve(allowedRoot))
+        : path.resolve(allowedRoot);
+
+      const normTarget = path.normalize(canonicalTarget).toLowerCase();
+      const normRoot = path.normalize(canonicalRoot).toLowerCase();
+
+      return normTarget === normRoot || normTarget.startsWith(normRoot + path.sep);
     } catch {
       return false;
     }
@@ -38,10 +65,10 @@ export function validateWorkspacePath(requestedPath?: string): string {
 
   if (!isContained) {
     throw new Error(
-      `Forbidden: Workspace path "${target}" is not within authorized workspace roots: [${allowed.join(', ')}]`
+      `Forbidden: Workspace path "${canonicalTarget}" is not within authorized workspace roots: [${allowedRoots.join(', ')}]`
     );
   }
-  return target;
+  return canonicalTarget;
 }
 
 export async function createServer() {
@@ -72,7 +99,8 @@ export async function createServer() {
     credentials: true,
   });
 
-  // P0 FIX: Token-based authentication middleware on sensitive and mutating endpoints
+  // P0 & P1 FIX: Token-based authentication middleware on sensitive and mutating endpoints
+  // Strictly requires Authorization: Bearer <token> or x-api-token header (rejects query-string tokens on HTTP)
   fastify.addHook('onRequest', async (req, reply) => {
     const url = req.raw.url || '';
     // Public paths: health check, root, static assets
@@ -87,22 +115,19 @@ export async function createServer() {
 
     const authHeader = req.headers['authorization'];
     const tokenHeader = req.headers['x-api-token'];
-    const queryToken = (req.query as any)?.token;
 
     let providedToken: string | undefined;
     if (typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) {
       providedToken = authHeader.slice(7).trim();
     } else if (typeof tokenHeader === 'string') {
       providedToken = tokenHeader.trim();
-    } else if (typeof queryToken === 'string') {
-      providedToken = queryToken.trim();
     }
 
     if (!providedToken || providedToken !== serverApiToken) {
       return reply.status(401).send({
         error: 'Unauthorized',
         message:
-          'A valid API token is required via Authorization: Bearer <token>, x-api-token header, or ?token= query parameter.',
+          'A valid API token is required via Authorization: Bearer <token> or x-api-token header.',
       });
     }
   });

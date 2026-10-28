@@ -36,12 +36,32 @@ export class AgentToolbox {
 
   async writeFile(filePath: string, content: string): Promise<void> {
     const fullPath = this.resolveSafePath(filePath);
+    const policy = SecurityPolicyEngine.evaluateFileWriteRisk(filePath);
+    if (policy.requiresApproval) {
+      if (!this.onRequestApproval) {
+        throw new Error(`Security Exception [Approval Required]: Writing to sensitive destination "${filePath}" requires operator approval.`);
+      }
+      const isApproved = await this.onRequestApproval(`write ${filePath}`, policy);
+      if (!isApproved) {
+        throw new Error(`Security Exception [Approval Denied]: Writing to sensitive destination "${filePath}" was rejected by the operator.`);
+      }
+    }
     await fs.mkdir(path.dirname(fullPath), { recursive: true });
     await fs.writeFile(fullPath, content, 'utf8');
   }
 
   async replaceInFile(filePath: string, target: string, replacement: string): Promise<boolean> {
     const fullPath = this.resolveSafePath(filePath);
+    const policy = SecurityPolicyEngine.evaluateFileWriteRisk(filePath);
+    if (policy.requiresApproval) {
+      if (!this.onRequestApproval) {
+        throw new Error(`Security Exception [Approval Required]: Modifying sensitive destination "${filePath}" requires operator approval.`);
+      }
+      const isApproved = await this.onRequestApproval(`modify ${filePath}`, policy);
+      if (!isApproved) {
+        throw new Error(`Security Exception [Approval Denied]: Modification of sensitive destination "${filePath}" was rejected by the operator.`);
+      }
+    }
     const content = await fs.readFile(fullPath, 'utf8');
     if (!content.includes(target)) {
       return false;

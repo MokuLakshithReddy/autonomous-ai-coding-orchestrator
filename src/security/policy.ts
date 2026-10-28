@@ -33,14 +33,18 @@ export class SecurityPolicyEngine {
   ]);
 
   /**
-   * Enforces strict canonical containment within the authorized workspace.
-   * Resolves symlinks and prevents path traversal (e.g. `../` escapes, case collisions).
+   * P1 FIX: Enforces strict canonical containment within the authorized workspace.
+   * Resolves symlinks and prevents path traversal (e.g. `../` escapes, junctions, null bytes).
    */
   static assertPathContainment(targetPath: string, workspacePath: string): string {
-    const resolvedWorkspace = path.resolve(workspacePath);
-    const resolvedTarget = path.resolve(resolvedWorkspace, targetPath);
+    if (!targetPath || !workspacePath) {
+      throw new Error('Security Exception: Target path and workspace path must be non-empty strings.');
+    }
+    if (targetPath.includes('\0') || workspacePath.includes('\0')) {
+      throw new Error('Security Exception: Null byte injection detected in path.');
+    }
 
-    // Canonicalize realpaths if path exists, or canonicalize directory tree
+    const resolvedWorkspace = path.resolve(workspacePath);
     let canonicalWorkspace = resolvedWorkspace;
     try {
       if (fs.existsSync(resolvedWorkspace)) {
@@ -48,12 +52,12 @@ export class SecurityPolicyEngine {
       }
     } catch {}
 
+    const resolvedTarget = path.resolve(canonicalWorkspace, targetPath);
     let canonicalTarget = resolvedTarget;
     try {
       if (fs.existsSync(resolvedTarget)) {
         canonicalTarget = fs.realpathSync.native(resolvedTarget);
       } else {
-        // Resolve parent realpath for non-existent target files
         const parentDir = path.dirname(resolvedTarget);
         if (fs.existsSync(parentDir)) {
           canonicalTarget = path.join(fs.realpathSync.native(parentDir), path.basename(resolvedTarget));
@@ -61,26 +65,14 @@ export class SecurityPolicyEngine {
       }
     } catch {}
 
-    const relative = path.relative(canonicalWorkspace, canonicalTarget);
-    const isEscaped = relative.startsWith('..') || path.isAbsolute(relative);
+    const normTarget = path.normalize(canonicalTarget).toLowerCase();
+    const normWorkspace = path.normalize(canonicalWorkspace).toLowerCase();
 
-    if (isEscaped) {
+    const isInside = normTarget === normWorkspace || normTarget.startsWith(normWorkspace + path.sep);
+    if (!isInside) {
       throw new Error(
         `Security Exception [Path Traversal Blocked]: Attempted access to "${targetPath}" is outside authorized workspace "${workspacePath}".`
       );
-    }
-
-    // Check configured allowedWorkspaces restriction if present
-    if (config.allowedWorkspaces && config.allowedWorkspaces.length > 0) {
-      const isAllowed = config.allowedWorkspaces.some((allowed) => {
-        const rel = path.relative(allowed, canonicalTarget);
-        return !rel.startsWith('..') && !path.isAbsolute(rel);
-      });
-      if (!isAllowed) {
-        throw new Error(
-          `Security Exception [Workspace Policy]: Path "${canonicalTarget}" is not within configured ALLOWED_DIRECTORIES.`
-        );
-      }
     }
 
     return canonicalTarget;
@@ -145,6 +137,43 @@ export class SecurityPolicyEngine {
   }
 
   /**
+   * P0 FIX: Checks if a destination path targets sensitive credentials or security configurations.
+   */
+  static isSensitiveDestination(filePath: string): boolean {
+    const normalized = filePath.toLowerCase().replace(/\\/g, '/');
+    const base = path.basename(normalized);
+    return (
+      base.startsWith('.env') ||
+      base.includes('credential') ||
+      base.includes('id_rsa') ||
+      base.endsWith('.pem') ||
+      base.endsWith('.key') ||
+      normalized.includes('.git/') ||
+      normalized.includes('.github/workflows') ||
+      base === 'sudoers' ||
+      base === 'passwd' ||
+      base === 'shadow'
+    );
+  }
+
+  /**
+   * P0 FIX: Evaluates authorization risk for writing or modifying file destinations.
+   */
+  static evaluateFileWriteRisk(filePath: string): ActionPolicy {
+    if (this.isSensitiveDestination(filePath)) {
+      return {
+        riskLevel: 'HIGH',
+        requiresApproval: true,
+        reason: `Destination "${filePath}" is a sensitive credential or security configuration file.`,
+      };
+    }
+    return {
+      riskLevel: 'LOW',
+      requiresApproval: false,
+    };
+  }
+
+  /**
    * Evaluates action risk level for planning milestones or step instructions.
    */
   static evaluateActionRisk(actionDescription: string, commandOrPath?: string): ActionPolicy {
@@ -153,6 +182,7 @@ export class SecurityPolicyEngine {
 
   /**
    * Enforces risk evaluation at the actual command execution boundary.
+   * Intercepts destructive commands, interpreters, and dynamic script runners.
    */
   static evaluateCommandRisk(command: string): ActionPolicy {
     const text = command.toLowerCase().trim();
@@ -170,7 +200,7 @@ export class SecurityPolicyEngine {
       };
     }
 
-    // High risk: protected branch mutations, deleting files, permission alteration, system changes
+    // High risk: protected branch mutations, deleting files, permission alteration, system tampering
     if (
       /\b(rm|del|unlink|rmdir|git\s+reset|git\s+clean|chmod|chown|curl\s+.*\|\s*sh|wget\s+.*\|\s*sh|npm\s+publish)\b/i.test(
         text
@@ -180,6 +210,19 @@ export class SecurityPolicyEngine {
         riskLevel: 'HIGH',
         requiresApproval: config.requireApprovalForDestructive,
         reason: 'Modification involves file deletion or high-impact state mutation.',
+      };
+    }
+
+    // P0 FIX: High risk: dynamic interpreters and unconstrained script execution
+    if (
+      /\b(python(\d)?\s+(-c|-m)|node\s+-e|perl\s+-e|ruby\s+-e|php\s+-r|powershell(\.exe)?\s+.*(-enc|-c|-command)|pwsh(\.exe)?\s+.*(-enc|-c|-command)|eval\b|base64\s+-d|iex\b)/i.test(
+        text
+      )
+    ) {
+      return {
+        riskLevel: 'HIGH',
+        requiresApproval: config.requireApprovalForDestructive,
+        reason: 'Dynamic interpreter execution or encoded script execution detected.',
       };
     }
 
