@@ -187,7 +187,22 @@ try {
     'Repaired math.js must not contain the buggy return statement'
   );
 
-  console.log('   ✓ Seeded test suite cleanly passed on task branch.');
+  // 4d. Capture and print actual command results and diff for transparency
+  console.log('\n--- Captured Real Command Results & Logs ---');
+  for (const step of steps) {
+    console.log(`[Step ${step.stepIndex}] ${step.title} (Status: ${step.status})`);
+    if (step.toolsUsedJson) {
+      console.log(`  Tools used: ${step.toolsUsedJson}`);
+    }
+    if (step.outputLog) {
+      console.log(`  Execution Output:\n${step.outputLog.slice(-500).trim()}`);
+    }
+  }
+
+  console.log('\n--- Captured Actual Git Diff on Repaired Branch ---');
+  console.log(diff.trim());
+
+  console.log('\n   ✓ Seeded test suite cleanly passed on task branch.');
   console.log('   ✓ Semantic diff verified: buggy deletion and valid repair addition verified.');
   console.log('   ✓ Task reached genuinely verified completed terminal state with status: PASSED.');
 

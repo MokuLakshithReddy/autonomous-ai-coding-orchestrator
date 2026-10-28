@@ -33,6 +33,18 @@ jobs:
       - name: Build TypeScript Project
         run: npm run build
 
+      - name: Safe Credential Preflight Check
+        env:
+          KEY_VAL: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          if [ -z "$KEY_VAL" ]; then
+            echo "::error::[Preflight Check Failed] Secret GEMINI_API_KEY is not configured in GitHub repository secrets."
+            echo "To configure: Go to GitHub Repo -> Settings -> Secrets and variables -> Actions -> New repository secret -> Name: GEMINI_API_KEY"
+            exit 1
+          fi
+          KEY_LEN=${#KEY_VAL}
+          echo "✓ Credential Preflight Passed: GEMINI_API_KEY is configured ($KEY_LEN characters, value masked)."
+
       - name: Execute Live LLM Autonomous Repair Suite
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}

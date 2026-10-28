@@ -77,6 +77,16 @@ export class RepoInspector {
     }
   }
 
+  async getCurrentCommitHash(): Promise<string | null> {
+    try {
+      if (!(await this.isGitRepository())) return null;
+      const log = await this.git.log({ maxCount: 1 });
+      return log.latest ? log.latest.hash : null;
+    } catch {
+      return null;
+    }
+  }
+
   async getDiff(): Promise<string> {
     try {
       if (!(await this.isGitRepository())) return '';

@@ -25,6 +25,7 @@
   "devDependencies": {
     "@types/node": "^26.6.5",
     "tsx": "^4.23.15",
+    "tweetsodium": "^0.0.4",
     "typescript": "^7.0.2"
   },
   "dependencies": {

@@ -8,8 +8,10 @@ import { SecurityPolicyEngine } from '../src/security/policy.js';
 import { IndependentVerifier } from '../src/verifier/index.js';
 import { AgentToolbox } from '../src/agent/tools.js';
 import { BuiltInAutonomousAgent } from '../src/agent/index.js';
+import { taskRepo, verificationRepo, initDatabase } from '../src/db/index.js';
 
 async function runTests() {
+  await initDatabase();
   console.log('\n--- Running Complete Critical Correctness & Safety Test Suite ---\n');
 
   // Test 1: Full State Machine Transition Graph (P0.3)
@@ -570,6 +572,145 @@ async function runTests() {
   } finally {
     await server.close();
   }
+
+  // Test 13: Truthful Outcomes Persistence & Independent Verification Gate (P0/P1)
+  console.log('\n13. Testing Truthful Outcomes Persistence & Independent Verification Integrity...');
+  const test13Base = await fs.mkdtemp(path.join(os.tmpdir(), 'truthful-persistence-test-'));
+  const test13Repo = path.join(test13Base, 'repo');
+  await fs.mkdir(test13Repo, { recursive: true });
+
+  const t13Git = simpleGit(test13Repo);
+  await t13Git.init();
+  await t13Git.addConfig('user.name', 'Verification Tester');
+  await t13Git.addConfig('user.email', 'verify@orchestrator.local');
+
+  // Seed failing test suite
+  await fs.writeFile(
+    path.join(test13Repo, 'package.json'),
+    JSON.stringify({ name: 'verify-guard-test', scripts: { test: 'node test.js' } }, null, 2)
+  );
+  await fs.writeFile(
+    path.join(test13Repo, 'test.js'),
+    'console.error("Test failed deliberately"); process.exit(1);\n'
+  );
+  await t13Git.add('.');
+  await t13Git.commit('Initial failing test commit');
+
+  // 13a: Model claiming success when tests fail must NEVER result in 'completed' state
+  const mockLyingAgent = {
+    name: 'MockLyingAgent',
+    async executeStep() {
+      return {
+        agentName: 'MockLyingAgent',
+        success: true, // Agent falsely claims it succeeded
+        logs: 'Agent claims all work is finished',
+        toolsUsed: ['fakeTool'],
+        exitCode: 0,
+      };
+    },
+  };
+
+  const testEngine = new OrchestrationEngine({ allowedWorkspaces: [test13Repo] });
+  const failedTask = await testEngine.runTask({
+    prompt: 'Fix the application and make test pass',
+    workspacePath: test13Repo,
+    maxRetries: 1,
+    customAgent: mockLyingAgent,
+  });
+
+  // Wait for task to reach terminal state
+  const startT13 = Date.now();
+  let latestT13 = await taskRepo.getById(failedTask.id);
+  while (latestT13 && !['completed', 'failed', 'partially_completed', 'blocked', 'cancelled'].includes(latestT13.status.toLowerCase())) {
+    if (Date.now() - startT13 > 25000) break;
+    await new Promise((r) => setTimeout(r, 200));
+    latestT13 = await taskRepo.getById(failedTask.id);
+  }
+
+  assert.ok(latestT13, 'Task record must exist in durable database');
+  assert.notStrictEqual(
+    latestT13.status.toLowerCase(),
+    'completed',
+    'Task with failing tests must NEVER be marked COMPLETED, regardless of agent claims'
+  );
+  assert.ok(
+    ['failed', 'partially_completed'].includes(latestT13.status.toLowerCase()),
+    `Task with failing test must enter failed or partially_completed; got: ${latestT13.status}`
+  );
+
+  // 13b: Verify final verification record was persisted with FAILED status and blocking reasons
+  const t13Verifs = await verificationRepo.listForTask(failedTask.id);
+  assert.ok(t13Verifs.length > 0, 'Durable verification ledger must record verification attempts');
+  const finalVerifRec = t13Verifs[t13Verifs.length - 1];
+  assert.strictEqual(finalVerifRec.status, 'FAILED', 'Verification record status must be FAILED');
+  assert.strictEqual(finalVerifRec.testStatus, 'FAILED', 'Test check status must be FAILED');
+
+  // 13c: Database failure during verification persistence must abort completion
+  const origRecord = verificationRepo.record.bind(verificationRepo);
+  const test13Repo2 = path.join(test13Base, 'repo2');
+  await fs.mkdir(test13Repo2, { recursive: true });
+  const t13Git2 = simpleGit(test13Repo2);
+  await t13Git2.init();
+  await t13Git2.addConfig('user.name', 'Tester');
+  await t13Git2.addConfig('user.email', 'test@test.local');
+  await fs.writeFile(
+    path.join(test13Repo2, 'package.json'),
+    JSON.stringify({ name: 'db-fail-test', scripts: { test: 'node -e "process.exit(0)"' } }, null, 2)
+  );
+  await t13Git2.add('.');
+  await t13Git2.commit('Passing test commit');
+
+  try {
+    // Inject database failure on verification persistence
+    let dbCallCount = 0;
+    (verificationRepo as any).record = async (record: any) => {
+      dbCallCount++;
+      if (dbCallCount > 1) {
+        throw new Error('Simulated SQLite disk I/O failure during verification write');
+      }
+      return origRecord(record);
+    };
+
+    const testEngine2 = new OrchestrationEngine({ allowedWorkspaces: [test13Repo2] });
+    const dbFailTask = await testEngine2.runTask({
+      prompt: 'Passing task with database failure',
+      workspacePath: test13Repo2,
+      maxRetries: 0,
+      customAgent: {
+        name: 'SimplePassingAgent',
+        async executeStep() {
+          return { agentName: 'SimplePassingAgent', success: true, logs: 'Done', toolsUsed: [], exitCode: 0 };
+        },
+      },
+    });
+
+    const startDbWait = Date.now();
+    let dbTaskRec = await taskRepo.getById(dbFailTask.id);
+    while (dbTaskRec && !['completed', 'failed', 'blocked', 'cancelled'].includes(dbTaskRec.status.toLowerCase())) {
+      if (Date.now() - startDbWait > 15000) break;
+      await new Promise((r) => setTimeout(r, 200));
+      dbTaskRec = await taskRepo.getById(dbFailTask.id);
+    }
+
+    assert.ok(dbTaskRec, 'Task record must exist');
+    assert.notStrictEqual(
+      dbTaskRec.status.toLowerCase(),
+      'completed',
+      'Database failure during verification persistence must NEVER leave task marked completed'
+    );
+    assert.strictEqual(
+      dbTaskRec.status.toLowerCase(),
+      'failed',
+      'Database failure during verification persistence must transition task to FAILED'
+    );
+  } finally {
+    verificationRepo.record = origRecord;
+    try {
+      await fs.rm(test13Base, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    } catch {}
+  }
+
+  console.log('   ✓ Truthful persistence verified: model claims rejected on test failures, DB failures fail safe to FAILED.');
 
   console.log('\n=== ALL P0/P1 CORRECTNESS, SAFETY & VERIFICATION TESTS PASSED! ===\n');
 }

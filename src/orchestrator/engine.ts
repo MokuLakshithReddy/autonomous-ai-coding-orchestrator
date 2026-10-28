@@ -627,12 +627,36 @@ export class OrchestrationEngine extends EventEmitter {
     // 5. Final Completion Gate
     // Re-verify against original baseline commit
     await this.transitionTaskState(taskId, stateMachine, 'verifying', 'Executing final completion verification gate');
+    
+    // P0 FIX: Capture pre-verification workspace commit state to guarantee verified workspace matches final workspace
+    const preVerificationHead = await taskInspector.getCurrentCommitHash();
+    
     const finalVerification = await verifier.verify(
       repoMeta,
       plan.acceptanceCriteria,
       undefined,
       baseline?.baseCommit
     );
+    
+    // P0 FIX: Ensure final workspace has not mutated during verification
+    const postVerificationHead = await taskInspector.getCurrentCommitHash();
+    if (preVerificationHead && postVerificationHead && preVerificationHead !== postVerificationHead) {
+      finalVerification.isVerified = false;
+      finalVerification.status = 'FAILED';
+      finalVerification.blockingReasons.push(
+        `Workspace integrity violation: Workspace HEAD mutated during verification (${preVerificationHead} -> ${postVerificationHead}).`
+      );
+    }
+
+    // P0 FIX: If test suite was configured, verify tests genuinely ran and passed cleanly
+    if (repoMeta.testCmd && finalVerification.testCheck.status !== 'PASSED') {
+      finalVerification.isVerified = false;
+      finalVerification.status = 'FAILED';
+      finalVerification.blockingReasons.push(
+        `Verification failure: Configured test suite (${repoMeta.testCmd}) did not achieve PASSED status (status: ${finalVerification.testCheck.status}).`
+      );
+    }
+
     const finalDiff = await taskInspector.getDiffAgainstBase();
 
     const verifications = await verificationRepo.listForTask(taskId);
@@ -647,6 +671,40 @@ export class OrchestrationEngine extends EventEmitter {
       finalDiff,
       !finalVerification.isVerified
     );
+
+    // P0 FIX: Model-generated claim of success can NEVER override unverified criteria or test failure
+    if (!finalVerification.isVerified && review.isComplete) {
+      review.isComplete = false;
+      review.unresolvedIssues.push(
+        `Independent verification failed: ${finalVerification.blockingReasons.join('; ')}`
+      );
+    }
+
+    // P1 FIX: Persist final verification report, failed checks, and diagnostics to durable database BEFORE state transition
+    try {
+      await verificationRepo.record({
+        id: crypto.randomUUID(),
+        taskId,
+        status: finalVerification.status as any,
+        buildStatus: finalVerification.buildCheck.status as any,
+        testStatus: finalVerification.testCheck.status as any,
+        lintStatus: finalVerification.lintCheck.status as any,
+        diffInspection: finalVerification.diffAudit.summary,
+        detailsJson: JSON.stringify(finalVerification),
+        diagnostics: finalVerification.diagnostics,
+        createdAt: new Date().toISOString(),
+      });
+    } catch (dbErr: any) {
+      console.error(`[Durable Ledger Error] Failed to persist final verification for task ${taskId}:`, dbErr);
+      await this.transitionTaskState(
+        taskId,
+        stateMachine,
+        'failed',
+        `Database persistence error during verification: ${dbErr.message}`,
+        dbErr.message
+      );
+      throw new Error(`Critical persistence failure: Final verification could not be recorded in database (${dbErr.message}). Task marked FAILED.`);
+    }
 
     // Truthful Completion Gate: Distinguish completed vs partially_completed vs needs_human_review vs failed
     if (finalVerification.isVerified && review.isComplete) {
