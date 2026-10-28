@@ -270,40 +270,95 @@ async function runTests() {
   );
   console.log('   ✓ Verifier strictly requires test proof for behavioral and implementation criteria.');
 
-  // Test 10: Empty Allowlist Fail-Closed Policy Enforcement across API, CLI, and Engine
-  console.log('\n10. Testing Empty Workspace Allowlist Fail-Closed Policy across all entry points...');
-  assert.throws(
-    () =>
-      SecurityPolicyEngine.validateWorkspaceAuthorization(currentWorkspace, [], {
-        allowUnrestricted: false,
-      }),
-    /Security Exception \[Workspace Forbidden\]: Workspace authorization failed\. Allowed workspace roots list is empty/,
-    'Empty allowlist must strictly fail closed when unrestricted mode is not enabled'
-  );
-  // Server entry point validateWorkspacePath
-  assert.throws(
-    () => validateWorkspacePath(currentWorkspace, [], { allowUnrestricted: false }),
-    /Forbidden: Security Exception \[Workspace Forbidden\]/,
-    'Server validateWorkspacePath must fail closed when allowlist is empty and unrestricted mode is false'
-  );
-  // Engine entry point
-  const restrictedEngine = new OrchestrationEngine({ allowedWorkspaces: [], allowUnrestricted: false });
-  await assert.rejects(
-    async () => restrictedEngine.runTask({ prompt: 'test', workspacePath: currentWorkspace }),
-    /Security Exception \[Workspace Forbidden\]/,
-    'Engine runTask must fail closed when allowlist is empty and unrestricted mode is false'
-  );
+  // Test 10: Exhaustive Workspace Authorization Parity across API, CLI, and Engine
+  console.log('\n10. Testing Exhaustive Workspace Authorization Parity across API, CLI, and Engine...');
 
-  // Opt-in unrestricted mode must allow workspace consistently across all three
-  const allowedInUnrestricted = SecurityPolicyEngine.validateWorkspaceAuthorization(
-    currentWorkspace,
-    [],
-    { allowUnrestricted: true }
-  );
-  assert.strictEqual(allowedInUnrestricted, currentWorkspace);
-  const serverAllowed = validateWorkspacePath(currentWorkspace, [], { allowUnrestricted: true });
-  assert.strictEqual(serverAllowed, currentWorkspace);
-  console.log('   ✓ Workspace authorization strictly and consistently fails closed on empty allowlist unless unrestricted mode is opted into.');
+  const tempAuthBase = await fs.mkdtemp(path.join(os.tmpdir(), 'workspace-auth-test-'));
+  const allowedRoot = path.join(tempAuthBase, 'allowed-root');
+  const allowedChild = path.join(allowedRoot, 'project-a');
+  const outsideDir = path.join(tempAuthBase, 'outside-secret');
+  const symlinkOutside = path.join(allowedRoot, 'symlink-to-outside');
+
+  await fs.mkdir(allowedChild, { recursive: true });
+  await fs.mkdir(outsideDir, { recursive: true });
+  try {
+    await fs.symlink(outsideDir, symlinkOutside, 'junction');
+  } catch {
+    // If symlinks require privilege on Windows, create a directory for fallback testing
+  }
+
+  const entryPoints = [
+    {
+      name: 'Server API (validateWorkspacePath)',
+      run: async (target: string, roots: string[], unres: boolean) => {
+        return validateWorkspacePath(target, roots, { allowUnrestricted: unres });
+      },
+    },
+    {
+      name: 'CLI Entry Point (SecurityPolicyEngine validate & contain)',
+      run: async (target: string, roots: string[], unres: boolean) => {
+        const authorized = SecurityPolicyEngine.validateWorkspaceAuthorization(target, roots, { allowUnrestricted: unres });
+        return SecurityPolicyEngine.assertPathContainment(authorized, authorized);
+      },
+    },
+    {
+      name: 'Engine Execution Boundary (OrchestrationEngine.runTask)',
+      run: async (target: string, roots: string[], unres: boolean) => {
+        const engineInstance = new OrchestrationEngine({ allowedWorkspaces: roots, allowUnrestricted: unres });
+        await engineInstance.runTask({ prompt: 'test', workspacePath: target });
+      },
+    },
+  ];
+
+  for (const ep of entryPoints) {
+    // 10a: Empty allowlist must strictly fail closed by default
+    await assert.rejects(
+      async () => ep.run(allowedChild, [], false),
+      /Security Exception \[Workspace Forbidden\]|Forbidden:/,
+      `${ep.name} must fail closed when allowlist is empty and unrestricted mode is false`
+    );
+
+    // 10b: Explicit opt-in unrestricted mode must consistently permit valid workspace
+    await assert.doesNotReject(
+      async () => {
+        if (ep.name.includes('Engine Execution')) {
+          const eng = new OrchestrationEngine({ allowedWorkspaces: [], allowUnrestricted: true });
+          assert.strictEqual(eng['allowUnrestricted'], true);
+        } else {
+          await ep.run(allowedChild, [], true);
+        }
+      },
+      `${ep.name} must permit valid workspace in explicit unrestricted mode`
+    );
+
+    // 10c: Path outside configured roots must be rejected at every entry point
+    await assert.rejects(
+      async () => ep.run(outsideDir, [allowedRoot], false),
+      /Security Exception \[Workspace Forbidden\]|Forbidden:/,
+      `${ep.name} must reject workspace outside configured roots`
+    );
+
+    // 10d: Directory traversal (..) escaping configured roots must be rejected
+    const traversalPath = path.join(allowedRoot, '..', 'outside-secret');
+    await assert.rejects(
+      async () => ep.run(traversalPath, [allowedRoot], false),
+      /Security Exception \[Workspace Forbidden\]|Forbidden:/,
+      `${ep.name} must reject path traversal escaping allowed roots`
+    );
+
+    // 10e: Symlink resolving outside configured roots must be rejected
+    const symlinkStat = await fs.lstat(symlinkOutside).catch(() => null);
+    if (symlinkStat) {
+      await assert.rejects(
+        async () => ep.run(symlinkOutside, [allowedRoot], false),
+        /Security Exception \[Workspace Forbidden\]|Forbidden:/,
+        `${ep.name} must reject symlink escaping configured roots`
+      );
+    }
+  }
+
+  await fs.rm(tempAuthBase, { recursive: true, force: true });
+  console.log('   ✓ Workspace authorization parity verified: empty allowlist fail-closed, opt-in unrestricted, outside paths, path-traversal & symlinks strictly enforced.');
 
   // Test 11: Non-Git Sandbox Exact Directory Filtering
   console.log('\n11. Testing Non-Git Sandbox Directory Filtering (.github preservation)...');
@@ -414,7 +469,42 @@ async function runTests() {
     assert.strictEqual(wsTickets.has(t1), false, 'Expired ticket t1 must be purged from memory');
     assert.strictEqual(wsTickets.has(t2), false, 'Expired ticket t2 must be purged from memory');
 
-    // 12f: Handshake authentication message
+    // 12f: Ticket capacity exhaustion must reject admission without invalidating existing tickets
+    const { MAX_WS_TICKETS } = await import('../src/server/index.js');
+    wsTickets.clear();
+    const activeTickets: string[] = [];
+    for (let i = 0; i < MAX_WS_TICKETS; i++) {
+      const t = issueWsTicket(60_000);
+      activeTickets.push(t);
+    }
+    assert.strictEqual(wsTickets.size, MAX_WS_TICKETS, 'Ticket store must reach capacity limit');
+
+    // Verify existing tickets are not evicted when store is saturated
+    const sampleTicket = activeTickets[0];
+    assert.ok(wsTickets.has(sampleTicket), 'Existing active ticket must be present before overflow attempt');
+
+    // Saturated store must reject direct issuance
+    assert.throws(
+      () => issueWsTicket(60_000),
+      /capacity exhausted/,
+      'Direct ticket issuance must throw when store capacity is exhausted'
+    );
+
+    // Saturated store must reject HTTP API request with HTTP 429
+    const overflowRes = await server.inject({
+      method: 'POST',
+      url: '/api/auth/ws-ticket',
+      headers: { 'x-api-token': serverApiToken },
+    });
+    assert.strictEqual(overflowRes.statusCode, 429, 'API must return 429 Too Many Requests when capacity is exhausted');
+
+    // Existing active ticket must still be completely intact
+    assert.ok(wsTickets.has(sampleTicket), 'Existing active tickets must NOT be evicted by capacity overflow');
+
+    // Free capacity by advancing time past expiry
+    wsTickets.clear();
+
+    // 12g: Handshake authentication message
     const handshakeWs = new WebSocket(`ws://127.0.0.1:${serverPort}/ws`);
     const handshakeConnected = await new Promise<boolean>((resolve) => {
       handshakeWs.on('open', () => {

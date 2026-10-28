@@ -43,10 +43,7 @@ export function cleanupExpiredWsTickets(now = Date.now()): number {
 export function issueWsTicket(ttlMs = 60_000): string {
   cleanupExpiredWsTickets();
   if (wsTickets.size >= MAX_WS_TICKETS) {
-    const keys = Array.from(wsTickets.keys());
-    for (let i = 0; i < 100 && i < keys.length; i++) {
-      wsTickets.delete(keys[i]);
-    }
+    throw new Error('WebSocket ticket store capacity exhausted; cannot issue new ticket');
   }
   const ticket = crypto.randomBytes(32).toString('hex');
   const expiresAt = Date.now() + ttlMs;
@@ -185,8 +182,18 @@ export async function createServer() {
     if (token !== serverApiToken) {
       return reply.status(401).send({ error: 'Unauthorized: Invalid API token' });
     }
-    const ticket = issueWsTicket();
-    return { ticket, expiresInSeconds: 60 };
+    try {
+      const ticket = issueWsTicket();
+      return { ticket, expiresInSeconds: 60 };
+    } catch (err: any) {
+      if (err.message?.includes('capacity exhausted')) {
+        return reply.status(429).send({
+          error: 'Too Many Requests',
+          message: 'WebSocket ticket store capacity exhausted. Please try again later.',
+        });
+      }
+      throw err;
+    }
   });
 
   fastify.register(async function (fastifyInstance) {

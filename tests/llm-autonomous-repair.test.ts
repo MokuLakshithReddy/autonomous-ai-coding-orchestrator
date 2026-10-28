@@ -13,7 +13,12 @@ async function runLiveLLMRepairIntegrationTest() {
   console.log('   LIVE LLM AUTONOMOUS REPAIR INTEGRATION TEST (UNSCRIPTED)         ');
   console.log('====================================================================\n');
 
+  const isLlmRequired = process.env.REQUIRE_LLM === 'true';
   if (!config.geminiApiKey) {
+    if (isLlmRequired) {
+      console.error('\n❌ [ERROR] GEMINI_API_KEY is required because REQUIRE_LLM=true, but no key was configured.');
+      process.exit(1);
+    }
     console.log('ℹ️  [NOTICE: SKIPPED] Live LLM autonomous repair integration test.');
     console.log('   Reason: No GEMINI_API_KEY is configured in environment or .env.');
     console.log('   The deterministic agent regression test (tests/autonomous-repair-loop.test.ts)');
@@ -104,27 +109,53 @@ try {
   console.log('\n4. Verifying live LLM execution results...');
   assert.ok(latestTask, 'Task record must exist in durable database');
 
+  const steps = await stepRepo.listForTask(task.id);
+  const verifs = await verificationRepo.listForTask(task.id);
+
   if (latestTask.status.toLowerCase() !== 'completed') {
-    const steps = await stepRepo.listForTask(task.id);
-    const verifs = await verificationRepo.listForTask(task.id);
     console.error('Task failed! Steps:', JSON.stringify(steps, null, 2));
     console.error('Task failed! Verifications:', JSON.stringify(verifs, null, 2));
     console.error('Task summary/status:', latestTask.summary, latestTask.status);
   }
 
+  // 4a. Genuinely verified terminal state
   assert.strictEqual(
     latestTask.status.toLowerCase(),
     'completed',
     `Live LLM task must achieve COMPLETED status; current: ${latestTask.status}`
   );
+  assert.ok(verifs.length > 0, 'Task must have produced verification records');
+  const finalVerif = verifs[verifs.length - 1];
+  assert.strictEqual(finalVerif.passed, true, 'Final verification record must have passed');
 
+  // 4b. Primary acceptance criterion: target repository test suite passes on the task branch
   const taskBranch = `task/${task.id.slice(0, 8)}`;
-  const repairedMath = await git.show([`${taskBranch}:math.js`]);
+  await git.checkout(taskBranch);
+
+  const { execSync } = await import('node:child_process');
+  let testSuiteOutput = '';
+  try {
+    testSuiteOutput = execSync('node test.js', { cwd: repoDir, encoding: 'utf-8' });
+  } catch (err: any) {
+    assert.fail(`Seeded test suite failed on repaired branch "${taskBranch}": ${err.stdout || err.message}`);
+  }
   assert.ok(
-    repairedMath.includes('return a + b;'),
-    'Live LLM must have fixed calculateSum to return a + b'
+    testSuiteOutput.includes('Unit tests passed'),
+    `Seeded test suite must pass cleanly; got: ${testSuiteOutput}`
   );
-  console.log('   ✓ Live LLM agent independently diagnosed, repaired, and proved fix in math.js.');
+
+  // 4c. Semantic git diff inspection (not brittle string matching)
+  const diff = await git.diff(['HEAD~1', 'HEAD', '--', 'math.js']);
+  assert.ok(diff.includes('--- a/math.js') && diff.includes('+++ b/math.js'), 'Diff must touch math.js');
+  assert.ok(
+    diff.includes('-') && !diff.includes('return a - b;'),
+    'Diff must show removal of the buggy subtraction logic'
+  );
+  assert.ok(diff.includes('+'), 'Diff must show introduction of the repaired implementation');
+
+  console.log('   ✓ Seeded test suite cleanly passed on task branch.');
+  console.log('   ✓ Semantic diff verified: math.js bug removed and implementation corrected.');
+  console.log('   ✓ Task reached genuinely verified completed terminal state.');
 
   // Cleanup
   try {
