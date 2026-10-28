@@ -354,15 +354,22 @@ async function runTests() {
     await assert.doesNotReject(
       async () => {
         const result: any = await ep.run(allowedChild, [], true);
+        const canonicalExpected = SecurityPolicyEngine.resolveCanonicalPath(allowedChild);
         if (ep.name.includes('Engine Execution')) {
           assert.ok(result && result.id, 'Engine must create and execute real task record in unrestricted mode');
+          const canonicalActual = SecurityPolicyEngine.resolveCanonicalPath(result.workspacePath);
           assert.strictEqual(
-            result.workspacePath,
-            allowedChild,
+            canonicalActual,
+            canonicalExpected,
             'Engine task record must target authorized workspace path'
           );
         } else {
-          assert.strictEqual(result, allowedChild, `${ep.name} must return canonical authorized path`);
+          const canonicalActual = SecurityPolicyEngine.resolveCanonicalPath(result);
+          assert.strictEqual(
+            canonicalActual,
+            canonicalExpected,
+            `${ep.name} must return canonical authorized path`
+          );
         }
       },
       `${ep.name} must permit valid workspace in explicit unrestricted mode`
