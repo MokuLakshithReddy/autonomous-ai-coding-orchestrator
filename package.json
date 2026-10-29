@@ -23,8 +23,8 @@
     "coding-agent",
     "autonomous"
   ],
-  "author": "",
-  "license": "MIT",
+  "author": "Lakshith Reddy",
+  "license": "UNLICENSED",
   "engines": {
     "node": ">=22.12.0"
   },

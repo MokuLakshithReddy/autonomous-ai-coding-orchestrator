@@ -509,6 +509,8 @@ const task = await engine.runTask({
 
 ---
 
-## 📄 License
+## 📄 License & Distribution Policy
 
-This project is licensed under the [MIT License](LICENSE) — see the [LICENSE](LICENSE) file for details.
+Copyright © 2026 Lakshith Reddy. All rights reserved.
+
+This repository is source-available for public inspection, educational review, and evaluation. Unauthorized reproduction, modification, redistribution, or commercial use of this software, in whole or in part, is strictly prohibited without explicit prior written authorization from the copyright holder. See the [LICENSE](LICENSE) file for complete terms.
