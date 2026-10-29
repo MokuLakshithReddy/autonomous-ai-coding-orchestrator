@@ -3,6 +3,7 @@ import { AgentToolbox, type CommandResult, type ApprovalCallback } from './tools
 import { config } from '../config/index.js';
 import { RepoInspector } from '../repo/inspector.js';
 import { type TokenUsageMetadata, calculateGeminiCost } from '../llm/index.js';
+import { SecurityPolicyEngine } from '../security/policy.js';
 
 export interface StepExecutionResult {
   agentName: string;
@@ -146,12 +147,17 @@ export class BuiltInAutonomousAgent implements CodingAgent {
       logs.push(`\n--- Iteration ${iteration}/${maxIterations} ---`);
 
       // Gather current file contexts (auto-populate target files and related workspace files)
+      // P0 FIX: Strictly exclude sensitive secrets and credentials from automatic file context
       const fileContexts: Record<string, string> = {};
-      const targetSet = new Set(targetFiles.filter(Boolean));
+      const targetSet = new Set(
+        targetFiles.filter((f) => f && !SecurityPolicyEngine.isSensitiveSecret(f))
+      );
       if (targetSet.size === 0) {
         try {
           const allFiles = await this.toolbox.listFiles();
-          for (const f of allFiles.filter((f) => !f.endsWith('/') && !f.includes('node_modules')).slice(0, 8)) {
+          for (const f of allFiles
+            .filter((f) => !f.endsWith('/') && !f.includes('node_modules') && !SecurityPolicyEngine.isSensitiveSecret(f))
+            .slice(0, 8)) {
             targetSet.add(f);
           }
         } catch { }
@@ -159,7 +165,9 @@ export class BuiltInAutonomousAgent implements CodingAgent {
         // Also include related workspace source files (up to 8 files) for cross-file contract awareness
         try {
           const allFiles = await this.toolbox.listFiles();
-          for (const f of allFiles.filter((f) => !f.endsWith('/') && !f.includes('node_modules'))) {
+          for (const f of allFiles.filter(
+            (f) => !f.endsWith('/') && !f.includes('node_modules') && !SecurityPolicyEngine.isSensitiveSecret(f)
+          )) {
             if (targetSet.size >= 8) break;
             targetSet.add(f);
           }
@@ -167,6 +175,10 @@ export class BuiltInAutonomousAgent implements CodingAgent {
       }
 
       for (const tf of targetSet) {
+        if (SecurityPolicyEngine.isSensitiveSecret(tf)) {
+          fileContexts[tf] = '(Excluded: sensitive secret file content blocked by security policy)';
+          continue;
+        }
         try {
           fileContexts[tf] = await this.toolbox.readFile(tf);
         } catch {
@@ -177,7 +189,7 @@ export class BuiltInAutonomousAgent implements CodingAgent {
       const prompt = `
 You are an Autonomous Software Engineer executing a specific coding task.
 Task: ${currentTask}
-Target Files: ${targetFiles.join(', ') || 'Any relevant files in repository'}
+Target Files: ${targetFiles.filter((f) => !SecurityPolicyEngine.isSensitiveSecret(f)).join(', ') || 'Any relevant files in repository'}
 
 File Contexts:
 ${Object.entries(fileContexts)
@@ -454,16 +466,21 @@ Output your response ONLY in valid JSON matching this schema:
 export class AiderAgentAdapter implements CodingAgent {
   name = 'AiderAgentAdapter';
   public workspacePath: string;
+  private onRequestApproval?: ApprovalCallback;
   private toolbox: AgentToolbox;
 
-  constructor(workspacePath: string) {
+  constructor(workspacePath: string, onRequestApproval?: ApprovalCallback) {
     this.workspacePath = workspacePath;
-    this.toolbox = new AgentToolbox(workspacePath);
+    this.onRequestApproval = onRequestApproval;
+    this.toolbox = new AgentToolbox(workspacePath, onRequestApproval);
   }
 
-  setWorkspacePath(workspacePath: string): void {
+  setWorkspacePath(workspacePath: string, onRequestApproval?: ApprovalCallback): void {
     this.workspacePath = workspacePath;
-    this.toolbox = new AgentToolbox(workspacePath);
+    if (onRequestApproval !== undefined) {
+      this.onRequestApproval = onRequestApproval;
+    }
+    this.toolbox = new AgentToolbox(workspacePath, this.onRequestApproval);
   }
 
   async executeStep(
@@ -471,10 +488,18 @@ export class AiderAgentAdapter implements CodingAgent {
     targetFiles: string[] = [],
     abortSignal?: AbortSignal
   ): Promise<StepExecutionResult> {
-    const filesArg = targetFiles.map((f) => `"${f.replace(/"/g, '\\"')}"`).join(' ');
-    const escapedInstruction = instruction.replace(/"/g, '\\"');
-    const cmd = `aider --yes --message "${escapedInstruction}" ${filesArg}`.trim();
-    const result = await this.toolbox.executeCommand(cmd, 180000, {}, abortSignal);
+    const isWin = process.platform === 'win32';
+    const bin = isWin ? 'aider.cmd' : 'aider';
+    const args = ['--yes', '--message', instruction, ...targetFiles];
+    let result = await this.toolbox.executeCommandWithArgs(bin, args, 180000, {}, abortSignal);
+
+    // Fallback attempt to standard PATH command if .cmd is not directly invoked
+    if (result.exitCode !== 0 && result.stderr.includes('Spawn invocation failed')) {
+      const filesArg = targetFiles.map((f) => `"${f.replace(/"/g, '\\"')}"`).join(' ');
+      const escapedInstruction = instruction.replace(/"/g, '\\"');
+      const cmd = `aider --yes --message "${escapedInstruction}" ${filesArg}`.trim();
+      result = await this.toolbox.executeCommand(cmd, 180000, {}, abortSignal);
+    }
 
     return {
       agentName: this.name,
@@ -491,16 +516,21 @@ export class AiderAgentAdapter implements CodingAgent {
 export class ClaudeCodeAgentAdapter implements CodingAgent {
   name = 'ClaudeCodeAgentAdapter';
   public workspacePath: string;
+  private onRequestApproval?: ApprovalCallback;
   private toolbox: AgentToolbox;
 
-  constructor(workspacePath: string) {
+  constructor(workspacePath: string, onRequestApproval?: ApprovalCallback) {
     this.workspacePath = workspacePath;
-    this.toolbox = new AgentToolbox(workspacePath);
+    this.onRequestApproval = onRequestApproval;
+    this.toolbox = new AgentToolbox(workspacePath, onRequestApproval);
   }
 
-  setWorkspacePath(workspacePath: string): void {
+  setWorkspacePath(workspacePath: string, onRequestApproval?: ApprovalCallback): void {
     this.workspacePath = workspacePath;
-    this.toolbox = new AgentToolbox(workspacePath);
+    if (onRequestApproval !== undefined) {
+      this.onRequestApproval = onRequestApproval;
+    }
+    this.toolbox = new AgentToolbox(workspacePath, this.onRequestApproval);
   }
 
   async executeStep(
@@ -509,9 +539,16 @@ export class ClaudeCodeAgentAdapter implements CodingAgent {
     abortSignal?: AbortSignal
   ): Promise<StepExecutionResult> {
     const filesHint = targetFiles.length > 0 ? ` Target files: ${targetFiles.join(', ')}.` : '';
-    const fullPrompt = `${instruction}${filesHint}`.replace(/"/g, '\\"');
-    const cmd = `claude -p "${fullPrompt}"`;
-    const result = await this.toolbox.executeCommand(cmd, 240000, {}, abortSignal);
+    const fullPrompt = `${instruction}${filesHint}`;
+    const isWin = process.platform === 'win32';
+    const bin = isWin ? 'claude.cmd' : 'claude';
+    let result = await this.toolbox.executeCommandWithArgs(bin, ['-p', fullPrompt], 240000, {}, abortSignal);
+
+    if (result.exitCode !== 0 && result.stderr.includes('Spawn invocation failed')) {
+      const escapedPrompt = fullPrompt.replace(/"/g, '\\"');
+      const cmd = `claude -p "${escapedPrompt}"`;
+      result = await this.toolbox.executeCommand(cmd, 240000, {}, abortSignal);
+    }
 
     return {
       agentName: this.name,
@@ -532,10 +569,10 @@ export function createAgent(
 ): CodingAgent {
   switch (type.toLowerCase()) {
     case 'aider':
-      return new AiderAgentAdapter(workspacePath);
+      return new AiderAgentAdapter(workspacePath, onRequestApproval);
     case 'claude':
     case 'claudecode':
-      return new ClaudeCodeAgentAdapter(workspacePath);
+      return new ClaudeCodeAgentAdapter(workspacePath, onRequestApproval);
     case 'builtin':
     default:
       return new BuiltInAutonomousAgent(workspacePath, onRequestApproval, modelClient);

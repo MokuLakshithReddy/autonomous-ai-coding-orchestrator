@@ -1096,6 +1096,115 @@ async function runTests() {
   }
   console.log('   ✓ Persistence failures gracefully contained: tasks reach terminal failed state without unhandled rejections.');
 
+  // Test 23: Sensitive File Reading & Exclusions (P0)
+  console.log('\n23. Testing Sensitive File Reading & Exclusions (P0)...');
+  const test23Dir = await fs.mkdtemp(path.join(os.tmpdir(), 'test-sensitive-'));
+  await fs.writeFile(path.join(test23Dir, '.env'), 'SECRET_API_KEY=super_secret_12345\n');
+  await fs.writeFile(path.join(test23Dir, 'credentials.json'), '{"key": "secret"}\n');
+  await fs.writeFile(path.join(test23Dir, 'id_rsa'), 'PRIVATE KEY DATA\n');
+  await fs.writeFile(path.join(test23Dir, '.env.example'), 'SECRET_API_KEY=your_key_here\n');
+  await fs.writeFile(path.join(test23Dir, 'index.js'), 'console.log("hello");\n');
+
+  const toolbox23 = new AgentToolbox(test23Dir);
+
+  // readFile on sensitive secrets must throw Security Exception
+  let envReadBlocked = false;
+  try {
+    await toolbox23.readFile('.env');
+  } catch (err: any) {
+    envReadBlocked = err.message.includes('Security Exception') && err.message.includes('strictly prohibited');
+  }
+  assert.strictEqual(envReadBlocked, true, 'Reading .env must be strictly blocked with Security Exception');
+
+  let credsReadBlocked = false;
+  try {
+    await toolbox23.readFile('credentials.json');
+  } catch (err: any) {
+    credsReadBlocked = err.message.includes('Security Exception');
+  }
+  assert.strictEqual(credsReadBlocked, true, 'Reading credentials.json must be strictly blocked with Security Exception');
+
+  // .env.example should be readable
+  const exampleContent = await toolbox23.readFile('.env.example');
+  assert.ok(exampleContent.includes('your_key_here'), '.env.example must remain readable');
+
+  // listFiles must omit sensitive secrets
+  const listed = await toolbox23.listFiles();
+  assert.strictEqual(listed.includes('.env'), false, 'listFiles must exclude .env');
+  assert.strictEqual(listed.includes('credentials.json'), false, 'listFiles must exclude credentials.json');
+  assert.strictEqual(listed.includes('id_rsa'), false, 'listFiles must exclude id_rsa');
+  assert.strictEqual(listed.includes('.env.example'), true, 'listFiles should include .env.example');
+
+  // createIsolatedSandbox must not copy sensitive secrets
+  const inspector23 = new RepoInspector(test23Dir);
+  const sandbox23 = await inspector23.createIsolatedSandbox('test-task-23');
+  const sandboxEnvExists = await fs.stat(path.join(sandbox23, '.env')).then(() => true).catch(() => false);
+  const sandboxCredsExists = await fs.stat(path.join(sandbox23, 'credentials.json')).then(() => true).catch(() => false);
+  const sandboxExampleExists = await fs.stat(path.join(sandbox23, '.env.example')).then(() => true).catch(() => false);
+  assert.strictEqual(sandboxEnvExists, false, 'Sandbox must NOT copy .env');
+  assert.strictEqual(sandboxCredsExists, false, 'Sandbox must NOT copy credentials.json');
+  assert.strictEqual(sandboxExampleExists, true, 'Sandbox should copy .env.example');
+
+  await inspector23.removeIsolatedSandbox(sandbox23);
+  await fs.rm(test23Dir, { recursive: true, force: true });
+  console.log('   ✓ Sensitive secret files strictly excluded from reads, listings, and sandbox copies.');
+
+  // Test 24: External Coding Agent Adapters & Approval Integration (P1)
+  console.log('\n24. Testing External Coding Agent Adapters & Approval Callback (P1)...');
+  const { AiderAgentAdapter, ClaudeCodeAgentAdapter, createAgent } = await import('../src/agent/index.js');
+  let approvalHandlerCalled = false;
+  const mockApproval = async () => {
+    approvalHandlerCalled = true;
+    return true;
+  };
+
+  const aiderAgent = createAgent('aider', process.cwd(), mockApproval) as AiderAgentAdapter;
+  assert.strictEqual(aiderAgent.name, 'AiderAgentAdapter');
+  assert.strictEqual((aiderAgent as any).onRequestApproval, mockApproval);
+
+  const claudeAgent = createAgent('claude', process.cwd(), mockApproval) as ClaudeCodeAgentAdapter;
+  assert.strictEqual(claudeAgent.name, 'ClaudeCodeAgentAdapter');
+  assert.strictEqual((claudeAgent as any).onRequestApproval, mockApproval);
+  console.log('   ✓ External agent adapters cleanly initialize with workspace paths and approval handlers.');
+
+  // Test 25: Typed & Specific Acceptance Criteria Verification (P1)
+  console.log('\n25. Testing Typed & Specific Acceptance Criteria Verification (P1)...');
+  const test25Dir = await fs.mkdtemp(path.join(os.tmpdir(), 'test-criteria-'));
+  const verifier25 = new IndependentVerifier(test25Dir);
+
+  // File presence criterion looking for cherry.txt when only other.txt was changed
+  const filePresenceReport = await verifier25.verify(
+    { isGitRepo: false, hasUncommittedChanges: false, uncommittedFiles: ['other.txt'], ecosystems: ['unknown'], fileTreeSummary: [] },
+    ['Create file cherry.txt']
+  );
+  assert.strictEqual(filePresenceReport.isVerified, false, 'Specific file-presence criterion must NOT be satisfied by unrelated files');
+  assert.ok(
+    filePresenceReport.blockingReasons.some((r) => r.includes('cherry.txt')),
+    'Blocking reasons must identify missing required file cherry.txt'
+  );
+
+  // Build criterion when no build was run
+  const buildReport = await verifier25.verify(
+    { isGitRepo: false, hasUncommittedChanges: false, uncommittedFiles: [], ecosystems: ['unknown'], fileTreeSummary: [] },
+    ['Build succeeds']
+  );
+  assert.strictEqual(buildReport.isVerified, false, 'Build criterion must NOT pass without configured/successful build');
+  await fs.rm(test25Dir, { recursive: true, force: true });
+  console.log('   ✓ Acceptance criteria strictly enforce typed verification and file specificity.');
+
+  // Test 26: Go Language Detection in RepoInspector (P2)
+  console.log('\n26. Testing Go Language Detection in RepoInspector (P2)...');
+  const test26Dir = await fs.mkdtemp(path.join(os.tmpdir(), 'test-go-'));
+  await fs.writeFile(path.join(test26Dir, 'go.mod'), 'module example.com/testmod\n\ngo 1.22\n');
+  const inspector26 = new RepoInspector(test26Dir);
+  const meta26 = await inspector26.inspect();
+  assert.ok(meta26.ecosystems.includes('golang'), 'Go module must be detected as golang ecosystem');
+  assert.strictEqual(meta26.packageManager, 'go', 'Go module must detect go package manager');
+  assert.strictEqual(meta26.buildCmd, 'go build ./...', 'Go module must detect go build command');
+  assert.strictEqual(meta26.testCmd, 'go test ./...', 'Go module must detect go test command');
+  await fs.rm(test26Dir, { recursive: true, force: true });
+  console.log('   ✓ Go ecosystem, package manager, and verification commands correctly detected.');
+
   console.log('\n=== ALL P0/P1 CORRECTNESS, SAFETY & VERIFICATION TESTS PASSED! ===\n');
 }
 

@@ -63,7 +63,7 @@ export class TaskStateMachine {
     ],
     diagnosing: ['repairing', 'blocked', 'needs_human_review', 'failed', 'cancelling'],
     repairing: ['verifying', 'executing', 'awaiting_approval', 'blocked', 'failed', 'cancelling'],
-    cancelling: ['cancelled', 'failed'],
+    cancelling: ['cancelled'],
     // Non-terminal escalation states can transition to resume or cancel
     blocked: ['planning', 'ready', 'cancelling', 'failed'],
     needs_human_review: ['planning', 'ready', 'verifying', 'cancelling', 'failed'],

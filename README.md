@@ -84,7 +84,7 @@ The **Autonomous AI Coding Orchestrator** replaces model self-reporting with a h
 ### The 5 Pillars of the Evidence Contract
 
 1. **Non-Repudiation**: Every file change is bracketed by cryptographic Git commit snapshots (`pre-step` and `post-step`), generating an unforgeable hash audit trail.
-2. **Worktree Isolation**: Tasks run exclusively inside isolated Git worktrees (`.orchestrator_worktrees/<taskId>`) on dedicated task branches (`task/<shortId>`). The user's active branch, dirty files, and uncommitted edits are 100% untouched.
+2. **Worktree Isolation**: Tasks run exclusively inside isolated Git worktrees (`.orchestrator_worktrees/<taskId>`) on dedicated task branches (`task/<shortId>`). The user's active branch, dirty files, and uncommitted edits are 100% untouched. *(Note: Worktree isolation provides repository and checkout isolation; running untrusted repositories whose build scripts contain arbitrary native code should be deployed within dedicated low-privilege OS containers or VMs).*
 3. **Subprocess Isolation**: Builds and tests are run in isolated OS processes (`powershell.exe` / `/bin/bash`), completely outside the LLM's context window.
 4. **Anti-Tamper & Workspace Fingerprinting**: The verifier computes full recursive SHA-256 fingerprints across tracked, untracked, and non-ephemeral ignored files before and after verification. Out-of-band mutations fail closed.
 5. **Truthful Reviewer Fallback**: If the LLM review call fails, times out, or is offline, completion is authorized **only** if backed by authoritative passing test records (`Test: PASSED`) and a valid, non-empty diff. Missing or unconfigured tests strictly fail closed.

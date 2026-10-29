@@ -199,10 +199,12 @@ export class IndependentVerifier {
       }
     }
 
-    // Anti-Tamper & Content Check: Inspect added lines across diff
+    // Anti-Tamper & Content Check: Inspect added and deleted lines across diff
     const addedTestLines: string[] = [];
     const addedPackageJsonLines: string[] = [];
     const addedAllLines: string[] = [];
+    const deletedTestLines: string[] = [];
+    let deletedAssertionCount = 0;
     let currentDiffFile = '';
 
     for (const line of diff.split('\n')) {
@@ -218,6 +220,14 @@ export class IndependentVerifier {
         if (currentDiffFile.endsWith('package.json')) {
           addedPackageJsonLines.push(added);
         }
+      } else if (line.startsWith('-') && !line.startsWith('---')) {
+        const deleted = line.slice(1);
+        if (/(\.test\.|\.spec\.|[\\/]tests?[\\/])/i.test(currentDiffFile)) {
+          deletedTestLines.push(deleted);
+          if (/\b(assert|expect|test|it)\s*[\.(]/i.test(deleted)) {
+            deletedAssertionCount++;
+          }
+        }
       }
     }
 
@@ -232,12 +242,23 @@ export class IndependentVerifier {
       blockingReasons.push('Test assertions were bypassed or marked skipped in diff.');
     }
 
-    // Anti-Tamper Check: Detect package.json test script tampering to exit 0 trivially
+    // Anti-Tamper Check: Detect suspicious deletion of multiple existing test assertions
+    if (deletedAssertionCount >= 5 && addedTestLines.length === 0) {
+      hasSuspiciousDeletions = true;
+      diffNotes.push(`Anti-Tamper Warning: ${deletedAssertionCount} existing test assertions were deleted.`);
+      blockingReasons.push(`Anti-tamper violation: ${deletedAssertionCount} existing test assertions were deleted without replacement.`);
+    }
+
+    // Anti-Tamper Check: Detect package.json test script tampering to exit 0 or bypass test execution
     const pkgDiffContent = addedPackageJsonLines.join('\n');
-    if (/\"test\"\s*:\s*\"(exit\s*0|true|echo\b.*exit\s*0)\"/i.test(pkgDiffContent)) {
+    if (
+      /\"(test|pretest|posttest)\"\s*:\s*\"(exit\s*0|true|echo\b.*exit\s*0|echo\b.*ok|node\s+-e\s+['"]process\.exit\(0\))/i.test(
+        pkgDiffContent
+      )
+    ) {
       hasForbiddenModifications = true;
-      diffNotes.push('Anti-Tamper Warning: package.json test script modified to trivially exit 0.');
-      blockingReasons.push('Anti-tamper violation: package.json test script was modified to trivially exit 0.');
+      diffNotes.push('Anti-Tamper Warning: package.json test script modified to trivially exit 0 or bypass execution.');
+      blockingReasons.push('Anti-tamper violation: package.json test script was modified to bypass execution.');
     }
 
     // Placeholder Stubs Detection in added lines
@@ -271,18 +292,30 @@ export class IndependentVerifier {
         let targetCommand: string | undefined;
         let exitCode: number | undefined;
 
-        if (lower.includes('build') || lower.includes('compil')) {
+        const isBuildCriterion =
+          lower.includes('build') ||
+          (lower.includes('compil') && !lower.includes('syntax')) ||
+          (lower.includes('compil') && Boolean(meta.buildCmd));
+
+        if (isBuildCriterion) {
           checkType = 'build';
           targetCommand = buildCheck.command || meta.buildCmd;
           exitCode = buildCheck.exitCode;
-          satisfied =
-            buildCheck.status === 'PASSED' ||
-            (!meta.buildCmd && (testCheck.status === 'PASSED' || gitStatus !== null));
+          satisfied = buildCheck.status === 'PASSED';
           evidence = satisfied
             ? targetCommand
               ? `Build check "${targetCommand}" succeeded (exit ${exitCode ?? 0}).`
-              : 'No build step configured for repository; syntax verified via execution.'
-            : `Build check failed (status: ${buildCheck.status}, exit ${exitCode ?? 'N/A'}).`;
+              : 'Automated build completed successfully.'
+            : buildCheck.status === 'NOT_CONFIGURED'
+              ? 'Unverified: Build criterion specified but no build runner is configured or executed.'
+              : `Build check failed (status: ${buildCheck.status}, exit ${exitCode ?? 1}).`;
+        } else if (lower.includes('syntax')) {
+          checkType = 'targeted_check';
+          const testsPassed = testCheck.status === 'PASSED';
+          satisfied = testsPassed || buildCheck.status === 'PASSED';
+          evidence = satisfied
+            ? `Syntax verified cleanly via runtime execution: "${testCheck.command || buildCheck.command || 'syntax check'}" (exit ${testCheck.exitCode ?? 0}).`
+            : 'Syntax check failed: test or runtime execution produced errors.';
         } else if (
           lower.includes('unit test') ||
           lower.includes('test suite') ||
@@ -298,10 +331,23 @@ export class IndependentVerifier {
             : `Test suite failed or not configured (status: ${testCheck.status}, exit ${exitCode ?? 'N/A'}).`;
         } else if (lower.includes('file presence') || lower.includes('create file') || lower.includes('add file')) {
           checkType = 'file_presence';
-          satisfied = allCumulativeFiles.length > 0;
-          evidence = satisfied
-            ? `Confirmed file modification/creation in repository: ${allCumulativeFiles.join(', ')}.`
-            : 'No files were modified or created to satisfy presence requirement.';
+          const fileMatch = criterion.match(/[`"']?([a-zA-Z0-9_\-./\\]+\.[a-zA-Z0-9_]+)[`"']?/);
+          const targetFile = fileMatch ? fileMatch[1].replace(/^[./\\]+/, '').toLowerCase() : undefined;
+
+          if (targetFile) {
+            const fileFound = allCumulativeFiles.some(
+              (f) => f.toLowerCase() === targetFile || f.toLowerCase().endsWith('/' + targetFile)
+            );
+            satisfied = fileFound;
+            evidence = satisfied
+              ? `Confirmed required file "${targetFile}" created/modified in repository.`
+              : `Unverified: Required file "${targetFile}" was not found in modified files: ${allCumulativeFiles.join(', ') || 'none'}.`;
+          } else {
+            satisfied = allCumulativeFiles.length > 0;
+            evidence = satisfied
+              ? `Confirmed file modification/creation in repository: ${allCumulativeFiles.join(', ')}.`
+              : 'Unverified: No files were modified or created to satisfy presence requirement.';
+          }
         } else {
           // Explicit Targeted Requirement Verification
           checkType = 'targeted_check';
@@ -315,23 +361,44 @@ export class IndependentVerifier {
             satisfied = false;
             evidence = `Unverified: Automated test suite failed (exit ${testCheck.exitCode ?? 1}) - behavioral requirement "${criterion}" not proven.`;
           } else {
-            // Check for explicit targeted check command
-            if (customVerificationCmd && testCheck.command === customVerificationCmd) {
-              targetCommand = customVerificationCmd;
+            // Check for explicit targeted check command or repository test runner
+            const verifiedByCommand =
+              (customVerificationCmd && testCheck.command === customVerificationCmd) ||
+              (Boolean(meta.testCmd) && testCheck.command === meta.testCmd && testCheck.exitCode === 0);
+
+            if (verifiedByCommand) {
+              targetCommand = testCheck.command || customVerificationCmd || meta.testCmd;
               exitCode = testCheck.exitCode;
               satisfied = true;
-              evidence = `Explicit targeted check "${customVerificationCmd}" verified requirement (exit ${exitCode ?? 0}).`;
+              evidence = `Explicit verification check "${targetCommand}" verified requirement (exit ${exitCode ?? 0}).`;
             } else {
-              // Check if test output recorded an explicit assertion or dedicated test file for this requirement
-              const hasDedicatedTestFile = allCumulativeFiles.some((f) => /test|spec/i.test(f));
-              const hasExplicitAssertion =
-                /assertion(s)?\s+passed|test(s)?\s+passed|✓|passed\s+\d+\s+test(s)?/i.test(testCheck.output);
+              const keywords = criterion
+                .toLowerCase()
+                .replace(/[^a-z0-9_]/g, ' ')
+                .split(/\s+/)
+                .filter(
+                  (w) =>
+                    w.length >= 4 &&
+                    !['test', 'pass', 'passes', 'should', 'must', 'with', 'when', 'from', 'that', 'this'].includes(w)
+                );
 
-              if (hasExplicitAssertion || hasDedicatedTestFile) {
+              const hasDedicatedTestFile = allCumulativeFiles.some((f) => /test|spec/i.test(f));
+              const outputLower = (testCheck.output || '').toLowerCase();
+              const keywordMatches = keywords.filter((kw) => outputLower.includes(kw));
+
+              if (
+                (keywords.length > 0 && keywordMatches.length >= Math.min(2, keywords.length)) ||
+                (hasDedicatedTestFile && keywordMatches.length >= 1)
+              ) {
                 targetCommand = testCheck.command || meta.testCmd;
                 exitCode = testCheck.exitCode;
                 satisfied = true;
-                evidence = `Verified via targeted test execution: "${targetCommand}" (exit ${exitCode ?? 0}). Confirmed assertions in test output.`;
+                evidence = `Verified via targeted test execution: "${targetCommand}" (exit ${exitCode ?? 0}) with proof matching [${keywordMatches.join(', ')}].`;
+              } else if (hasDedicatedTestFile && (/passed\b|✓/i.test(testCheck.output))) {
+                targetCommand = testCheck.command || meta.testCmd;
+                exitCode = testCheck.exitCode;
+                satisfied = true;
+                evidence = `Verified via test execution "${targetCommand}" confirming assertions in test suite.`;
               } else {
                 satisfied = false;
                 evidence = `Unverified: General test suite passed, but no targeted test or assertion proved "${criterion}".`;

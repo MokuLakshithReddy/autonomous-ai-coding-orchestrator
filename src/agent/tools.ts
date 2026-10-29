@@ -31,6 +31,11 @@ export class AgentToolbox {
 
   async readFile(filePath: string): Promise<string> {
     const fullPath = this.resolveSafePath(filePath);
+    if (SecurityPolicyEngine.isSensitiveSecret(filePath)) {
+      throw new Error(
+        `Security Exception [Access Denied]: Reading sensitive secret file "${filePath}" is strictly prohibited.`
+      );
+    }
     return await fs.readFile(fullPath, 'utf8');
   }
 
@@ -99,6 +104,9 @@ export class AgentToolbox {
       const entries = await fs.readdir(dir, { withFileTypes: true });
       for (const entry of entries) {
         if (['node_modules', '.git', 'dist', '.venv', '__pycache__'].includes(entry.name)) {
+          continue;
+        }
+        if (SecurityPolicyEngine.isSensitiveSecret(entry.name)) {
           continue;
         }
         const full = path.join(dir, entry.name);
@@ -230,6 +238,138 @@ export class AgentToolbox {
           stderr += data.toString();
         } else if (!stderr.endsWith('\n... [Output truncated: buffer exceeded 500KB]')) {
           stderr += '\n... [Output truncated: buffer exceeded 500KB]';
+        }
+      });
+
+      child.on('close', (code) => {
+        clearTimeout(timer);
+        if (abortSignal) {
+          abortSignal.removeEventListener('abort', abortHandler);
+        }
+
+        let finalStderr = stderr;
+        if (timedOut) {
+          finalStderr = `${stderr}\nExecution timeout reached after ${timeoutMs}ms.`;
+        } else if (cancelled) {
+          finalStderr = `${stderr}\nExecution cancelled by abort signal.`;
+        }
+
+        resolve({
+          stdout: SecurityPolicyEngine.redactSensitiveData(stdout),
+          stderr: SecurityPolicyEngine.redactSensitiveData(finalStderr),
+          exitCode: timedOut ? 124 : cancelled ? 130 : (code ?? 1),
+          durationMs: Date.now() - startTime,
+          timedOut,
+          cancelled,
+        });
+      });
+
+      child.on('error', (err) => {
+        clearTimeout(timer);
+        if (abortSignal) {
+          abortSignal.removeEventListener('abort', abortHandler);
+        }
+        resolve({
+          stdout: SecurityPolicyEngine.redactSensitiveData(stdout),
+          stderr: SecurityPolicyEngine.redactSensitiveData(`Subprocess spawn error: ${err.message}`),
+          exitCode: 1,
+          durationMs: Date.now() - startTime,
+          timedOut: false,
+          cancelled,
+        });
+      });
+    });
+  }
+
+  async executeCommandWithArgs(
+    executable: string,
+    args: string[],
+    timeoutMs = 60000,
+    customEnv: Record<string, string> = {},
+    abortSignal?: AbortSignal
+  ): Promise<CommandResult> {
+    const fullCommandStr = `${executable} ${args.join(' ')}`.trim();
+    const policy = SecurityPolicyEngine.evaluateCommandRisk(fullCommandStr);
+    if (policy.requiresApproval) {
+      if (!this.onRequestApproval) {
+        throw new Error(
+          `Security Exception [Approval Required]: Command "${fullCommandStr}" requires approval (${policy.riskLevel}: ${policy.reason}), but no approval handler is configured.`
+        );
+      }
+      const isApproved = await this.onRequestApproval(fullCommandStr, policy);
+      if (!isApproved) {
+        throw new Error(
+          `Security Exception [Approval Denied]: Execution of command "${fullCommandStr}" was rejected by the operator.`
+        );
+      }
+    }
+
+    if (abortSignal?.aborted) {
+      return {
+        stdout: '',
+        stderr: 'Command execution aborted prior to spawn.',
+        exitCode: 130,
+        durationMs: 0,
+        cancelled: true,
+      };
+    }
+
+    const startTime = Date.now();
+    const sanitizedEnv = SecurityPolicyEngine.getSanitizedProcessEnv(customEnv);
+
+    return new Promise((resolve) => {
+      let child: ReturnType<typeof spawn>;
+      let timedOut = false;
+      let cancelled = false;
+
+      try {
+        child = spawn(executable, args, {
+          cwd: this.workspacePath,
+          env: sanitizedEnv,
+          shell: false,
+          windowsHide: true,
+        });
+      } catch (err: any) {
+        return resolve({
+          stdout: '',
+          stderr: `Spawn invocation failed: ${err.message}`,
+          exitCode: 1,
+          durationMs: Date.now() - startTime,
+          timedOut: false,
+          cancelled: false,
+        });
+      }
+
+      let stdout = '';
+      let stderr = '';
+
+      const timer = setTimeout(() => {
+        timedOut = true;
+        if (child.pid) {
+          treeKill(child.pid, 'SIGKILL', () => {});
+        }
+      }, timeoutMs);
+
+      const abortHandler = () => {
+        cancelled = true;
+        if (child.pid) {
+          treeKill(child.pid, 'SIGKILL', () => {});
+        }
+      };
+
+      if (abortSignal) {
+        abortSignal.addEventListener('abort', abortHandler, { once: true });
+      }
+
+      child.stdout?.on('data', (chunk) => {
+        if (stdout.length < this.maxOutputBytes) {
+          stdout += chunk.toString();
+        }
+      });
+
+      child.stderr?.on('data', (chunk) => {
+        if (stderr.length < this.maxOutputBytes) {
+          stderr += chunk.toString();
         }
       });
 

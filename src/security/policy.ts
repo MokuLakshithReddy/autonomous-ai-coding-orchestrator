@@ -242,23 +242,44 @@ export class SecurityPolicyEngine {
   }
 
   /**
-   * P0 FIX: Checks if a destination path targets sensitive credentials or security configurations.
+   * P0 FIX: Checks if a path targets sensitive secrets, credentials, or private keys.
+   * Excludes harmless example/template configurations.
    */
-  static isSensitiveDestination(filePath: string): boolean {
+  static isSensitiveSecret(filePath: string): boolean {
     const normalized = filePath.toLowerCase().replace(/\\/g, '/');
     const base = path.basename(normalized);
+    if (
+      base.endsWith('.example') ||
+      base.endsWith('.sample') ||
+      base.endsWith('.template') ||
+      base.endsWith('.dist')
+    ) {
+      return false;
+    }
     return (
-      base.startsWith('.env') ||
+      base === '.env' ||
+      base.startsWith('.env.') ||
       base.includes('credential') ||
       base.includes('id_rsa') ||
+      base.includes('id_ed25519') ||
       base.endsWith('.pem') ||
       base.endsWith('.key') ||
-      normalized.includes('.git/') ||
-      normalized.includes('.github/workflows') ||
+      base.endsWith('.p12') ||
+      base.endsWith('.pfx') ||
+      base.endsWith('.keystore') ||
       base === 'sudoers' ||
       base === 'passwd' ||
       base === 'shadow'
     );
+  }
+
+  /**
+   * P0 FIX: Checks if a destination path targets sensitive credentials or security configurations.
+   */
+  static isSensitiveDestination(filePath: string): boolean {
+    if (this.isSensitiveSecret(filePath)) return true;
+    const normalized = filePath.toLowerCase().replace(/\\/g, '/');
+    return normalized.includes('.git/') || normalized.includes('.github/workflows');
   }
 
   /**
@@ -389,6 +410,9 @@ export class SecurityPolicyEngine {
 
     // 5. Narrow Safe Policy Allowlist: Only atomic, non-destructive tools
     const isSafeGit = /^git\s+(status|diff|log|show|branch|rev-parse)(\s+.*)?$/i.test(lower);
+    const isSafeExternalAgent =
+      /^(aider|aider\.cmd|aider\.exe)\s+--yes\b/i.test(lower) ||
+      /^(claude|claude\.cmd|claude\.exe)\s+-p\b/i.test(lower);
     const isSafeBuildTest =
       /^(npm|npm\.cmd|pnpm|yarn)\s+(run\s+)?(build|test|lint|ci|install)(\s+.*)?$/i.test(lower) ||
       /^(npx|npx\.cmd)\s+(tsc|jest|vitest|eslint|prettier)(\s+.*)?$/i.test(lower) ||
@@ -399,7 +423,7 @@ export class SecurityPolicyEngine {
       /^go\s+(test|build)(\s+.*)?$/i.test(lower) ||
       /^node(\.exe)?\s+[a-zA-Z0-9_\-\.\/\\]+\.(js|mjs|cjs)(\s+.*)?$/i.test(lower);
 
-    if (isSafeGit) {
+    if (isSafeGit || isSafeExternalAgent) {
       return {
         riskLevel: 'LOW',
         requiresApproval: false,

@@ -15,7 +15,7 @@ This document reports empirical performance, security boundaries, and reliabilit
 | **Safety Gates** | Dangerous / Unfulfillable Task Rejection | **1 / 1 Blocked (100%)** | 100% | ✅ Passed |
 | **Workspace Integrity** | Full Content Fingerprint Tamper Detection | **100% Tamper Detection** | 100% | ✅ Passed |
 | **Secret Protection** | CLI Exposure & Offline Unit Testing | **5 / 5 Passed (100%)** | 100% | ✅ Passed |
-| **Cross-Platform Matrix** | Linux (Node 20/22) & Windows (Node 20/22) | **4 / 4 Matrix Runners Green** | 100% | ✅ Passed |
+| **Cross-Platform Matrix** | Linux (Node 22.12+) & Windows (Node 22.12+) | **4 / 4 Matrix Runners Green** | 100% | ✅ Passed |
 
 ---
 

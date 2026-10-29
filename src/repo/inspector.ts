@@ -3,6 +3,7 @@ import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import { simpleGit, type SimpleGit, type StatusResult } from 'simple-git';
+import { SecurityPolicyEngine } from '../security/policy.js';
 
 export interface ProjectMetadata {
   isGitRepo: boolean;
@@ -351,33 +352,15 @@ export class RepoInspector {
       throw new Error(`Git worktree allocation failed: ${err.message || String(err)}`);
     }
 
-    // Link parent node_modules if present so tests and builds have access to dependencies
-    const parentNM = path.join(this.workspacePath, 'node_modules');
-    const worktreeNM = path.join(worktreeDir, 'node_modules');
-    try {
-      const stat = await fs.stat(parentNM);
-      if (stat.isDirectory()) {
-        const linkType = process.platform === 'win32' ? 'junction' : 'dir';
-        await fs.symlink(parentNM, worktreeNM, linkType);
-      }
-    } catch {}
-
-    // Link parent .venv if present for Python projects
-    const parentVenv = path.join(this.workspacePath, '.venv');
-    const worktreeVenv = path.join(worktreeDir, '.venv');
-    try {
-      const stat = await fs.stat(parentVenv);
-      if (stat.isDirectory()) {
-        const linkType = process.platform === 'win32' ? 'junction' : 'dir';
-        await fs.symlink(parentVenv, worktreeVenv, linkType);
-      }
-    } catch {}
+    // P1 FIX: Do NOT create mutable symlinks to parent node_modules or .venv.
+    // Preserves parent workspace integrity and prevents task package installations from mutating user environment.
 
     return worktreeDir;
   }
 
   /**
    * P1 FIX: Creates an isolated filesystem sandbox copy for non-Git workspaces in a dedicated temp root.
+   * Excludes internal metadata and sensitive secret files (.env, credentials, private keys).
    */
   async createIsolatedSandbox(taskId: string): Promise<string> {
     const sandboxDir = path.join(os.tmpdir(), 'orchestrator_sandboxes', taskId);
@@ -394,7 +377,10 @@ export class RepoInspector {
         const rel = path.relative(this.workspacePath, source);
         if (!rel) return true;
         const segments = rel.split(/[\\/]/);
-        return !segments.some((seg) => EXCLUDED_DIRS.has(seg));
+        if (segments.some((seg) => EXCLUDED_DIRS.has(seg))) return false;
+        // P0 FIX: Exclude sensitive secrets and credentials from sandbox copies
+        if (SecurityPolicyEngine.isSensitiveSecret(rel)) return false;
+        return true;
       },
     });
     return sandboxDir;
@@ -493,6 +479,18 @@ export class RepoInspector {
         if (!buildCmd) buildCmd = 'cargo build';
         if (!testCmd) testCmd = 'cargo test';
         if (!lintCmd) lintCmd = 'cargo clippy';
+      }
+    } catch {}
+
+    // P2 FIX: Detect Go (golang)
+    try {
+      const hasGoMod = await fs.access(path.join(this.workspacePath, 'go.mod')).then(() => true).catch(() => false);
+      if (hasGoMod) {
+        ecosystems.push('golang');
+        packageManager = 'go';
+        if (!buildCmd) buildCmd = 'go build ./...';
+        if (!testCmd) testCmd = 'go test ./...';
+        if (!lintCmd) lintCmd = 'golangci-lint run';
       }
     } catch {}
 

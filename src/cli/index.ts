@@ -29,7 +29,7 @@ program
     try {
       const address = await server.listen({ port, host });
       console.log(chalk.green(`\n✓ Server listening at: ${chalk.bold(address)}`));
-      console.log(chalk.cyan(`✓ Web Dashboard: ${chalk.bold(`${address}/?token=${serverApiToken}`)}`));
+      console.log(chalk.cyan(`✓ Web Dashboard: ${chalk.bold(address)}`));
       console.log(chalk.blue(`✓ Realtime WebSocket: ${chalk.bold(`ws://${host}:${port}/ws`)}`));
       console.log(chalk.yellow(`✓ API Auth Token: ${chalk.bold(serverApiToken)}\n`));
     } catch (err: any) {
@@ -111,9 +111,9 @@ program
           console.log(`\n${time} ${chalk.bold.green('🎉 MISSION COMPLETE:')} ${e.message}\n`);
           if (e.data?.taskBranchName) {
             console.log(chalk.cyan(`   Verified commits preserved on branch: ${chalk.bold(e.data.taskBranchName)}`));
-            if (autoMerge) {
-              console.log(chalk.green(`   Auto-merged branch ${e.data.taskBranchName} into working tree.`));
-            } else {
+            if (autoMerge && e.data?.autoMergeSucceeded) {
+              console.log(chalk.green(`   ✓ Auto-merged and reverified branch ${e.data.taskBranchName} into ${e.data.baseBranch || 'current branch'}.`));
+            } else if (!autoMerge) {
               console.log(chalk.gray(`   To merge these verified changes into your branch, run: git merge ${e.data.taskBranchName}\n`));
             }
           }
@@ -125,6 +125,13 @@ program
           break;
         case 'TASK_NEEDS_REVIEW':
           console.log(`\n${time} ${chalk.bold.blue('👀 TASK REQUIRES HUMAN REVIEW:')} ${e.message}\n`);
+          if (e.data?.autoMergeError) {
+            console.log(chalk.yellow(`   Auto-merge status: ${e.data.autoMergeError}`));
+            if (e.data?.taskBranchName) {
+              console.log(chalk.cyan(`   Verified task changes remain safely preserved on branch: ${chalk.bold(e.data.taskBranchName)}`));
+              console.log(chalk.gray(`   To manually review and merge: git merge ${e.data.taskBranchName}\n`));
+            }
+          }
           process.exit(3);
           break;
         case 'TASK_FAILED':

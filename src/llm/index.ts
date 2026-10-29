@@ -39,11 +39,25 @@ export interface TokenUsageMetadata {
   candidatesTokens: number;
   totalTokens: number;
   measuredCost: number;
+  isEstimate?: boolean;
 }
 
-export function calculateGeminiCost(promptTokens: number, candidatesTokens: number): number {
-  // Gemini 2.0 Flash / Flash-Lite: $0.075 per 1M prompt tokens, $0.30 per 1M candidate tokens
-  return (promptTokens * 0.075) / 1_000_000 + (candidatesTokens * 0.30) / 1_000_000;
+export const GEMINI_MODEL_PRICING: Record<string, { promptPerM: number; candidatesPerM: number }> = {
+  'gemini-flash-lite-latest': { promptPerM: 0.075, candidatesPerM: 0.30 },
+  'gemini-2.5-flash': { promptPerM: 0.15, candidatesPerM: 0.60 },
+  'gemini-2.0-flash': { promptPerM: 0.10, candidatesPerM: 0.40 },
+  'gemini-1.5-flash': { promptPerM: 0.075, candidatesPerM: 0.30 },
+  'gemini-1.5-pro': { promptPerM: 1.25, candidatesPerM: 5.00 },
+};
+
+export function calculateGeminiCost(
+  promptTokens: number,
+  candidatesTokens: number,
+  modelName: string = config.geminiModel || 'gemini-flash-lite-latest'
+): number {
+  // Model-specific pricing estimation (telemetry metric, not authoritative invoice)
+  const pricing = GEMINI_MODEL_PRICING[modelName] || { promptPerM: 0.075, candidatesPerM: 0.30 };
+  return (promptTokens * pricing.promptPerM) / 1_000_000 + (candidatesTokens * pricing.candidatesPerM) / 1_000_000;
 }
 
 export type PlanStep = z.infer<typeof PlanStepSchema>;
@@ -87,7 +101,12 @@ export class LLMBrain {
     this.tokenUsage.promptTokens += p;
     this.tokenUsage.candidatesTokens += c;
     this.tokenUsage.totalTokens += usageMetadata.totalTokenCount || (p + c);
-    this.tokenUsage.measuredCost = calculateGeminiCost(this.tokenUsage.promptTokens, this.tokenUsage.candidatesTokens);
+    this.tokenUsage.measuredCost = calculateGeminiCost(
+      this.tokenUsage.promptTokens,
+      this.tokenUsage.candidatesTokens,
+      this.modelName
+    );
+    this.tokenUsage.isEstimate = true;
   }
 
   async generatePlan(prompt: string, repoMeta: ProjectMetadata): Promise<ExecutionPlan> {
@@ -465,7 +484,9 @@ ${finalDiff.slice(-4000) || '(No diff)'}
       analysis: `Detected ${repoMeta.ecosystems.join(', ')} ecosystem. Configured structured step pipeline.`,
       acceptanceCriteria: [
         `Functional requirements for "${prompt}" pass verification`,
-        repoMeta.buildCmd ? 'Build succeeds with exit code 0' : 'Code compiles without syntax errors',
+        repoMeta.buildCmd
+          ? 'Build succeeds with exit code 0'
+          : 'Syntax is valid with clean runtime execution',
         repoMeta.testCmd ? 'Unit tests pass cleanly' : 'Modified files verified without placeholder stubs',
       ],
       steps,

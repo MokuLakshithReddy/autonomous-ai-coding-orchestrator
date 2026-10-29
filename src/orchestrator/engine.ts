@@ -116,6 +116,7 @@ export class OrchestrationEngine extends EventEmitter {
     customAgent?: CodingAgent;
     agentType?: 'builtin' | 'aider' | 'claude';
     autoMerge?: boolean;
+    allowProtectedBranchMerge?: boolean;
     allowedWorkspaces?: string[];
     allowUnrestricted?: boolean;
   }): Promise<TaskRecord> {
@@ -170,6 +171,14 @@ export class OrchestrationEngine extends EventEmitter {
 
     // Run execution lifecycle asynchronously
     this.executeTaskLifecycle(taskId, attemptId, params).catch(async (err) => {
+      const isCancelled =
+        abortController.signal.aborted ||
+        stateMachine.getState() === 'cancelling' ||
+        stateMachine.getState() === 'cancelled';
+      if (isCancelled) {
+        this.activeTasks.delete(taskId);
+        return;
+      }
       console.error(`Unhandled error in task ${taskId}:`, err);
       try {
         await taskRepo.updateStatus(taskId, 'failed', `Internal failure: ${err.message}`);
@@ -202,6 +211,7 @@ export class OrchestrationEngine extends EventEmitter {
       customAgent?: CodingAgent;
       agentType?: 'builtin' | 'aider' | 'claude';
       autoMerge?: boolean;
+      allowProtectedBranchMerge?: boolean;
     }
   ): Promise<void> {
     const active = this.activeTasks.get(taskId);
@@ -783,22 +793,85 @@ export class OrchestrationEngine extends EventEmitter {
 
     // Truthful Completion Gate: Distinguish completed vs partially_completed vs needs_human_review vs failed
     if (finalVerification.isVerified && review.isComplete) {
+      let autoMergeSucceeded = false;
+      let autoMergeError: string | undefined;
+
       if (params.autoMerge && isGit && taskBranchName) {
         try {
           const mainGit = (inspector as any).git;
+          const currentStatus = await inspector.getGitStatus();
+          const currentBranch = currentStatus?.current;
+
+          // Verify destination branch is still the original base branch
+          if (!currentBranch || (baseline && currentBranch !== baseline.branch)) {
+            throw new Error(
+              `Target checkout changed: currently on "${currentBranch}", expected base branch "${baseline?.branch}".`
+            );
+          }
+
+          // Check protected branch policy
+          if (baseline?.branch && config.protectedBranches.includes(baseline.branch)) {
+            if (config.requireApprovalForDestructive && !params.allowProtectedBranchMerge) {
+              throw new Error(
+                `Base branch "${baseline.branch}" is a configured protected branch. Auto-merge requires explicit authorization.`
+              );
+            }
+          }
+
+          // Perform merge
           await mainGit.merge([taskBranchName]);
+
+          // Independent post-merge reverification on destination branch
+          const postMergeReport = await verifier.verify(
+            repoMeta,
+            plan.acceptanceCriteria,
+            plan.steps[plan.steps.length - 1]?.verificationCommand || undefined,
+            baseline?.baseCommit || undefined
+          );
+
+          if (!postMergeReport.isVerified) {
+            throw new Error(
+              `Post-merge independent verification failed on destination branch: ${postMergeReport.blockingReasons.join('; ')}`
+            );
+          }
+
+          autoMergeSucceeded = true;
         } catch (mergeErr: any) {
-          console.warn(`[Auto-Merge Notice] Could not automatically merge ${taskBranchName}: ${mergeErr.message}`);
+          autoMergeError = mergeErr.message || String(mergeErr);
+          console.warn(`[Auto-Merge Notice] Auto-merge failed: ${autoMergeError}`);
         }
       }
 
-      await this.transitionTaskState(taskId, stateMachine, 'completed', 'All requirements verified', review.summary);
-      await this.emitOrchestratorEvent({
-        taskId,
-        type: 'TASK_COMPLETED',
-        message: `Task successfully verified and completed: ${review.summary}`,
-        data: { review, finalVerification, taskBranchName },
-      });
+      if (params.autoMerge && !autoMergeSucceeded) {
+        // P1 FIX: Auto-merge failure must NOT report task as completed
+        await this.transitionTaskState(
+          taskId,
+          stateMachine,
+          'needs_human_review',
+          `Task changes verified in worktree branch "${taskBranchName}", but auto-merge into "${baseline?.branch}" failed: ${autoMergeError}`,
+          review.summary
+        );
+        await this.emitOrchestratorEvent({
+          taskId,
+          type: 'TASK_NEEDS_REVIEW',
+          message: `Auto-merge failed: ${autoMergeError}. Task changes preserved on branch ${taskBranchName}.`,
+          data: {
+            review,
+            finalVerification,
+            taskBranchName,
+            baseBranch: baseline?.branch,
+            autoMergeError,
+          },
+        });
+      } else {
+        await this.transitionTaskState(taskId, stateMachine, 'completed', 'All requirements verified', review.summary);
+        await this.emitOrchestratorEvent({
+          taskId,
+          type: 'TASK_COMPLETED',
+          message: `Task successfully verified and completed: ${review.summary}`,
+          data: { review, finalVerification, taskBranchName, baseBranch: baseline?.branch, autoMergeSucceeded },
+        });
+      }
     } else if (finalVerification.isVerified && !review.isComplete) {
       await this.transitionTaskState(
         taskId,
@@ -830,7 +903,37 @@ export class OrchestrationEngine extends EventEmitter {
     }
 
     } catch (lifecycleErr: any) {
-      if (!stateMachine.isTerminal()) {
+      const isCancelled =
+        abortController.signal.aborted ||
+        stateMachine.getState() === 'cancelling' ||
+        stateMachine.getState() === 'cancelled';
+
+      if (isCancelled) {
+        if (stateMachine.getState() !== 'cancelled') {
+          try {
+            if (stateMachine.getState() !== 'cancelling') {
+              await this.transitionTaskState(
+                taskId,
+                stateMachine,
+                'cancelling',
+                'Task cancellation in progress'
+              );
+            }
+            await this.transitionTaskState(
+              taskId,
+              stateMachine,
+              'cancelled',
+              'Task cancelled and active processes terminated'
+            );
+            await this.emitOrchestratorEvent({
+              taskId,
+              type: 'TASK_CANCELLED',
+              message: 'Task was cancelled by user request',
+            });
+          } catch {}
+        }
+        return;
+      } else if (!stateMachine.isTerminal()) {
         try {
           await this.transitionTaskState(
             taskId,
@@ -982,7 +1085,6 @@ export class OrchestrationEngine extends EventEmitter {
           .catch(() => {});
       }
 
-      this.activeTasks.delete(taskId);
       return true;
     }
     return false;
