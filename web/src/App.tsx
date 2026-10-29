@@ -324,12 +324,16 @@ export default function App() {
         setSelectedTaskId(data.task.id);
       } else {
         const errData = await res.json().catch(() => ({}));
-        const detailedMessage =
-          (typeof errData.message === 'string' && errData.message && errData.message !== 'Forbidden')
-            ? errData.message
-            : (typeof errData.error === 'string' && errData.error && errData.error !== 'Forbidden')
-            ? errData.error
-            : errData.message || errData.error || res.statusText || 'Unauthorized';
+        let detailedMessage = errData.message || errData.error || '';
+        if (!detailedMessage || detailedMessage === 'Forbidden') {
+          if (res.status === 403) {
+            detailedMessage = 'Workspace forbidden: The specified directory is outside authorized roots or requires ALLOW_UNRESTRICTED_WORKSPACES=true in .env.';
+          } else if (res.status === 400) {
+            detailedMessage = 'Invalid request: Please ensure the workspace path points to an initialized Git repository (.git).';
+          } else {
+            detailedMessage = res.statusText || `Request failed with HTTP status ${res.status}`;
+          }
+        }
         alert(`Failed to launch task:\n\n${detailedMessage}`);
       }
     } catch (err: any) {

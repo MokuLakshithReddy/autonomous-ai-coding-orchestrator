@@ -156,11 +156,17 @@ export class SecurityPolicyEngine {
 
     const forceCaseSensitive =
       typeof options === 'boolean' ? options : options?.forceCaseSensitive ?? false;
-    const allowUnrestricted =
+    const explicitUnrestricted =
       typeof options === 'object' && options?.allowUnrestricted !== undefined
         ? options.allowUnrestricted
-        : config.allowUnrestrictedWorkspaces;
+        : undefined;
 
+    // Case 1: When unrestricted mode is explicitly enabled via options, authorize any valid existing directory
+    if (explicitUnrestricted === true) {
+      return canonicalWorkspace;
+    }
+
+    // Case 2: When allowedRoots are specified and not explicitly bypassed via allowUnrestricted: true
     if (allowedRoots && allowedRoots.length > 0) {
       const isAuthorized = allowedRoots.some((allowedRoot) => {
         try {
@@ -179,7 +185,8 @@ export class SecurityPolicyEngine {
         );
       }
     } else {
-      // Empty or unspecified allowed roots: Default is RESTRICTED (fail-closed)
+      // Case 3: Empty or unspecified allowed roots: check explicit option or fallback to global config
+      const allowUnrestricted = explicitUnrestricted ?? config.allowUnrestrictedWorkspaces;
       if (!allowUnrestricted) {
         throw new Error(
           `Security Exception [Workspace Forbidden]: Workspace authorization failed. Allowed workspace roots list is empty and unrestricted workspace operation is disabled. Configure ALLOWED_DIRECTORIES or explicitly enable unrestricted mode.`

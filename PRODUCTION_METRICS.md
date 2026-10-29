@@ -8,7 +8,7 @@ This document reports empirical performance, security boundaries, and reliabilit
 
 | Category | Evaluated Capability | Benchmark Result | Target SLA | Status |
 | :--- | :--- | :---: | :---: | :---: |
-| **Correctness & Safety** | P0/P1 Critical Correctness Suite | **22 / 22 Passed (100%)** | 100% | ✅ Passed |
+| **Correctness & Safety** | P0/P1 Critical Correctness Suite | **31 / 31 Passed (100%)** | 100% | ✅ Passed |
 | **Isolation & Worktrees** | Production Readiness E2E Scenarios | **10 / 10 Passed (100%)** | 100% | ✅ Passed |
 | **Autonomous Repair** | Deterministic Code Repair Benchmarks | **4 / 4 Passed (100%)** | 100% | ✅ Passed |
 | **Regression Prevention** | Adversarial Partial-Fix Detection | **1 / 1 Caught (100%)** | 100% | ✅ Passed |

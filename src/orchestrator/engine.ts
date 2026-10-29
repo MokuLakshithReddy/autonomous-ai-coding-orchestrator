@@ -40,6 +40,7 @@ export class OrchestrationEngine extends EventEmitter {
       abortController: AbortController;
       stateMachine: TaskStateMachine;
       startedAt: number;
+      lifecyclePromise?: Promise<void>;
     }
   >();
 
@@ -163,14 +164,16 @@ export class OrchestrationEngine extends EventEmitter {
     });
 
     const abortController = new AbortController();
-    this.activeTasks.set(taskId, {
+    const activeTaskEntry = {
       abortController,
       stateMachine,
       startedAt: Date.now(),
-    });
+      lifecyclePromise: undefined as Promise<void> | undefined,
+    };
+    this.activeTasks.set(taskId, activeTaskEntry);
 
     // Run execution lifecycle asynchronously
-    this.executeTaskLifecycle(taskId, attemptId, params).catch(async (err) => {
+    const lifecyclePromise = this.executeTaskLifecycle(taskId, attemptId, params).catch(async (err) => {
       const isCancelled =
         abortController.signal.aborted ||
         stateMachine.getState() === 'cancelling' ||
@@ -198,7 +201,22 @@ export class OrchestrationEngine extends EventEmitter {
       this.activeTasks.delete(taskId);
     });
 
+    activeTaskEntry.lifecyclePromise = lifecyclePromise;
+
     return task;
+  }
+
+  /**
+   * P1 FIX: Await complete task execution lifecycle and worktree cleanup before caller exits.
+   */
+  async waitForTask(taskId: string): Promise<TaskRecord | null> {
+    const active = this.activeTasks.get(taskId);
+    if (active?.lifecyclePromise) {
+      try {
+        await active.lifecyclePromise;
+      } catch {}
+    }
+    return taskRepo.getById(taskId);
   }
 
   private async executeTaskLifecycle(
@@ -390,7 +408,7 @@ export class OrchestrationEngine extends EventEmitter {
         });
 
         // Fail-Closed: strictly wait for explicit operator approval
-        const isApproved = await this.waitForApproval(approvalId);
+        const isApproved = await this.waitForApproval(approvalId, abortController.signal);
 
         if (!isApproved) {
           await stepRepo.update(stepRec.id, { status: 'SKIPPED' });
@@ -707,6 +725,11 @@ export class OrchestrationEngine extends EventEmitter {
     // Re-verify against original baseline commit
     await this.transitionTaskState(taskId, stateMachine, 'verifying', 'Executing final completion verification gate');
     
+    // P1 FIX: Commit any remaining task worktree changes before final verification and cleanup
+    try {
+      await taskInspector.createTaskCheckpoint([], `Task ${taskId} final changes before completion verification`);
+    } catch {}
+
     // P0 FIX: Capture pre-verification workspace fingerprint (HEAD commit + working tree + staged + untracked files)
     const preVerificationFingerprint = await taskInspector.getWorkspaceFingerprint();
     
@@ -714,7 +737,8 @@ export class OrchestrationEngine extends EventEmitter {
       repoMeta,
       plan.acceptanceCriteria,
       undefined,
-      baseline?.baseCommit
+      baseline?.baseCommit,
+      { abortSignal: active?.abortController.signal }
     );
     
     // P0 FIX: Ensure full workspace state (tracked & untracked files, working diffs, commit) has not mutated during verification
@@ -849,6 +873,10 @@ export class OrchestrationEngine extends EventEmitter {
             );
           }
 
+          // P1 FIX: Capture exact merge commit to prevent rollback race condition
+          const postMergeLog = await mainGit.log({ maxCount: 1 });
+          const exactMergeCommit = postMergeLog.latest?.hash;
+
           // P1 FIX: Independent post-merge reverification on actual destination checkout (not worktree)
           const destinationVerifier = new IndependentVerifier(params.workspacePath);
           const postMergeReport = await destinationVerifier.verify(
@@ -859,7 +887,7 @@ export class OrchestrationEngine extends EventEmitter {
           );
 
           if (!postMergeReport.isVerified) {
-            // P0/P1 FIX: Safe recovery - ONLY roll back if destination checkout is clean and HEAD is still the merge commit
+            // P0/P1 FIX: Safe recovery - ONLY roll back if destination checkout is clean and HEAD is still the exact merge commit
             let rollbackSucceeded = false;
             try {
               const postVerificationStatus = await inspector.getGitStatus();
@@ -870,7 +898,8 @@ export class OrchestrationEngine extends EventEmitter {
                 postVerificationStatus &&
                 postVerificationStatus.files.length === 0 &&
                 currentHead &&
-                currentHead !== preMergeCommit
+                exactMergeCommit &&
+                currentHead === exactMergeCommit
               ) {
                 await mainGit.reset(['--hard', preMergeCommit]);
                 rollbackSucceeded = true;
@@ -1075,7 +1104,7 @@ export class OrchestrationEngine extends EventEmitter {
       );
     }
 
-    const isApproved = await this.waitForApproval(approvalId);
+    const isApproved = await this.waitForApproval(approvalId, active?.abortController.signal);
 
     if (active && isApproved) {
       await this.transitionTaskState(
@@ -1092,13 +1121,21 @@ export class OrchestrationEngine extends EventEmitter {
   /**
    * Fail-Closed Approval Waiter
    */
-  private async waitForApproval(approvalId: string): Promise<boolean> {
+  private async waitForApproval(approvalId: string, abortSignal?: AbortSignal): Promise<boolean> {
     const maxWaitMs = 10 * 60 * 1000;
     const checkInterval = 1500;
     const start = Date.now();
 
     while (Date.now() - start < maxWaitMs) {
+      if (abortSignal?.aborted) {
+        await approvalRepo.respond(approvalId, 'CANCELLED', 'user_aborted');
+        return false;
+      }
       await new Promise((r) => setTimeout(r, checkInterval));
+      if (abortSignal?.aborted) {
+        await approvalRepo.respond(approvalId, 'CANCELLED', 'user_aborted');
+        return false;
+      }
 
       const record = await approvalRepo.getById(approvalId);
       if (!record) return false;

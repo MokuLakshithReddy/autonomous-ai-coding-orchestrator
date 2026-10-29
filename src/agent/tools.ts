@@ -23,7 +23,7 @@ export class AgentToolbox {
   private maxOutputBytes = 500 * 1024; // 500 KB output limit per command
 
   constructor(workspacePath: string, onRequestApproval?: ApprovalCallback) {
-    this.workspacePath = path.resolve(workspacePath);
+    this.workspacePath = SecurityPolicyEngine.resolveCanonicalPath(workspacePath);
     this.onRequestApproval = onRequestApproval;
   }
 
@@ -201,13 +201,19 @@ export class AgentToolbox {
     let spawnExec: string;
     let spawnArgs: string[];
 
+    const isExternalAgent =
+      target.type === 'exec' &&
+      ['aider', 'claude'].includes(
+        path.basename(target.executable).toLowerCase().replace(/\.(cmd|bat|exe|ps1)$/, '')
+      );
+
     if (isContainerMode) {
       // P0 FIX: Mandatory fail closed if container isolation is enabled but Docker is unavailable
       await ContainerSandbox.assertSandboxAvailable();
 
       const wrapped = ContainerSandbox.buildDockerRunArgs(this.workspacePath, target, {
         env: sanitizedEnv,
-        forwardApiKeys: true,
+        forwardApiKeys: isExternalAgent,
       });
       spawnExec = wrapped.executable;
       spawnArgs = wrapped.args;

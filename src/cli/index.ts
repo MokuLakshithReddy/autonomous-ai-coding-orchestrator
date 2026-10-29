@@ -71,6 +71,8 @@ program
     console.log(chalk.white(`Auto-Merge: ${autoMerge ? chalk.green('Enabled') : chalk.gray('Disabled')}`));
     console.log(chalk.white(`Max Retries: ${chalk.green(maxRetries)}\n`));
 
+    let exitCode = 0;
+
     // Listen to real-time events and format for terminal
     orchestrator.on('event', (e: OrchestratorEvent) => {
       const time = chalk.gray(`[${e.timestamp.slice(11, 19)}]`);
@@ -121,11 +123,11 @@ program
               console.log(chalk.gray(`   To merge these verified changes into your branch, run: git merge ${e.data.taskBranchName}\n`));
             }
           }
-          process.exit(0);
+          exitCode = 0;
           break;
         case 'TASK_PARTIALLY_COMPLETED':
           console.log(`\n${time} ${chalk.bold.yellow('⚠️ TASK PARTIALLY COMPLETED:')} ${e.message}\n`);
-          process.exit(2);
+          exitCode = 2;
           break;
         case 'TASK_NEEDS_REVIEW':
           console.log(`\n${time} ${chalk.bold.blue('👀 TASK REQUIRES HUMAN REVIEW:')} ${e.message}\n`);
@@ -136,15 +138,15 @@ program
               console.log(chalk.gray(`   To manually review and merge: git merge ${e.data.taskBranchName}\n`));
             }
           }
-          process.exit(3);
+          exitCode = 3;
           break;
         case 'TASK_FAILED':
           console.log(`\n${time} ${chalk.bold.red('❌ MISSION FAILED:')} ${e.message}\n`);
-          process.exit(1);
+          exitCode = 1;
           break;
         case 'TASK_BLOCKED':
           console.log(`\n${time} ${chalk.bold.red('⛔ TASK BLOCKED:')} ${e.message}\n`);
-          process.exit(1);
+          exitCode = 1;
           break;
         case 'APPROVAL_REQUIRED':
           console.log(`\n${time} ${chalk.bold.yellow('🔒 APPROVAL REQUIRED:')} ${e.message}`);
@@ -154,13 +156,15 @@ program
     });
 
     try {
-      await orchestrator.runTask({
+      const task = await orchestrator.runTask({
         prompt: opts.prompt,
         workspacePath: resolvedWorkspace,
         maxRetries,
         agentType,
         autoMerge,
       });
+      await orchestrator.waitForTask(task.id);
+      process.exit(exitCode);
     } catch (err: any) {
       console.error(chalk.red('Fatal orchestrator failure:'), err);
       process.exit(1);

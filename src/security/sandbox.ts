@@ -70,8 +70,21 @@ export class ContainerSandbox {
     let defaultImage = 'node:22-bookworm-slim';
     if (normalizedTarget.type === 'exec') {
       const execName = normalizedTarget.executable.toLowerCase();
-      if (execName === 'aider' || execName === 'python' || execName === 'python3' || execName === 'pytest') {
+      if (['aider', 'python', 'python3', 'pytest', 'pip'].some((p) => execName.includes(p))) {
         defaultImage = process.env.CONTAINER_SANDBOX_PYTHON_IMAGE || 'python:3.11-slim';
+      } else if (['cargo', 'rustc'].some((p) => execName.includes(p))) {
+        defaultImage = process.env.CONTAINER_SANDBOX_RUST_IMAGE || 'rust:1.80-slim';
+      } else if (['go'].some((p) => execName.includes(p))) {
+        defaultImage = process.env.CONTAINER_SANDBOX_GO_IMAGE || 'golang:1.23-bookworm';
+      }
+    } else {
+      const cmd = normalizedTarget.commandStr.toLowerCase();
+      if (cmd.includes('pytest') || cmd.includes('python ') || cmd.includes('pip ')) {
+        defaultImage = process.env.CONTAINER_SANDBOX_PYTHON_IMAGE || 'python:3.11-slim';
+      } else if (cmd.includes('cargo ')) {
+        defaultImage = process.env.CONTAINER_SANDBOX_RUST_IMAGE || 'rust:1.80-slim';
+      } else if (cmd.includes('go test') || cmd.includes('go build')) {
+        defaultImage = process.env.CONTAINER_SANDBOX_GO_IMAGE || 'golang:1.23-bookworm';
       }
     }
     const image = options.image || process.env.CONTAINER_SANDBOX_IMAGE || defaultImage;
@@ -93,13 +106,13 @@ export class ContainerSandbox {
       '-e', 'NODE_ENV=development',
     ];
 
-    // Safely forward agent credentials if requested without mounting host directories
-    if (options.forwardApiKeys !== false) {
+    // P0 FIX: Strictly forward agent credentials ONLY when explicitly requested for external agents.
+    // Secrets are forwarded by name (-e KEY) rather than (-e KEY=val) so values never appear in process arguments!
+    if (options.forwardApiKeys === true) {
       const allowedKeys = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY'];
       for (const key of allowedKeys) {
-        const val = options.env?.[key] || process.env[key];
-        if (val) {
-          dockerArgs.push('-e', `${key}=${val}`);
+        if (options.env?.[key] || process.env[key]) {
+          dockerArgs.push('-e', key);
         }
       }
     }

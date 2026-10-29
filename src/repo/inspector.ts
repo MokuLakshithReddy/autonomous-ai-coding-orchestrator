@@ -262,17 +262,20 @@ export class RepoInspector {
 
       const filesToStage: string[] = [];
 
-      const initialDirtySet = new Set(this.baseline?.dirtyFilesAtStart || []);
+      const isIsolatedWorktree = this.workspacePath.includes('.orchestrator_worktrees');
+      const initialDirtySet = isIsolatedWorktree
+        ? new Set<string>()
+        : new Set(this.baseline?.dirtyFilesAtStart || []);
 
       if (taskOwnedFiles.length > 0) {
-        // Stage only explicit task-owned files that were NOT in initial dirty baseline
+        // Stage only explicit task-owned files that were NOT in initial dirty baseline (unless isolated worktree)
         for (const file of taskOwnedFiles) {
           const relPath = path.isAbsolute(file)
             ? path.relative(this.workspacePath, file).replace(/\\/g, '/')
             : file.replace(/\\/g, '/');
 
           // Strict P0 Protection: Do not stage files that already had pre-existing user modifications!
-          if (!initialDirtySet.has(relPath)) {
+          if (isIsolatedWorktree || !initialDirtySet.has(relPath)) {
             filesToStage.push(relPath);
           } else {
             console.warn(`[Checkpoint Protection] Skipping pre-existing dirty user file: ${relPath}`);
@@ -283,7 +286,7 @@ export class RepoInspector {
         const currentStatus = await this.git.status();
 
         for (const file of currentStatus.files) {
-          if (!initialDirtySet.has(file.path)) {
+          if (isIsolatedWorktree || !initialDirtySet.has(file.path)) {
             filesToStage.push(file.path);
           }
         }

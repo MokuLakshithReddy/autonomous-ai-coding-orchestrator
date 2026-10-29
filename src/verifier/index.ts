@@ -1,5 +1,8 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import { AgentToolbox, type CommandResult } from '../agent/tools.js';
 import { RepoInspector, type ProjectMetadata } from '../repo/inspector.js';
+import { SecurityPolicyEngine } from '../security/policy.js';
 
 export type CheckStatus = 'PASSED' | 'FAILED' | 'SKIPPED' | 'NOT_CONFIGURED' | 'NOT_RUN' | 'INCONCLUSIVE';
 
@@ -56,7 +59,7 @@ export class IndependentVerifier {
     acceptanceCriteria: string[] = [],
     customVerificationCmd?: string,
     baseCommit?: string,
-    options?: { isIntermediateStep?: boolean }
+    options?: { isIntermediateStep?: boolean; abortSignal?: AbortSignal }
   ): Promise<VerificationReport> {
     const blockingReasons: string[] = [];
     const diagnosticsList: string[] = [];
@@ -65,7 +68,7 @@ export class IndependentVerifier {
     // 1. Build Verification
     let buildCheck: VerificationCheckResult;
     if (meta.buildCmd) {
-      const res = await this.toolbox.executeCommand(meta.buildCmd, 120000);
+      const res = await this.toolbox.executeCommand(meta.buildCmd, 120000, {}, options?.abortSignal);
       const passed = res.exitCode === 0;
       buildCheck = {
         status: passed ? 'PASSED' : 'FAILED',
@@ -90,7 +93,7 @@ export class IndependentVerifier {
     let testCheck: VerificationCheckResult;
     const testCmdToRun = customVerificationCmd || meta.testCmd;
     if (testCmdToRun) {
-      const res = await this.toolbox.executeCommand(testCmdToRun, 180000);
+      const res = await this.toolbox.executeCommand(testCmdToRun, 180000, {}, options?.abortSignal);
       const passed = res.exitCode === 0;
       testCheck = {
         status: passed ? 'PASSED' : 'FAILED',
@@ -114,7 +117,7 @@ export class IndependentVerifier {
     // 3. Lint / Static Analysis Check (P0.2 FIX: Lint failures are BLOCKING)
     let lintCheck: VerificationCheckResult;
     if (meta.lintCmd && buildCheck.status !== 'FAILED') {
-      const res = await this.toolbox.executeCommand(meta.lintCmd, 60000);
+      const res = await this.toolbox.executeCommand(meta.lintCmd, 60000, {}, options?.abortSignal);
       const passed = res.exitCode === 0;
       lintCheck = {
         status: passed ? 'PASSED' : 'FAILED',
@@ -160,7 +163,7 @@ export class IndependentVerifier {
           const trimmed = line.trim();
           if (trimmed) allFilesChangedSet.add(trimmed);
         }
-      } catch {}
+      } catch { }
     }
     // Parse filenames from diff headers as well
     const diffFileMatches = diff.matchAll(/^diff --git a\/(.+?) b\/(.+?)$/gm);
@@ -169,14 +172,114 @@ export class IndependentVerifier {
     }
     const allCumulativeFiles = Array.from(allFilesChangedSet);
 
-    // Anti-tamper & integrity check across all changed files and diff lines
+    let hasSuspiciousDeletions = false;
+    let hasForbiddenModifications = false;
+    let hasPlaceholderStubs = false;
     const diffNotes: string[] = [];
-    const diffIntegrity = IndependentVerifier.verifyDiffIntegrity(diff, allCumulativeFiles);
-    diffNotes.push(...diffIntegrity.diffNotes);
-    blockingReasons.push(...diffIntegrity.blockingReasons);
-    const hasSuspiciousDeletions = diffIntegrity.hasSuspiciousDeletions;
-    const hasForbiddenModifications = diffIntegrity.hasForbiddenModifications;
-    const hasPlaceholderStubs = diffIntegrity.hasPlaceholderStubs;
+
+    // Security check for sensitive secret files across ALL cumulative changes
+    for (const f of allCumulativeFiles) {
+      const lower = f.toLowerCase();
+      // Allow harmless example / template / distribution files
+      if (
+        lower.endsWith('.example') ||
+        lower.endsWith('.sample') ||
+        lower.endsWith('.template') ||
+        lower.endsWith('.dist')
+      ) {
+        continue;
+      }
+      if (
+        lower.includes('.env') ||
+        lower.includes('credentials') ||
+        lower.includes('id_rsa') ||
+        lower.includes('.pem') ||
+        lower.includes('.key')
+      ) {
+        hasForbiddenModifications = true;
+        diffNotes.push(`Sensitive secret file modified in task history: ${f}`);
+        blockingReasons.push(`Unauthorized modification of sensitive secret file: ${f}`);
+      }
+    }
+
+    // Anti-Tamper & Content Check: Inspect added and deleted lines across diff
+    const addedTestLines: string[] = [];
+    const addedPackageJsonLines: string[] = [];
+    const addedAllLines: string[] = [];
+    const deletedTestLines: string[] = [];
+    let deletedAssertionCount = 0;
+    let addedAssertionCount = 0;
+    let currentDiffFile = '';
+
+    for (const line of diff.split('\n')) {
+      if (line.startsWith('diff --git ')) {
+        const match = line.match(/^diff --git\s+a\/(.+?)\s+b\/(.+?)$/);
+        currentDiffFile = match ? match[2].trim() : '';
+      } else if (line.startsWith('+') && !line.startsWith('+++')) {
+        const added = line.slice(1);
+        addedAllLines.push(added);
+        if (/(\.test\.|\.spec\.|[\\/]tests?[\\/])/i.test(currentDiffFile)) {
+          addedTestLines.push(added);
+          if (/\b(assert|expect|test|it)\s*[\.(]/i.test(added)) {
+            addedAssertionCount++;
+          }
+        }
+        if (currentDiffFile.endsWith('package.json')) {
+          addedPackageJsonLines.push(added);
+        }
+      } else if (line.startsWith('-') && !line.startsWith('---')) {
+        const deleted = line.slice(1);
+        if (/(\.test\.|\.spec\.|[\\/]tests?[\\/])/i.test(currentDiffFile)) {
+          deletedTestLines.push(deleted);
+          if (/\b(assert|expect|test|it)\s*[\.(]/i.test(deleted)) {
+            deletedAssertionCount++;
+          }
+        }
+      }
+    }
+
+    // Anti-Tamper Check: Detect suspicious test bypassing / skipping inserted into test files
+    const testDiffContent = addedTestLines.join('\n');
+    if (
+      /\b(test\.skip|it\.skip|describe\.skip|xit|xdescribe)\s*\(/i.test(testDiffContent) ||
+      /@pytest\.mark\.skip/i.test(testDiffContent)
+    ) {
+      hasSuspiciousDeletions = true;
+      diffNotes.push('Anti-Tamper Warning: Suspicious test-skipping statements detected in test diff.');
+      blockingReasons.push('Test assertions were bypassed or marked skipped in diff.');
+    }
+
+    // Anti-Tamper Check: Detect suspicious deletion of multiple existing test assertions without equivalent additions
+    if (deletedAssertionCount >= 3 && deletedAssertionCount > addedAssertionCount) {
+      hasSuspiciousDeletions = true;
+      diffNotes.push(`Anti-Tamper Warning: ${deletedAssertionCount} existing test assertions were deleted (${addedAssertionCount} added).`);
+      blockingReasons.push(`Anti-tamper violation: ${deletedAssertionCount} test assertions were deleted without equivalent additions.`);
+    }
+
+    // Anti-Tamper Check: Detect package.json test script tampering to exit 0 or bypass test execution
+    const pkgDiffContent = addedPackageJsonLines.join('\n');
+    if (
+      /\"(test|pretest|posttest)\"\s*:\s*\"(exit\s*0|true|echo\b.*exit\s*0|echo\b.*ok|node\s+-e\s+['"]process\.exit\(0\))/i.test(
+        pkgDiffContent
+      )
+    ) {
+      hasForbiddenModifications = true;
+      diffNotes.push('Anti-Tamper Warning: package.json test script modified to trivially exit 0 or bypass execution.');
+      blockingReasons.push('Anti-tamper violation: package.json test script was modified to bypass execution.');
+    }
+
+    // Placeholder Stubs Detection in added lines
+    const addedCodeContent = addedAllLines.join('\n');
+    if (
+      /\/\/\s*TODO:\s*implement/i.test(addedCodeContent) ||
+      /#\s*TODO:\s*implement/i.test(addedCodeContent) ||
+      /\bthrow new NotImplementedError\b/i.test(addedCodeContent) ||
+      /\bpass\s*#\s*todo\b/i.test(addedCodeContent)
+    ) {
+      hasPlaceholderStubs = true;
+      diffNotes.push('Placeholder stub or unimplemented function found in diff.');
+      blockingReasons.push('Implementation contains unfulfilled placeholder stubs or TODOs.');
+    }
 
     // 5. Explicit Acceptance Criteria Verification
     // Intermediate step check vs Final task verification gate
@@ -239,13 +342,31 @@ export class IndependentVerifier {
           const targetFile = fileMatch ? fileMatch[1].replace(/^[./\\]+/, '').toLowerCase() : undefined;
 
           if (targetFile) {
-            const fileFound = allCumulativeFiles.some(
+            let existsOnDisk = false;
+            try {
+              await fs.stat(path.join(this.workspacePath, targetFile));
+              existsOnDisk = true;
+            } catch {
+              for (const cumFile of allCumulativeFiles) {
+                if (cumFile.toLowerCase() === targetFile || cumFile.toLowerCase().endsWith('/' + targetFile)) {
+                  try {
+                    await fs.stat(path.join(this.workspacePath, cumFile));
+                    existsOnDisk = true;
+                    break;
+                  } catch {}
+                }
+              }
+            }
+
+            const fileInDiff = allCumulativeFiles.some(
               (f) => f.toLowerCase() === targetFile || f.toLowerCase().endsWith('/' + targetFile)
             );
-            satisfied = fileFound;
+            satisfied = fileInDiff && existsOnDisk;
             evidence = satisfied
-              ? `Confirmed required file "${targetFile}" created/modified in repository.`
-              : `Unverified: Required file "${targetFile}" was not found in modified files: ${allCumulativeFiles.join(', ') || 'none'}.`;
+              ? `Confirmed required file "${targetFile}" created/modified in repository and verified on disk.`
+              : !existsOnDisk && fileInDiff
+                ? `Unverified: Required file "${targetFile}" was recorded in changes but does not exist on disk.`
+                : `Unverified: Required file "${targetFile}" was not found in modified files: ${allCumulativeFiles.join(', ') || 'none'}.`;
           } else {
             satisfied = allCumulativeFiles.length > 0;
             evidence = satisfied
@@ -265,13 +386,11 @@ export class IndependentVerifier {
             satisfied = false;
             evidence = `Unverified: Automated test suite failed (exit ${testCheck.exitCode ?? 1}) - behavioral requirement "${criterion}" not proven.`;
           } else {
-            // Check for explicit targeted check command or repository test runner
-            const verifiedByCommand =
-              (customVerificationCmd && testCheck.command === customVerificationCmd) ||
-              (Boolean(meta.testCmd) && testCheck.command === meta.testCmd && testCheck.exitCode === 0);
+            // Check for explicit targeted check command (not generic repository test runner)
+            const verifiedByCommand = Boolean(customVerificationCmd && testCheck.command === customVerificationCmd);
 
             if (verifiedByCommand) {
-              targetCommand = testCheck.command || customVerificationCmd || meta.testCmd;
+              targetCommand = testCheck.command || customVerificationCmd;
               exitCode = testCheck.exitCode;
               satisfied = true;
               evidence = `Explicit verification check "${targetCommand}" verified requirement (exit ${exitCode ?? 0}).`;
@@ -286,7 +405,10 @@ export class IndependentVerifier {
                     !['test', 'pass', 'passes', 'should', 'must', 'with', 'when', 'from', 'that', 'this'].includes(w)
                 );
 
-              const hasDedicatedTestFile = allCumulativeFiles.some((f) => /test|spec/i.test(f));
+              const hasDedicatedTestFile =
+                allCumulativeFiles.some((f) => /test|spec/i.test(f)) ||
+                Boolean(meta.testCmd && /test|spec/i.test(meta.testCmd)) ||
+                Boolean(testCheck.command && /test|spec/i.test(testCheck.command));
               const outputLower = (testCheck.output || '').toLowerCase();
               const keywordMatches = keywords.filter((kw) => outputLower.includes(kw));
 
@@ -298,7 +420,7 @@ export class IndependentVerifier {
                 exitCode = testCheck.exitCode;
                 satisfied = true;
                 evidence = `Verified via targeted test execution: "${targetCommand}" (exit ${exitCode ?? 0}) with proof matching [${keywordMatches.join(', ')}].`;
-              } else if (hasDedicatedTestFile && (/passed\b|✓/i.test(testCheck.output))) {
+              } else if (hasDedicatedTestFile && (/passed\b|✓|ok\b/i.test(testCheck.output))) {
                 targetCommand = testCheck.command || meta.testCmd;
                 exitCode = testCheck.exitCode;
                 satisfied = true;
@@ -395,26 +517,18 @@ export class IndependentVerifier {
 
     // Security check for sensitive secret files across all changed files
     for (const f of filesChanged) {
-      const lower = f.toLowerCase();
-      if (
-        lower.endsWith('.example') ||
-        lower.endsWith('.sample') ||
-        lower.endsWith('.template') ||
-        lower.endsWith('.dist')
-      ) {
-        continue;
-      }
-      if (
-        lower.includes('.env') ||
-        lower.includes('credentials') ||
-        lower.includes('id_rsa') ||
-        lower.includes('.pem') ||
-        lower.includes('.key')
-      ) {
+      if (SecurityPolicyEngine.isSensitiveSecret(f)) {
         hasForbiddenModifications = true;
         diffNotes.push(`Sensitive secret file modified in task history: ${f}`);
         blockingReasons.push(`Unauthorized modification of sensitive secret file: ${f}`);
       }
+    }
+
+    const secretInDiff = SecurityPolicyEngine.containsSensitiveSecret(diff);
+    if (secretInDiff.hasSecret) {
+      hasForbiddenModifications = true;
+      diffNotes.push(`Diff contains sensitive secrets: ${secretInDiff.reason}`);
+      blockingReasons.push(`Unauthorized sensitive credential pattern detected in diff: ${secretInDiff.reason}`);
     }
 
     const addedTestLines: string[] = [];
