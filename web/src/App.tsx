@@ -320,7 +320,7 @@ export default function App() {
         setSelectedTaskId(data.task.id);
       } else {
         const errData = await res.json().catch(() => ({}));
-        alert(`Failed to launch task: ${errData.message || res.statusText || 'Unauthorized'}`);
+        alert(`Failed to launch task: ${errData.error || errData.message || res.statusText || 'Unauthorized'}`);
       }
     } catch (err) {
       alert('Failed to launch task.');
