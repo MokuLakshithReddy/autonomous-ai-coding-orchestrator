@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events';
 import crypto from 'node:crypto';
 import { RepoInspector, type ProjectMetadata } from '../repo/inspector.js';
 import { LLMBrain, type ExecutionPlan, type PlanStep } from '../llm/index.js';
-import { BuiltInAutonomousAgent, type CodingAgent } from '../agent/index.js';
+import { BuiltInAutonomousAgent, createAgent, type CodingAgent } from '../agent/index.js';
 import { IndependentVerifier, type VerificationReport } from '../verifier/index.js';
 import {
   initDatabase,
@@ -114,6 +114,8 @@ export class OrchestrationEngine extends EventEmitter {
     title?: string;
     maxRetries?: number;
     customAgent?: CodingAgent;
+    agentType?: 'builtin' | 'aider' | 'claude';
+    autoMerge?: boolean;
     allowedWorkspaces?: string[];
     allowUnrestricted?: boolean;
   }): Promise<TaskRecord> {
@@ -198,6 +200,8 @@ export class OrchestrationEngine extends EventEmitter {
       workspacePath: string;
       maxRetries?: number;
       customAgent?: CodingAgent;
+      agentType?: 'builtin' | 'aider' | 'claude';
+      autoMerge?: boolean;
     }
   ): Promise<void> {
     const active = this.activeTasks.get(taskId);
@@ -255,9 +259,13 @@ export class OrchestrationEngine extends EventEmitter {
 
     const agent =
       params.customAgent ||
-      new BuiltInAutonomousAgent(executionPath, async (commandOrAction, policy) => {
-        return await this.requestCommandApproval(taskId, currentExecutingStepId, commandOrAction, policy);
-      });
+      createAgent(
+        params.agentType || 'builtin',
+        executionPath,
+        async (commandOrAction, policy) => {
+          return await this.requestCommandApproval(taskId, currentExecutingStepId, commandOrAction, policy);
+        }
+      );
     const maxRetries = params.maxRetries ?? config.maxRetryBudget;
     const maxTotalDurationMs = config.stepTimeoutSeconds * 10 * 1000;
 
@@ -465,7 +473,8 @@ export class OrchestrationEngine extends EventEmitter {
         repoMeta,
         plan.acceptanceCriteria,
         stepVerificationCmd,
-        baseline?.baseCommit
+        baseline?.baseCommit,
+        { isIntermediateStep: !isLastStep }
       );
       const postStepVerifFingerprint = await taskInspector.getWorkspaceFingerprint();
       if (preStepVerifFingerprint !== postStepVerifFingerprint) {
@@ -566,7 +575,8 @@ export class OrchestrationEngine extends EventEmitter {
           repoMeta,
           plan.acceptanceCriteria,
           stepVerificationCmd,
-          baseline?.baseCommit
+          baseline?.baseCommit,
+          { isIntermediateStep: !isLastStep }
         );
       }
 
@@ -773,12 +783,21 @@ export class OrchestrationEngine extends EventEmitter {
 
     // Truthful Completion Gate: Distinguish completed vs partially_completed vs needs_human_review vs failed
     if (finalVerification.isVerified && review.isComplete) {
+      if (params.autoMerge && isGit && taskBranchName) {
+        try {
+          const mainGit = (inspector as any).git;
+          await mainGit.merge([taskBranchName]);
+        } catch (mergeErr: any) {
+          console.warn(`[Auto-Merge Notice] Could not automatically merge ${taskBranchName}: ${mergeErr.message}`);
+        }
+      }
+
       await this.transitionTaskState(taskId, stateMachine, 'completed', 'All requirements verified', review.summary);
       await this.emitOrchestratorEvent({
         taskId,
         type: 'TASK_COMPLETED',
         message: `Task successfully verified and completed: ${review.summary}`,
-        data: { review, finalVerification },
+        data: { review, finalVerification, taskBranchName },
       });
     } else if (finalVerification.isVerified && !review.isComplete) {
       await this.transitionTaskState(

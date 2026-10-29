@@ -350,6 +350,29 @@ export class RepoInspector {
     } catch (err: any) {
       throw new Error(`Git worktree allocation failed: ${err.message || String(err)}`);
     }
+
+    // Link parent node_modules if present so tests and builds have access to dependencies
+    const parentNM = path.join(this.workspacePath, 'node_modules');
+    const worktreeNM = path.join(worktreeDir, 'node_modules');
+    try {
+      const stat = await fs.stat(parentNM);
+      if (stat.isDirectory()) {
+        const linkType = process.platform === 'win32' ? 'junction' : 'dir';
+        await fs.symlink(parentNM, worktreeNM, linkType);
+      }
+    } catch {}
+
+    // Link parent .venv if present for Python projects
+    const parentVenv = path.join(this.workspacePath, '.venv');
+    const worktreeVenv = path.join(worktreeDir, '.venv');
+    try {
+      const stat = await fs.stat(parentVenv);
+      if (stat.isDirectory()) {
+        const linkType = process.platform === 'win32' ? 'junction' : 'dir';
+        await fs.symlink(parentVenv, worktreeVenv, linkType);
+      }
+    } catch {}
+
     return worktreeDir;
   }
 

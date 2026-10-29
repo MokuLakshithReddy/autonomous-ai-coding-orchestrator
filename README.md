@@ -451,6 +451,9 @@ interface OrchestratorEvent {
 # Run an autonomous repair in the current directory:
 npm run cli -- run -p "Fix calculateSum function in math.js so node test.js passes"
 
+# Run with an external coding agent adapter (builtin, claude, or aider) and auto-merge on completion:
+npm run cli -- run -p "Fix calculateSum function" --agent claude --merge
+
 # Run in an external workspace with custom retry budget:
 npm run cli -- run -p "Fix JWT expiration bug" -w "C:/workspace/my-api" -r 5
 

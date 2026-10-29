@@ -390,7 +390,7 @@ export class SecurityPolicyEngine {
     // 5. Narrow Safe Policy Allowlist: Only atomic, non-destructive tools
     const isSafeGit = /^git\s+(status|diff|log|show|branch|rev-parse)(\s+.*)?$/i.test(lower);
     const isSafeBuildTest =
-      /^(npm|npm\.cmd|pnpm|yarn)\s+(run\s+)?(build|test|lint)(\s+.*)?$/i.test(lower) ||
+      /^(npm|npm\.cmd|pnpm|yarn)\s+(run\s+)?(build|test|lint|ci|install)(\s+.*)?$/i.test(lower) ||
       /^(npx|npx\.cmd)\s+(tsc|jest|vitest|eslint|prettier)(\s+.*)?$/i.test(lower) ||
       /^(tsc|tsc\.cmd)(\s+.*)?$/i.test(lower) ||
       /^(python|python3)\s+-m\s+(pytest|unittest)(\s+.*)?$/i.test(lower) ||

@@ -40,6 +40,7 @@ export class TaskStateMachine {
     awaiting_approval: [
       'ready',
       'executing',
+      'repairing',
       'verifying',
       'blocked',
       'needs_human_review',
@@ -61,7 +62,7 @@ export class TaskStateMachine {
       'cancelling',
     ],
     diagnosing: ['repairing', 'blocked', 'needs_human_review', 'failed', 'cancelling'],
-    repairing: ['verifying', 'executing', 'blocked', 'failed', 'cancelling'],
+    repairing: ['verifying', 'executing', 'awaiting_approval', 'blocked', 'failed', 'cancelling'],
     cancelling: ['cancelled', 'failed'],
     // Non-terminal escalation states can transition to resume or cancel
     blocked: ['planning', 'ready', 'cancelling', 'failed'],

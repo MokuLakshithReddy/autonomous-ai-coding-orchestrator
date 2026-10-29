@@ -353,9 +353,11 @@ export async function createServer() {
       workspacePath?: string;
       title?: string;
       maxRetries?: number;
+      agent?: 'builtin' | 'aider' | 'claude';
+      autoMerge?: boolean;
     };
   }>('/api/tasks', async (req, reply) => {
-    const { prompt, workspacePath, title, maxRetries } = req.body;
+    const { prompt, workspacePath, title, maxRetries, agent, autoMerge } = req.body;
     if (!prompt) {
       return reply.status(400).send({ error: 'Prompt is required' });
     }
@@ -373,6 +375,8 @@ export async function createServer() {
       workspacePath: resolvedWorkspace,
       title,
       maxRetries,
+      agentType: agent,
+      autoMerge,
     });
 
     return reply.status(201).send({ task });

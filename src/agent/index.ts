@@ -126,7 +126,7 @@ export class BuiltInAutonomousAgent implements CodingAgent {
     toolsUsed: string[],
     abortSignal?: AbortSignal
   ): Promise<StepExecutionResult> {
-    const maxIterations = 5;
+    const maxIterations = 15;
     let iteration = 0;
     let currentTask = instruction;
     let completedCleanly = false;
@@ -181,30 +181,38 @@ Target Files: ${targetFiles.join(', ') || 'Any relevant files in repository'}
 
 File Contexts:
 ${Object.entries(fileContexts)
-          .map(([f, content]) => `=== ${f} ===\n${content.slice(0, 3000)}`)
+          .map(([f, content]) => `=== ${f} ===\n${content.slice(0, 6000)}`)
           .join('\n\n')}
 ${recentActions.length > 0 ? `
 Recent Actions & Execution Results:
-${recentActions.slice(-3).map(a => `- Iteration ${a.iter} [${a.action}]: ${a.summary || ''}${a.commandOutput ? '\n  Output:\n' + a.commandOutput.slice(-500) : ''}`).join('\n')}
+${recentActions.slice(-4).map(a => `- Iteration ${a.iter} [${a.action}]: ${a.summary || ''}${a.commandOutput ? '\n  Output:\n' + a.commandOutput.slice(-500) : ''}`).join('\n')}
 ` : ''}
 
 Decide on the next action to take. You can choose ONE action:
 1. "writeFile": Create or overwrite a file with complete content.
 2. "readFile": Read the contents of a file in the workspace.
-3. "executeCommand": Run a terminal command (e.g. build, test, install, format).
-4. "complete": Finish the step and declare work complete.
+3. "replaceInFile": Surgically replace exact code substring in a file with replacement string (avoids rewriting entire file).
+4. "searchCode": Search for text or regex pattern across repository files.
+5. "listFiles": List files in a workspace directory.
+6. "executeCommand": Run a terminal command (e.g. test, build, install, lint).
+7. "complete": Finish the step and declare work complete.
 
 Rules:
 - If a test command was executed and passed with exit code 0 (all tests passed), the repair is successful! Return action: "complete" immediately. Do NOT run the test repeatedly in a loop.
+- Use "replaceInFile" for surgical bug fixes to preserve the rest of the file without truncation risks.
 - When writing files with "writeFile", always provide the complete file content.
 
 Output your response ONLY in valid JSON matching this schema:
 {
   "thought": "Your reasoning about what needs to be done next",
-  "action": "writeFile" | "readFile" | "executeCommand" | "complete",
-  "filePath": "path/to/file (if action is writeFile or readFile)",
-  "fileContent": "the code to write (if action is writeFile)",
-  "command": "npm.cmd test (if action is executeCommand)",
+  "action": "writeFile" | "readFile" | "replaceInFile" | "searchCode" | "listFiles" | "executeCommand" | "complete",
+  "filePath": "path/to/file (for writeFile, readFile, replaceInFile)",
+  "fileContent": "the code to write (for writeFile)",
+  "target": "exact string to replace (for replaceInFile)",
+  "replacement": "replacement string (for replaceInFile)",
+  "searchQuery": "text or regex to search (for searchCode)",
+  "dirPath": "relative directory path (for listFiles, default '.')",
+  "command": "terminal command (for executeCommand)",
   "summary": "Summary of action"
 }
 `;
@@ -324,6 +332,53 @@ Output your response ONLY in valid JSON matching this schema:
           } catch (readErr: any) {
             logs.push(`[Warning] Could not read ${actionJson.filePath}: ${readErr.message}`);
           }
+        } else if (actionJson.action === 'replaceInFile') {
+          if (!actionJson.filePath || actionJson.target === undefined || actionJson.replacement === undefined) {
+            encounteredError = true;
+            failureReason = 'replaceInFile action requires filePath, target, and replacement strings';
+            logs.push(`[Error] ${failureReason}`);
+            break;
+          }
+          logs.push(`[Action] Surgically replacing substring in: ${actionJson.filePath}`);
+          const replaced = await this.toolbox.replaceInFile(actionJson.filePath, actionJson.target, actionJson.replacement);
+          if (replaced) {
+            toolsUsed.push(`replaceInFile:${actionJson.filePath}`);
+            recentActions.push({
+              iter: iteration,
+              action: 'replaceInFile',
+              summary: `Replaced code in ${actionJson.filePath}`,
+            });
+          } else {
+            logs.push(`[Warning] Target substring was not found in ${actionJson.filePath}`);
+            recentActions.push({
+              iter: iteration,
+              action: 'replaceInFile',
+              summary: `Target substring not found in ${actionJson.filePath}`,
+            });
+          }
+        } else if (actionJson.action === 'searchCode') {
+          const query = actionJson.searchQuery || actionJson.command || '';
+          logs.push(`[Action] Searching codebase for pattern: "${query}"`);
+          const matches = await this.toolbox.searchCode(query);
+          const matchSummaries = matches.slice(0, 10).map((m) => `${m.file}:${m.line}: ${m.content}`).join('\n');
+          logs.push(`[Search Results (${matches.length} found)]:\n${matchSummaries || 'No matches found.'}`);
+          toolsUsed.push(`searchCode:${query}`);
+          recentActions.push({
+            iter: iteration,
+            action: 'searchCode',
+            summary: `Found ${matches.length} matches for "${query}"`,
+          });
+        } else if (actionJson.action === 'listFiles') {
+          const dir = actionJson.dirPath || '.';
+          logs.push(`[Action] Listing workspace files in: "${dir}"`);
+          const files = await this.toolbox.listFiles(dir);
+          logs.push(`[Files in ${dir}]:\n${files.slice(0, 30).join('\n')}`);
+          toolsUsed.push(`listFiles:${dir}`);
+          recentActions.push({
+            iter: iteration,
+            action: 'listFiles',
+            summary: `Listed ${files.length} files in ${dir}`,
+          });
         } else if (actionJson.action === 'executeCommand') {
           if (!actionJson.command) {
             encounteredError = true;
@@ -398,9 +453,16 @@ Output your response ONLY in valid JSON matching this schema:
 // Adapter for external CLI coding agents like Aider
 export class AiderAgentAdapter implements CodingAgent {
   name = 'AiderAgentAdapter';
+  public workspacePath: string;
   private toolbox: AgentToolbox;
 
   constructor(workspacePath: string) {
+    this.workspacePath = workspacePath;
+    this.toolbox = new AgentToolbox(workspacePath);
+  }
+
+  setWorkspacePath(workspacePath: string): void {
+    this.workspacePath = workspacePath;
     this.toolbox = new AgentToolbox(workspacePath);
   }
 
@@ -409,8 +471,9 @@ export class AiderAgentAdapter implements CodingAgent {
     targetFiles: string[] = [],
     abortSignal?: AbortSignal
   ): Promise<StepExecutionResult> {
-    const filesArg = targetFiles.join(' ');
-    const cmd = `aider --yes --message "${instruction.replace(/"/g, '\\"')}" ${filesArg}`;
+    const filesArg = targetFiles.map((f) => `"${f.replace(/"/g, '\\"')}"`).join(' ');
+    const escapedInstruction = instruction.replace(/"/g, '\\"');
+    const cmd = `aider --yes --message "${escapedInstruction}" ${filesArg}`.trim();
     const result = await this.toolbox.executeCommand(cmd, 180000, {}, abortSignal);
 
     return {
@@ -421,5 +484,60 @@ export class AiderAgentAdapter implements CodingAgent {
       exitCode: result.exitCode,
       failureReason: result.exitCode === 0 ? undefined : `Aider CLI exited with code ${result.exitCode}`,
     };
+  }
+}
+
+// Adapter for Claude Code CLI agent
+export class ClaudeCodeAgentAdapter implements CodingAgent {
+  name = 'ClaudeCodeAgentAdapter';
+  public workspacePath: string;
+  private toolbox: AgentToolbox;
+
+  constructor(workspacePath: string) {
+    this.workspacePath = workspacePath;
+    this.toolbox = new AgentToolbox(workspacePath);
+  }
+
+  setWorkspacePath(workspacePath: string): void {
+    this.workspacePath = workspacePath;
+    this.toolbox = new AgentToolbox(workspacePath);
+  }
+
+  async executeStep(
+    instruction: string,
+    targetFiles: string[] = [],
+    abortSignal?: AbortSignal
+  ): Promise<StepExecutionResult> {
+    const filesHint = targetFiles.length > 0 ? ` Target files: ${targetFiles.join(', ')}.` : '';
+    const fullPrompt = `${instruction}${filesHint}`.replace(/"/g, '\\"');
+    const cmd = `claude -p "${fullPrompt}"`;
+    const result = await this.toolbox.executeCommand(cmd, 240000, {}, abortSignal);
+
+    return {
+      agentName: this.name,
+      success: result.exitCode === 0,
+      logs: `${result.stdout}\n${result.stderr}`,
+      toolsUsed: ['claude-code-cli'],
+      exitCode: result.exitCode,
+      failureReason: result.exitCode === 0 ? undefined : `Claude Code CLI exited with code ${result.exitCode}`,
+    };
+  }
+}
+
+export function createAgent(
+  type: string = 'builtin',
+  workspacePath: string,
+  onRequestApproval?: ApprovalCallback,
+  modelClient?: GenAIClient
+): CodingAgent {
+  switch (type.toLowerCase()) {
+    case 'aider':
+      return new AiderAgentAdapter(workspacePath);
+    case 'claude':
+    case 'claudecode':
+      return new ClaudeCodeAgentAdapter(workspacePath);
+    case 'builtin':
+    default:
+      return new BuiltInAutonomousAgent(workspacePath, onRequestApproval, modelClient);
   }
 }

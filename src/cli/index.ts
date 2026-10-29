@@ -44,6 +44,8 @@ program
   .requiredOption('-p, --prompt <string>', 'User coding requirement or task objective')
   .option('-w, --workspace <path>', 'Target repository workspace path', '.')
   .option('-r, --retries <number>', 'Maximum self-repair retry budget', String(config.maxRetryBudget))
+  .option('-a, --agent <string>', 'Coding agent adapter (builtin, aider, claude)', 'builtin')
+  .option('-m, --merge', 'Auto-merge verified task branch into parent branch on success', false)
   .action(async (opts) => {
     await initDatabase();
     const authorizedWorkspace = SecurityPolicyEngine.validateWorkspaceAuthorization(
@@ -53,12 +55,16 @@ program
     );
     const resolvedWorkspace = SecurityPolicyEngine.assertPathContainment(authorizedWorkspace, authorizedWorkspace);
     const maxRetries = parseInt(opts.retries, 10);
+    const agentType = opts.agent as 'builtin' | 'aider' | 'claude';
+    const autoMerge = Boolean(opts.merge);
 
     console.log(chalk.bold.magenta('\n======================================================'));
     console.log(chalk.bold.magenta('      AUTONOMOUS AI CODING ORCHESTRATOR               '));
     console.log(chalk.bold.magenta('======================================================\n'));
     console.log(chalk.white(`Workspace:  ${chalk.cyan(resolvedWorkspace)}`));
     console.log(chalk.white(`Objective:  ${chalk.yellow(opts.prompt)}`));
+    console.log(chalk.white(`Agent:      ${chalk.magenta(agentType)}`));
+    console.log(chalk.white(`Auto-Merge: ${autoMerge ? chalk.green('Enabled') : chalk.gray('Disabled')}`));
     console.log(chalk.white(`Max Retries: ${chalk.green(maxRetries)}\n`));
 
     // Listen to real-time events and format for terminal
@@ -103,6 +109,14 @@ program
           break;
         case 'TASK_COMPLETED':
           console.log(`\n${time} ${chalk.bold.green('🎉 MISSION COMPLETE:')} ${e.message}\n`);
+          if (e.data?.taskBranchName) {
+            console.log(chalk.cyan(`   Verified commits preserved on branch: ${chalk.bold(e.data.taskBranchName)}`));
+            if (autoMerge) {
+              console.log(chalk.green(`   Auto-merged branch ${e.data.taskBranchName} into working tree.`));
+            } else {
+              console.log(chalk.gray(`   To merge these verified changes into your branch, run: git merge ${e.data.taskBranchName}\n`));
+            }
+          }
           process.exit(0);
           break;
         case 'TASK_PARTIALLY_COMPLETED':
@@ -133,6 +147,8 @@ program
         prompt: opts.prompt,
         workspacePath: resolvedWorkspace,
         maxRetries,
+        agentType,
+        autoMerge,
       });
     } catch (err: any) {
       console.error(chalk.red('Fatal orchestrator failure:'), err);

@@ -55,7 +55,8 @@ export class IndependentVerifier {
     meta: ProjectMetadata,
     acceptanceCriteria: string[] = [],
     customVerificationCmd?: string,
-    baseCommit?: string
+    baseCommit?: string,
+    options?: { isIntermediateStep?: boolean }
   ): Promise<VerificationReport> {
     const blockingReasons: string[] = [];
     const diagnosticsList: string[] = [];
@@ -176,6 +177,15 @@ export class IndependentVerifier {
     // Security check for sensitive secret files across ALL cumulative changes
     for (const f of allCumulativeFiles) {
       const lower = f.toLowerCase();
+      // Allow harmless example / template / distribution files
+      if (
+        lower.endsWith('.example') ||
+        lower.endsWith('.sample') ||
+        lower.endsWith('.template') ||
+        lower.endsWith('.dist')
+      ) {
+        continue;
+      }
       if (
         lower.includes('.env') ||
         lower.includes('credentials') ||
@@ -189,24 +199,54 @@ export class IndependentVerifier {
       }
     }
 
-    // Anti-Tamper Check: Detect suspicious test bypassing / skipping inserted into diff
+    // Anti-Tamper & Content Check: Inspect added lines across diff
+    const addedTestLines: string[] = [];
+    const addedPackageJsonLines: string[] = [];
+    const addedAllLines: string[] = [];
+    let currentDiffFile = '';
+
+    for (const line of diff.split('\n')) {
+      if (line.startsWith('diff --git ')) {
+        const match = line.match(/^diff --git\s+a\/(.+?)\s+b\/(.+?)$/);
+        currentDiffFile = match ? match[2].trim() : '';
+      } else if (line.startsWith('+') && !line.startsWith('+++')) {
+        const added = line.slice(1);
+        addedAllLines.push(added);
+        if (/(\.test\.|\.spec\.|[\\/]tests?[\\/])/i.test(currentDiffFile)) {
+          addedTestLines.push(added);
+        }
+        if (currentDiffFile.endsWith('package.json')) {
+          addedPackageJsonLines.push(added);
+        }
+      }
+    }
+
+    // Anti-Tamper Check: Detect suspicious test bypassing / skipping inserted into test files
+    const testDiffContent = addedTestLines.join('\n');
     if (
-      diff.includes('test.skip') ||
-      diff.includes('it.skip') ||
-      diff.includes('describe.skip') ||
-      diff.includes('@pytest.mark.skip')
+      /\b(test\.skip|it\.skip|describe\.skip|xit|xdescribe)\s*\(/i.test(testDiffContent) ||
+      /@pytest\.mark\.skip/i.test(testDiffContent)
     ) {
       hasSuspiciousDeletions = true;
-      diffNotes.push('Anti-Tamper Warning: Suspicious test-skipping statements detected in diff.');
+      diffNotes.push('Anti-Tamper Warning: Suspicious test-skipping statements detected in test diff.');
       blockingReasons.push('Test assertions were bypassed or marked skipped in diff.');
     }
 
-    // Placeholder Stubs Detection
+    // Anti-Tamper Check: Detect package.json test script tampering to exit 0 trivially
+    const pkgDiffContent = addedPackageJsonLines.join('\n');
+    if (/\"test\"\s*:\s*\"(exit\s*0|true|echo\b.*exit\s*0)\"/i.test(pkgDiffContent)) {
+      hasForbiddenModifications = true;
+      diffNotes.push('Anti-Tamper Warning: package.json test script modified to trivially exit 0.');
+      blockingReasons.push('Anti-tamper violation: package.json test script was modified to trivially exit 0.');
+    }
+
+    // Placeholder Stubs Detection in added lines
+    const addedCodeContent = addedAllLines.join('\n');
     if (
-      /\/\/\s*TODO:\s*implement/i.test(diff) ||
-      /#\s*TODO:\s*implement/i.test(diff) ||
-      /\bthrow new NotImplementedError\b/i.test(diff) ||
-      /\bpass\s*#\s*todo\b/i.test(diff)
+      /\/\/\s*TODO:\s*implement/i.test(addedCodeContent) ||
+      /#\s*TODO:\s*implement/i.test(addedCodeContent) ||
+      /\bthrow new NotImplementedError\b/i.test(addedCodeContent) ||
+      /\bpass\s*#\s*todo\b/i.test(addedCodeContent)
     ) {
       hasPlaceholderStubs = true;
       diffNotes.push('Placeholder stub or unimplemented function found in diff.');
@@ -214,9 +254,13 @@ export class IndependentVerifier {
     }
 
     // 5. Explicit Acceptance Criteria Verification
-    // P1 FIX: Acceptance criteria must map to explicit, testable requirements.
-    // Loose keyword matching is rejected. Exact check, exit code, and evidence are recorded.
-    if (!acceptanceCriteria || acceptanceCriteria.length === 0) {
+    // Intermediate step check vs Final task verification gate
+    if (options?.isIntermediateStep) {
+      // For intermediate milestones: verify step command or build syntax; do not evaluate final semantic criteria
+      if (customVerificationCmd && testCheck.status === 'FAILED') {
+        blockingReasons.push(`Step verification command failed: ${customVerificationCmd}`);
+      }
+    } else if (!acceptanceCriteria || acceptanceCriteria.length === 0) {
       blockingReasons.push('No acceptance criteria specified for task verification.');
     } else {
       for (const criterion of acceptanceCriteria) {
@@ -323,6 +367,7 @@ export class IndependentVerifier {
     if (hasActiveFailures) {
       status = 'FAILED';
     } else if (
+      !options?.isIntermediateStep &&
       buildCheck.status === 'NOT_CONFIGURED' &&
       testCheck.status === 'NOT_CONFIGURED' &&
       !customVerificationCmd

@@ -180,6 +180,9 @@ ${repoMeta.fileTreeSummary.slice(0, 40).join('\n')}
       const parsed = JSON.parse(response?.text || '{}');
       return ExecutionPlanSchema.parse(parsed);
     } catch (err: any) {
+      if (process.env.REQUIRE_LLM === 'true') {
+        throw new Error(`Gemini Plan Generation failed and REQUIRE_LLM=true: ${err?.message}`);
+      }
       console.warn('Gemini Plan Generation failed schema validation, using validated fallback plan:', err?.message);
       return this.generateFallbackPlan(prompt, repoMeta);
     }

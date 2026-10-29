@@ -102,6 +102,8 @@ export default function App() {
   const [newPrompt, setNewPrompt] = useState('');
   const [newWorkspace, setNewWorkspace] = useState('');
   const [newRetries, setNewRetries] = useState(3);
+  const [selectedAgent, setSelectedAgent] = useState<'builtin' | 'aider' | 'claude'>('builtin');
+  const [autoMerge, setAutoMerge] = useState(false);
   const [apiKeyInput, setApiKeyInput] = useState('');
   const [modelInput, setModelInput] = useState('gemini-2.5-flash');
 
@@ -309,6 +311,8 @@ export default function App() {
           prompt: newPrompt,
           workspacePath: newWorkspace,
           maxRetries: newRetries,
+          agent: selectedAgent,
+          autoMerge,
         }),
       });
 
@@ -810,6 +814,36 @@ export default function App() {
                   value={newWorkspace}
                   onChange={(e) => setNewWorkspace(e.target.value)}
                 />
+                <small style={{ color: '#64748b', fontSize: '0.75rem', marginTop: '0.25rem', display: 'block' }}>
+                  Must be within authorized workspace roots (configured in .env under ALLOWED_DIRECTORIES).
+                </small>
+              </div>
+
+              <div className="form-group">
+                <label>Coding Agent Adapter</label>
+                <select
+                  className="form-input"
+                  value={selectedAgent}
+                  onChange={(e) => setSelectedAgent(e.target.value as any)}
+                  style={{ background: '#0f172a', color: '#f8fafc' }}
+                >
+                  <option value="builtin">Built-in Autonomous Agent (Gemini / Multi-Tool)</option>
+                  <option value="claude">Claude Code CLI Adapter</option>
+                  <option value="aider">Aider CLI Adapter</option>
+                </select>
+              </div>
+
+              <div className="form-group" style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginTop: '0.4rem' }}>
+                <input
+                  type="checkbox"
+                  id="autoMergeCheck"
+                  checked={autoMerge}
+                  onChange={(e) => setAutoMerge(e.target.checked)}
+                  style={{ width: '1.1rem', height: '1.1rem', cursor: 'pointer' }}
+                />
+                <label htmlFor="autoMergeCheck" style={{ cursor: 'pointer', marginBottom: 0 }}>
+                  Auto-merge verified task branch into base branch upon completion
+                </label>
               </div>
 
               <div className="form-group">
