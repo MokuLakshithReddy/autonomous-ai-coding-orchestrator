@@ -1,7 +1,7 @@
 import { Command } from 'commander';
 import chalk from 'chalk';
 import path from 'node:path';
-import { createServer } from '../server/index.js';
+import { createServer, serverApiToken } from '../server/index.js';
 import { orchestrator, type OrchestratorEvent } from '../orchestrator/engine.js';
 import { initDatabase, taskRepo } from '../db/index.js';
 import { RepoInspector } from '../repo/inspector.js';
@@ -29,8 +29,9 @@ program
     try {
       const address = await server.listen({ port, host });
       console.log(chalk.green(`\n✓ Server listening at: ${chalk.bold(address)}`));
+      console.log(chalk.cyan(`✓ Web Dashboard: ${chalk.bold(`${address}/?token=${serverApiToken}`)}`));
       console.log(chalk.blue(`✓ Realtime WebSocket: ${chalk.bold(`ws://${host}:${port}/ws`)}`));
-      console.log(chalk.yellow(`✓ API Endpoints active at /api/tasks, /api/repo/inspect, /api/system/status\n`));
+      console.log(chalk.yellow(`✓ API Auth Token: ${chalk.bold(serverApiToken)}\n`));
     } catch (err: any) {
       console.error(chalk.red('Failed to start server:'), err);
       process.exit(1);

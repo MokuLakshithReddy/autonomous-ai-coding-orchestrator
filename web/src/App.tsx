@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   Play,
   Terminal,
@@ -15,7 +15,10 @@ import {
   Layers,
   ArrowRight,
   ShieldAlert,
-  FolderGit2
+  FolderGit2,
+  Key,
+  Lock,
+  Unlock
 } from 'lucide-react';
 
 interface Task {
@@ -82,6 +85,15 @@ export default function App() {
   const [logs, setLogs] = useState<WsEvent[]>([]);
   const [activeTab, setActiveTab] = useState<'stream' | 'verifications' | 'diff'>('stream');
 
+  // Authentication states
+  const [apiToken, setApiToken] = useState<string>(() => {
+    return localStorage.getItem('orchestrator_api_token') || '';
+  });
+  const [tokenInput, setTokenInput] = useState<string>('');
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
+  const [showAuthModal, setShowAuthModal] = useState<boolean>(false);
+  const [authError, setAuthError] = useState<string>('');
+
   // Modals
   const [showNewTaskModal, setShowNewTaskModal] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
@@ -96,6 +108,32 @@ export default function App() {
   const terminalEndRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
 
+  // Authenticated fetch wrapper
+  const apiFetch = useCallback(
+    async (url: string, options: RequestInit = {}, explicitToken?: string) => {
+      const token = explicitToken ?? (apiToken || localStorage.getItem('orchestrator_api_token') || '');
+      const headers: Record<string, string> = {
+        ...((options.headers as Record<string, string>) || {}),
+      };
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+        headers['x-api-token'] = token;
+      }
+
+      const res = await fetch(url, { ...options, headers });
+      if (res.status === 401) {
+        setIsAuthenticated(false);
+        setShowAuthModal(true);
+        setAuthError('Authentication required or token expired. Please enter your API token.');
+      } else if (res.ok) {
+        setIsAuthenticated(true);
+        setAuthError('');
+      }
+      return res;
+    },
+    [apiToken]
+  );
+
   // Load system status & task list
   const fetchStatus = async () => {
     try {
@@ -108,20 +146,22 @@ export default function App() {
     } catch {}
   };
 
-  const fetchTasks = async () => {
+  const fetchTasks = async (overrideToken?: string) => {
     try {
-      const res = await fetch('/api/tasks');
-      const data = await res.json();
-      setTasks(data.tasks || []);
-      if (data.tasks?.length > 0 && !selectedTaskId) {
-        setSelectedTaskId(data.tasks[0].id);
+      const res = await apiFetch('/api/tasks', {}, overrideToken);
+      if (res.ok) {
+        const data = await res.json();
+        setTasks(data.tasks || []);
+        if (data.tasks?.length > 0 && !selectedTaskId) {
+          setSelectedTaskId(data.tasks[0].id);
+        }
       }
     } catch {}
   };
 
-  const fetchTaskDetails = async (id: string) => {
+  const fetchTaskDetails = async (id: string, overrideToken?: string) => {
     try {
-      const res = await fetch(`/api/tasks/${id}`);
+      const res = await apiFetch(`/api/tasks/${id}`, {}, overrideToken);
       if (res.ok) {
         const data = await res.json();
         setTaskDetails(data);
@@ -129,44 +169,115 @@ export default function App() {
     } catch {}
   };
 
-  const inspectRepo = async (workspacePath: string) => {
+  const inspectRepo = async (workspacePath: string, overrideToken?: string) => {
     try {
-      const res = await fetch('/api/repo/inspect', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ workspacePath }),
-      });
-      const data = await res.json();
-      setRepoMeta(data.meta);
+      const res = await apiFetch(
+        '/api/repo/inspect',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ workspacePath }),
+        },
+        overrideToken
+      );
+      if (res.ok) {
+        const data = await res.json();
+        setRepoMeta(data.meta);
+      }
     } catch {}
   };
 
-  // WebSocket Connection
-  useEffect(() => {
-    fetchStatus();
-    fetchTasks();
+  // Authenticated WebSocket Connection
+  const connectWs = useCallback(
+    async (tokenToUse?: string) => {
+      if (wsRef.current) {
+        wsRef.current.close();
+        wsRef.current = null;
+      }
 
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/ws`;
-    const ws = new WebSocket(wsUrl);
-    wsRef.current = ws;
+      const token = tokenToUse ?? (apiToken || localStorage.getItem('orchestrator_api_token') || '');
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      let wsUrl = `${protocol}//${window.location.host}/ws`;
 
-    ws.onmessage = (event) => {
-      try {
-        const parsed: WsEvent = JSON.parse(event.data);
-        setLogs((prev) => [...prev.slice(-300), parsed]);
-
-        if (parsed.taskId) {
-          fetchTasks();
-          if (parsed.taskId === selectedTaskId) {
-            fetchTaskDetails(parsed.taskId);
+      if (token) {
+        try {
+          const ticketRes = await fetch('/api/auth/ws-ticket', {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${token}`,
+              'x-api-token': token,
+            },
+          });
+          if (ticketRes.ok) {
+            const { ticket } = await ticketRes.json();
+            if (ticket) {
+              wsUrl += `?ticket=${encodeURIComponent(ticket)}`;
+            }
           }
+        } catch (err) {
+          console.warn('Could not acquire WS ticket pre-handshake:', err);
         }
-      } catch {}
-    };
+      }
+
+      const ws = new WebSocket(wsUrl);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        if (token) {
+          ws.send(JSON.stringify({ type: 'AUTH', token }));
+        }
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const parsed: WsEvent = JSON.parse(event.data);
+          setLogs((prev) => [...prev.slice(-300), parsed]);
+
+          if (parsed.taskId) {
+            fetchTasks(token);
+            if (parsed.taskId === selectedTaskId) {
+              fetchTaskDetails(parsed.taskId, token);
+            }
+          }
+        } catch {}
+      };
+
+      ws.onclose = (event) => {
+        if (event.code === 1008) {
+          setIsAuthenticated(false);
+          console.warn('WebSocket closed due to auth failure (1008)');
+        }
+      };
+    },
+    [apiToken, selectedTaskId, apiFetch]
+  );
+
+  useEffect(() => {
+    const urlParams = new URLSearchParams(window.location.search);
+    const tokenFromUrl = urlParams.get('token');
+    let effectiveToken = localStorage.getItem('orchestrator_api_token') || '';
+
+    if (tokenFromUrl) {
+      effectiveToken = tokenFromUrl.trim();
+      localStorage.setItem('orchestrator_api_token', effectiveToken);
+      urlParams.delete('token');
+      const cleanUrl = window.location.pathname + (urlParams.toString() ? `?${urlParams.toString()}` : '');
+      window.history.replaceState({}, '', cleanUrl);
+    }
+
+    setApiToken(effectiveToken);
+    setTokenInput(effectiveToken);
+
+    fetchStatus();
+    if (effectiveToken) {
+      fetchTasks(effectiveToken);
+      connectWs(effectiveToken);
+    } else {
+      setShowAuthModal(true);
+    }
 
     return () => {
-      ws.close();
+      wsRef.current?.close();
     };
   }, []);
 
@@ -191,7 +302,7 @@ export default function App() {
     if (!newPrompt.trim()) return;
 
     try {
-      const res = await fetch('/api/tasks', {
+      const res = await apiFetch('/api/tasks', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -207,6 +318,9 @@ export default function App() {
         setNewPrompt('');
         fetchTasks();
         setSelectedTaskId(data.task.id);
+      } else {
+        const errData = await res.json().catch(() => ({}));
+        alert(`Failed to launch task: ${errData.message || res.statusText || 'Unauthorized'}`);
       }
     } catch (err) {
       alert('Failed to launch task.');
@@ -216,22 +330,72 @@ export default function App() {
   const handleSaveSettings = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      await fetch('/api/config/gemini', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ apiKey: apiKeyInput, model: modelInput }),
-      });
+      if (apiKeyInput) {
+        const res = await apiFetch('/api/config/gemini', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ apiKey: apiKeyInput, model: modelInput }),
+        });
+        if (!res.ok) {
+          throw new Error('Failed to update Gemini config');
+        }
+      }
+
+      if (tokenInput.trim()) {
+        const trimmed = tokenInput.trim();
+        localStorage.setItem('orchestrator_api_token', trimmed);
+        setApiToken(trimmed);
+        fetchTasks(trimmed);
+        connectWs(trimmed);
+      }
+
       setShowSettingsModal(false);
       fetchStatus();
-      alert('Gemini settings updated!');
+      alert('Settings updated successfully!');
     } catch {
       alert('Failed to update settings');
     }
   };
 
+  const handleConnectAuth = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const candidate = tokenInput.trim();
+    if (!candidate) {
+      setAuthError('Please enter a valid API token');
+      return;
+    }
+
+    try {
+      const testRes = await fetch('/api/tasks', {
+        headers: {
+          'Authorization': `Bearer ${candidate}`,
+          'x-api-token': candidate,
+        },
+      });
+
+      if (testRes.ok) {
+        localStorage.setItem('orchestrator_api_token', candidate);
+        setApiToken(candidate);
+        setIsAuthenticated(true);
+        setShowAuthModal(false);
+        setAuthError('');
+        const data = await testRes.json();
+        setTasks(data.tasks || []);
+        if (data.tasks?.length > 0 && !selectedTaskId) {
+          setSelectedTaskId(data.tasks[0].id);
+        }
+        connectWs(candidate);
+      } else {
+        setAuthError('Authentication failed: Invalid API token.');
+      }
+    } catch (err: any) {
+      setAuthError(`Connection error: ${err.message || 'Cannot reach server'}`);
+    }
+  };
+
   const handleApprove = async (approvalId: string, status: 'APPROVED' | 'REJECTED') => {
     try {
-      await fetch(`/api/approvals/${approvalId}/respond`, {
+      await apiFetch(`/api/approvals/${approvalId}/respond`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status }),
@@ -270,6 +434,37 @@ export default function App() {
             <span>Independent Verifier: <strong>Enforcing</strong></span>
           </div>
 
+          <button
+            className="status-indicator"
+            style={{
+              cursor: 'pointer',
+              background: isAuthenticated ? 'rgba(16, 185, 129, 0.1)' : 'rgba(245, 158, 11, 0.1)',
+              border: `1px solid ${isAuthenticated ? 'rgba(16, 185, 129, 0.3)' : 'rgba(245, 158, 11, 0.3)'}`,
+              borderRadius: 20,
+              padding: '0.35rem 0.75rem',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '0.4rem',
+            }}
+            onClick={() => {
+              setTokenInput(apiToken);
+              setShowAuthModal(true);
+            }}
+            title="Click to manage Orchestrator Server API Token"
+          >
+            {isAuthenticated ? (
+              <>
+                <Key size={14} color="#10b981" />
+                <span style={{ color: '#10b981' }}>API Connected</span>
+              </>
+            ) : (
+              <>
+                <ShieldAlert size={14} color="#f59e0b" />
+                <span style={{ color: '#f59e0b' }}>Auth Required</span>
+              </>
+            )}
+          </button>
+
           <button className="new-task-btn" onClick={() => setShowNewTaskModal(true)}>
             <PlusCircle size={15} />
             <span>New Task</span>
@@ -291,7 +486,7 @@ export default function App() {
               Tasks & Missions
             </span>
             <button
-              onClick={fetchTasks}
+              onClick={() => fetchTasks()}
               style={{ background: 'none', border: 'none', color: '#64748b', cursor: 'pointer' }}
             >
               <RefreshCw size={14} />
@@ -642,16 +837,73 @@ export default function App() {
         </div>
       )}
 
+      {/* Auth Modal */}
+      {showAuthModal && (
+        <div className="modal-overlay" onClick={() => setShowAuthModal(false)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginBottom: '0.5rem' }}>
+              <div style={{ padding: '0.5rem', background: 'rgba(99, 102, 241, 0.15)', borderRadius: 8 }}>
+                <Key size={20} color="#6366f1" />
+              </div>
+              <h2 className="modal-title" style={{ margin: 0 }}>API Authentication Required</h2>
+            </div>
+            <p style={{ fontSize: '0.825rem', color: '#94a3b8', marginBottom: '1rem' }}>
+              The Orchestrator protects execution endpoints with an API Token. Enter your server's token (found in your startup terminal or <code>API_TOKEN</code> in your environment) to connect.
+            </p>
+
+            {authError && (
+              <div style={{ background: 'rgba(239, 68, 68, 0.15)', border: '1px solid #ef4444', borderRadius: 8, padding: '0.6rem 0.8rem', fontSize: '0.8rem', color: '#fca5a5', marginBottom: '1rem' }}>
+                {authError}
+              </div>
+            )}
+
+            <form onSubmit={handleConnectAuth}>
+              <div className="form-group">
+                <label>Orchestrator Server API Token *</label>
+                <input
+                  type="password"
+                  className="form-input"
+                  required
+                  placeholder="Paste 48-char hex token or configured API token"
+                  value={tokenInput}
+                  onChange={(e) => setTokenInput(e.target.value)}
+                />
+              </div>
+
+              <div className="modal-actions">
+                <button type="button" className="btn-secondary" onClick={() => setShowAuthModal(false)}>
+                  Cancel
+                </button>
+                <button type="submit" className="btn-primary">
+                  Connect & Authenticate
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
       {/* Settings Modal */}
       {showSettingsModal && (
         <div className="modal-overlay" onClick={() => setShowSettingsModal(false)}>
           <div className="modal-content" onClick={(e) => e.stopPropagation()}>
-            <h2 className="modal-title">Brain Provider Settings</h2>
-            <p style={{ fontSize: '0.825rem', color: '#94a3b8' }}>
-              Configure your Google Gemini Brain credentials and preferred model.
+            <h2 className="modal-title">Orchestrator & Brain Settings</h2>
+            <p style={{ fontSize: '0.825rem', color: '#94a3b8', marginBottom: '1rem' }}>
+              Configure your server API token, Gemini credentials, and model.
             </p>
 
             <form onSubmit={handleSaveSettings}>
+              <div className="form-group">
+                <label>Orchestrator Server API Token</label>
+                <input
+                  type="password"
+                  className="form-input"
+                  placeholder="Paste API token..."
+                  value={tokenInput}
+                  onChange={(e) => setTokenInput(e.target.value)}
+                />
+              </div>
+
               <div className="form-group">
                 <label>Gemini API Key</label>
                 <input

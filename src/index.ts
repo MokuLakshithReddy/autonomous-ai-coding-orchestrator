@@ -21,6 +21,7 @@ async function bootstrap() {
   console.log(`   AUTONOMOUS AI CODING ORCHESTRATOR IS ACTIVE       `);
   console.log(`======================================================`);
   console.log(`Server URL:        ${address}`);
+  console.log(`Web Dashboard:     ${address}/?token=${serverApiToken}`);
   console.log(`Realtime Stream:   ws://${config.host}:${config.port}/ws`);
   console.log(`API Auth Token:    ${serverApiToken}`);
   console.log(`SQLite Database:   ${config.databaseUrl}`);
