@@ -218,7 +218,7 @@ export class IndependentVerifier {
       } else if (line.startsWith('+') && !line.startsWith('+++')) {
         const added = line.slice(1);
         addedAllLines.push(added);
-        if (/(\.test\.|\.spec\.|[\\/]tests?[\\/])/i.test(currentDiffFile)) {
+        if (/(\.test\.|\.spec\.|(^|[\\/])tests?(\.|\/)|(^|[\\/])test_[a-z0-9_]+\.py)/i.test(currentDiffFile)) {
           addedTestLines.push(added);
           if (/\b(assert|expect|test|it)\s*[\.(]/i.test(added)) {
             addedAssertionCount++;
@@ -229,7 +229,7 @@ export class IndependentVerifier {
         }
       } else if (line.startsWith('-') && !line.startsWith('---')) {
         const deleted = line.slice(1);
-        if (/(\.test\.|\.spec\.|[\\/]tests?[\\/])/i.test(currentDiffFile)) {
+        if (/(\.test\.|\.spec\.|(^|[\\/])tests?(\.|\/)|(^|[\\/])test_[a-z0-9_]+\.py)/i.test(currentDiffFile)) {
           deletedTestLines.push(deleted);
           if (/\b(assert|expect|test|it)\s*[\.(]/i.test(deleted)) {
             deletedAssertionCount++;
@@ -546,7 +546,7 @@ export class IndependentVerifier {
       } else if (line.startsWith('+') && !line.startsWith('+++')) {
         const added = line.slice(1);
         addedAllLines.push(added);
-        if (/(\.test\.|\.spec\.|[\\/]tests?[\\/])/i.test(currentDiffFile)) {
+        if (/(\.test\.|\.spec\.|(^|[\\/])tests?(\.|\/)|(^|[\\/])test_[a-z0-9_]+\.py)/i.test(currentDiffFile)) {
           addedTestLines.push(added);
           if (/\b(assert|expect|test|it)\s*[\.(]/i.test(added)) {
             addedAssertionCount++;
@@ -557,7 +557,7 @@ export class IndependentVerifier {
         }
       } else if (line.startsWith('-') && !line.startsWith('---')) {
         const deleted = line.slice(1);
-        if (/(\.test\.|\.spec\.|[\\/]tests?[\\/])/i.test(currentDiffFile)) {
+        if (/(\.test\.|\.spec\.|(^|[\\/])tests?(\.|\/)|(^|[\\/])test_[a-z0-9_]+\.py)/i.test(currentDiffFile)) {
           deletedTestLines.push(deleted);
           if (/\b(assert|expect|test|it)\s*[\.(]/i.test(deleted)) {
             deletedAssertionCount++;

@@ -314,8 +314,8 @@ export class SecurityPolicyEngine {
       normalized.includes('.gcloud/') ||
       base.includes('credential') ||
       base.includes('secret') ||
-      base.includes('token') ||
       base.includes('password') ||
+      (base.includes('token') && !/\.(js|ts|jsx|tsx|py|go|rs|java|c|cpp|cs|rb|php)$/i.test(base)) ||
       base.includes('private_key') ||
       base.endsWith('.pem') ||
       base.endsWith('.key') ||
@@ -482,7 +482,7 @@ export class SecurityPolicyEngine {
 
     // 3. Dynamic interpreters, obfuscation, and unconstrained script evaluation
     if (
-      /\b(python(\d)?\s+(-c|-m)|node\s+-e|perl\s+-e|ruby\s+-e|php\s+-r|eval\b|base64|iex\b)/i.test(
+      /\b(python(\d)?\s+-c|python(\d)?\s+-m\s+(?!pytest\b|unittest\b|ruff\b)|node\s+-e|perl\s+-e|ruby\s+-e|php\s+-r|eval\b|base64|iex\b)/i.test(
         lower
       ) ||
       /(?:^|\s)(powershell(\.exe)?|pwsh(\.exe)?|bash|sh|zsh|cmd(\.exe)?)(?:\s|$)/i.test(
@@ -518,7 +518,7 @@ export class SecurityPolicyEngine {
       /^(npm|npm\.cmd|pnpm|yarn)\s+(run\s+)?(build|test|lint|ci|install)(\s+.*)?$/i.test(lower) ||
       /^(npx|npx\.cmd)\s+(tsc|jest|vitest|eslint|prettier)(\s+.*)?$/i.test(lower) ||
       /^(tsc|tsc\.cmd)(\s+.*)?$/i.test(lower) ||
-      /^(python|python3)\s+-m\s+(pytest|unittest)(\s+.*)?$/i.test(lower) ||
+      /^(python|python3)\s+-m\s+(pytest|unittest|ruff|flake8)(\s+.*)?$/i.test(lower) ||
       /^pytest(\s+.*)?$/i.test(lower) ||
       /^cargo\s+(test|build|check|clippy)(\s+.*)?$/i.test(lower) ||
       /^go\s+(test|build)(\s+.*)?$/i.test(lower) ||

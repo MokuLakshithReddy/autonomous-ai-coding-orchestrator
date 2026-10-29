@@ -466,10 +466,20 @@ export class RepoInspector {
     try {
       const hasPyproject = await fs.access(path.join(this.workspacePath, 'pyproject.toml')).then(() => true).catch(() => false);
       const hasRequirements = await fs.access(path.join(this.workspacePath, 'requirements.txt')).then(() => true).catch(() => false);
-      if (hasPyproject || hasRequirements) {
-        ecosystems.push('python');
-        if (!testCmd) testCmd = 'python -m pytest';
-        if (!lintCmd) lintCmd = 'python -m ruff check .';
+      const entries = await fs.readdir(this.workspacePath).catch(() => []);
+      const hasPyFiles = entries.some((f) => f.endsWith('.py'));
+      if (hasPyproject || hasRequirements || hasPyFiles) {
+        if (!ecosystems.includes('python')) ecosystems.push('python');
+        const hasTestPy = entries.some((f) => /test_.*\.py$|.*_test\.py$/i.test(f));
+        if (!testCmd && hasTestPy) {
+          testCmd = 'python -m unittest';
+        } else if (!testCmd && (hasPyproject || hasRequirements)) {
+          testCmd = 'python -m pytest';
+        }
+        const hasRuff =
+          (await fs.access(path.join(this.workspacePath, 'ruff.toml')).then(() => true).catch(() => false)) ||
+          (await fs.access(path.join(this.workspacePath, '.ruff.toml')).then(() => true).catch(() => false));
+        if (hasRuff && !lintCmd) lintCmd = 'python -m ruff check .';
       }
     } catch {}
 

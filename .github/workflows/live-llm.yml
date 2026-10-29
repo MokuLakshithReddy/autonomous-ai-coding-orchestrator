@@ -52,6 +52,7 @@ jobs:
         run: |
           npm run test:llm
           npm run test:benchmarks:live
+          npm run benchmark:live || npm run benchmark
 
       - name: Archive Benchmark Evaluation Report
         if: always()
@@ -61,4 +62,6 @@ jobs:
           path: |
             benchmark-report.json
             benchmark-report.md
+            benchmarks/results.json
+            docs/BENCHMARKS.md
 
