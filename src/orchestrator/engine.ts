@@ -794,12 +794,37 @@ export class OrchestrationEngine extends EventEmitter {
         try {
           const mainGit = (inspector as any).git;
           const currentStatus = await inspector.getGitStatus();
-          const currentBranch = currentStatus?.current;
+          if (!currentStatus) {
+            throw new Error('Cannot inspect destination git status prior to auto-merge.');
+          }
 
+          // P0/P1 FIX: Establish that destination working tree is 100% clean before attempting merge
+          if (currentStatus.files.length > 0) {
+            throw new Error(
+              `Cannot auto-merge: destination working tree has uncommitted or dirty changes (${currentStatus.files
+                .map((f) => f.path)
+                .join(', ')}). Aborting auto-merge to protect user uncommitted work.`
+            );
+          }
+
+          const currentBranch = currentStatus.current;
           // Verify destination branch is still the original base branch
           if (!currentBranch || (baseline && currentBranch !== baseline.branch)) {
             throw new Error(
-              `Target checkout changed: currently on "${currentBranch}", expected base branch "${baseline?.branch}".`
+              `Target checkout branch changed: currently on "${currentBranch}", expected base branch "${baseline?.branch}".`
+            );
+          }
+
+          // P0/P1 FIX: Capture exact pre-merge commit and verify it matches baseline HEAD
+          const preMergeLog = await mainGit.log({ maxCount: 1 });
+          const preMergeCommit = preMergeLog.latest ? preMergeLog.latest.hash : null;
+          if (!preMergeCommit) {
+            throw new Error('Cannot determine pre-merge HEAD commit in destination repository.');
+          }
+
+          if (baseline?.baseCommit && baseline.baseCommit !== 'initial' && preMergeCommit !== baseline.baseCommit) {
+            throw new Error(
+              `Cannot auto-merge: destination branch HEAD moved from baseline commit (${baseline.baseCommit}) to (${preMergeCommit}) during task execution. Aborting auto-merge to prevent clobbering new commits.`
             );
           }
 
@@ -813,7 +838,16 @@ export class OrchestrationEngine extends EventEmitter {
           }
 
           // Perform merge
-          await mainGit.merge([taskBranchName]);
+          try {
+            await mainGit.merge([taskBranchName]);
+          } catch (mergeConflictErr: any) {
+            try {
+              await mainGit.merge(['--abort']);
+            } catch {}
+            throw new Error(
+              `Merge conflict detected while merging "${taskBranchName}" into "${currentBranch}": ${mergeConflictErr.message || mergeConflictErr}`
+            );
+          }
 
           // P1 FIX: Independent post-merge reverification on actual destination checkout (not worktree)
           const destinationVerifier = new IndependentVerifier(params.workspacePath);
@@ -821,18 +855,36 @@ export class OrchestrationEngine extends EventEmitter {
             repoMeta,
             plan.acceptanceCriteria,
             plan.steps[plan.steps.length - 1]?.verificationCommand || undefined,
-            baseline?.baseCommit || undefined
+            preMergeCommit
           );
 
           if (!postMergeReport.isVerified) {
-            // Roll back destination checkout to clean pre-merge baseline commit
+            // P0/P1 FIX: Safe recovery - ONLY roll back if destination checkout is clean and HEAD is still the merge commit
+            let rollbackSucceeded = false;
             try {
-              if (baseline?.baseCommit && baseline.baseCommit !== 'initial') {
-                await mainGit.reset(['--hard', baseline.baseCommit]);
+              const postVerificationStatus = await inspector.getGitStatus();
+              const postVerificationLog = await mainGit.log({ maxCount: 1 });
+              const currentHead = postVerificationLog.latest?.hash;
+
+              if (
+                postVerificationStatus &&
+                postVerificationStatus.files.length === 0 &&
+                currentHead &&
+                currentHead !== preMergeCommit
+              ) {
+                await mainGit.reset(['--hard', preMergeCommit]);
+                rollbackSucceeded = true;
               }
             } catch {}
+
             throw new Error(
-              `Post-merge independent verification failed on destination branch: ${postMergeReport.blockingReasons.join('; ')}`
+              `Post-merge independent verification failed on destination branch: ${postMergeReport.blockingReasons.join(
+                '; '
+              )}.${
+                rollbackSucceeded
+                  ? ' Auto-merge was safely rolled back to pre-merge commit.'
+                  : ' Destination branch preserved without reset to prevent clobbering user work; manual review required.'
+              }`
             );
           }
 

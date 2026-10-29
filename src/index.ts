@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import { createServer, serverApiToken } from './server/index.js';
 import { config } from './config/index.js';
 
@@ -17,13 +18,19 @@ async function bootstrap() {
     port: config.port,
     host: config.host,
   });
+
+  // P1 FIX: Store token in secure local file rather than printing plaintext secret to stdout
+  try {
+    fs.writeFileSync('.orchestrator-token', serverApiToken, { mode: 0o600 });
+  } catch {}
+
   console.log(`\n======================================================`);
   console.log(`   AUTONOMOUS AI CODING ORCHESTRATOR IS ACTIVE       `);
   console.log(`======================================================`);
   console.log(`Server URL:        ${address}`);
   console.log(`Web Dashboard:     ${address}`);
   console.log(`Realtime Stream:   ws://${config.host}:${config.port}/ws`);
-  console.log(`API Auth Token:    ${serverApiToken}`);
+  console.log(`API Auth Token:    [CONFIGURED] (Hidden for security; saved to .orchestrator-token)`);
   console.log(`SQLite Database:   ${config.databaseUrl}`);
   console.log(`Brain Model:       ${config.geminiModel}`);
   console.log(`Auto Repair:       ${config.autoRepairEnabled ? 'Enabled' : 'Disabled'}`);

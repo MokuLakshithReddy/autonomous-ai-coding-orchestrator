@@ -1,11 +1,17 @@
 import { spawn } from 'node:child_process';
 import { SecurityPolicyEngine } from './policy.js';
 
+export type ContainerCommandTarget =
+  | { type: 'shell'; commandStr: string }
+  | { type: 'exec'; executable: string; args: string[] };
+
 export interface ContainerSandboxOptions {
   enabled?: boolean;
   image?: string;
   networkMode?: 'none' | 'host' | 'bridge';
   user?: string;
+  env?: Record<string, string>;
+  forwardApiKeys?: boolean;
 }
 
 /**
@@ -32,18 +38,49 @@ export class ContainerSandbox {
     });
   }
 
+  /**
+   * P0 FIX: Mandatory fail-closed assertion for container isolation.
+   * If container isolation is configured or enforced, execution MUST fail closed
+   * rather than falling back to running untrusted code on the host OS.
+   */
+  static async assertSandboxAvailable(): Promise<void> {
+    const available = await this.isDockerAvailable();
+    if (!available) {
+      throw new Error(
+        'Security Exception [Sandbox Unavailable]: Mandatory container sandbox is enabled, but Docker is not available or running. Aborting command execution to prevent running untrusted repository code on the host OS.'
+      );
+    }
+  }
+
+  /**
+   * Builds container execution arguments with strict preservation of argument boundaries.
+   * Does NOT flatten executable arguments into shell strings, eliminating command-injection risks.
+   */
   static buildDockerRunArgs(
     workspacePath: string,
-    command: string,
+    target: string | ContainerCommandTarget,
     options: ContainerSandboxOptions = {}
   ): { executable: string; args: string[] } {
-    const image = options.image || 'node:22-alpine';
+    const normalizedTarget: ContainerCommandTarget =
+      typeof target === 'string'
+        ? { type: 'shell', commandStr: target }
+        : target;
+
+    // Ecosystem-aware default image selection
+    let defaultImage = 'node:22-bookworm-slim';
+    if (normalizedTarget.type === 'exec') {
+      const execName = normalizedTarget.executable.toLowerCase();
+      if (execName === 'aider' || execName === 'python' || execName === 'python3' || execName === 'pytest') {
+        defaultImage = process.env.CONTAINER_SANDBOX_PYTHON_IMAGE || 'python:3.11-slim';
+      }
+    }
+    const image = options.image || process.env.CONTAINER_SANDBOX_IMAGE || defaultImage;
     const network = options.networkMode || 'none';
     const user = options.user || '1000:1000';
     const canonicalWorkspace = SecurityPolicyEngine.resolveCanonicalPath(workspacePath);
 
     // Strict containment arguments: drop capabilities, no host credential mounts, isolated workspace
-    const args = [
+    const dockerArgs = [
       'run',
       '--rm',
       '--network', network,
@@ -54,11 +91,37 @@ export class ContainerSandbox {
       '-w', '/workspace',
       '-e', 'CI=true',
       '-e', 'NODE_ENV=development',
-      image,
-      '/bin/sh', '-c', command,
     ];
 
-    return { executable: 'docker', args };
+    // Safely forward agent credentials if requested without mounting host directories
+    if (options.forwardApiKeys !== false) {
+      const allowedKeys = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY'];
+      for (const key of allowedKeys) {
+        const val = options.env?.[key] || process.env[key];
+        if (val) {
+          dockerArgs.push('-e', `${key}=${val}`);
+        }
+      }
+    }
+
+    // Forward additional sanitized custom environment variables
+    if (options.env) {
+      for (const [k, v] of Object.entries(options.env)) {
+        if (!['PATH', 'NODE_ENV', 'CI', 'ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY'].includes(k)) {
+          dockerArgs.push('-e', `${k}=${v}`);
+        }
+      }
+    }
+
+    dockerArgs.push(image);
+
+    // P0 FIX: Preserve argument boundaries directly for exec targets without shell concatenation
+    if (normalizedTarget.type === 'exec') {
+      dockerArgs.push(normalizedTarget.executable, ...normalizedTarget.args);
+    } else {
+      dockerArgs.push('/bin/sh', '-c', normalizedTarget.commandStr);
+    }
+
+    return { executable: 'docker', args: dockerArgs };
   }
 }
-

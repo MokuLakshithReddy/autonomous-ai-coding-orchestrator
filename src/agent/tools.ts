@@ -155,24 +155,31 @@ export class AgentToolbox {
     return matches;
   }
 
-  async executeCommand(
-    commandStr: string,
+  /**
+   * P0 FIX: Unified command executor.
+   * All commands (shell scripts, build runners, test suites, and external agent executables)
+   * route through this single runner. When container isolation is active, execution is
+   * unconditionally delegated to ContainerSandbox with argument boundaries preserved.
+   */
+  private async executeUnified(
+    target: { type: 'shell'; commandStr: string } | { type: 'exec'; executable: string; args: string[] },
+    commandStrForAudit: string,
     timeoutMs = 60000,
     customEnv: Record<string, string> = {},
     abortSignal?: AbortSignal
   ): Promise<CommandResult> {
     // P0 FIX: High and critical operations must flow through consistent approve-or-reject action gate
-    const policy = SecurityPolicyEngine.evaluateCommandRisk(commandStr);
+    const policy = SecurityPolicyEngine.evaluateCommandRisk(commandStrForAudit);
     if (policy.requiresApproval) {
       if (!this.onRequestApproval) {
         throw new Error(
-          `Security Exception [Approval Required]: Command "${commandStr}" requires approval (${policy.riskLevel}: ${policy.reason}), but no approval handler is configured.`
+          `Security Exception [Approval Required]: Command "${commandStrForAudit}" requires approval (${policy.riskLevel}: ${policy.reason}), but no approval handler is configured.`
         );
       }
-      const isApproved = await this.onRequestApproval(commandStr, policy);
+      const isApproved = await this.onRequestApproval(commandStrForAudit, policy);
       if (!isApproved) {
         throw new Error(
-          `Security Exception [Approval Denied]: Execution of command "${commandStr}" was rejected by the operator.`
+          `Security Exception [Approval Denied]: Execution of command "${commandStrForAudit}" was rejected by the operator.`
         );
       }
     }
@@ -189,27 +196,52 @@ export class AgentToolbox {
 
     const startTime = Date.now();
     const sanitizedEnv = SecurityPolicyEngine.getSanitizedProcessEnv(customEnv);
+    const isContainerMode = process.env.USE_CONTAINER_SANDBOX === 'true' || config.useContainerSandbox;
+
+    let spawnExec: string;
+    let spawnArgs: string[];
+
+    if (isContainerMode) {
+      // P0 FIX: Mandatory fail closed if container isolation is enabled but Docker is unavailable
+      await ContainerSandbox.assertSandboxAvailable();
+
+      const wrapped = ContainerSandbox.buildDockerRunArgs(this.workspacePath, target, {
+        env: sanitizedEnv,
+        forwardApiKeys: true,
+      });
+      spawnExec = wrapped.executable;
+      spawnArgs = wrapped.args;
+    } else {
+      if (target.type === 'shell') {
+        const isWin = process.platform === 'win32';
+        spawnExec = isWin ? 'powershell.exe' : '/bin/bash';
+        spawnArgs = isWin
+          ? ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', target.commandStr]
+          : ['-c', target.commandStr];
+      } else {
+        spawnExec = target.executable;
+        spawnArgs = target.args;
+
+        // P0/P1 FIX: Robust Windows script launcher & execution
+        if (process.platform === 'win32') {
+          const lower = spawnExec.toLowerCase();
+          if (lower.endsWith('.cmd') || lower.endsWith('.bat') || lower === 'aider' || lower === 'claude') {
+            spawnExec = process.env.COMSPEC || 'cmd.exe';
+            spawnArgs = ['/d', '/s', '/c', target.executable, ...target.args];
+          }
+        }
+      }
+    }
 
     return new Promise((resolve) => {
-      const isWin = process.platform === 'win32';
-      const shell = isWin ? 'powershell.exe' : '/bin/bash';
-      const shellArgs = isWin
-        ? ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', commandStr]
-        : ['-c', commandStr];
-
-      const child = spawn(shell, shellArgs, {
-        cwd: this.workspacePath,
-        env: sanitizedEnv,
-        windowsHide: true,
-      });
-
+      let child: ReturnType<typeof spawn>;
       let stdout = '';
       let stderr = '';
       let timedOut = false;
       let cancelled = false;
 
       const terminateChild = (reason: 'timeout' | 'cancel') => {
-        if (child.pid) {
+        if (child?.pid) {
           try {
             treeKill(child.pid, 'SIGKILL');
           } catch {
@@ -234,17 +266,41 @@ export class AgentToolbox {
         abortSignal.addEventListener('abort', abortHandler, { once: true });
       }
 
-      child.stdout.on('data', (data) => {
+      try {
+        child = spawn(spawnExec, spawnArgs, {
+          cwd: this.workspacePath,
+          env: sanitizedEnv,
+          shell: false,
+          windowsHide: true,
+        });
+      } catch (err: any) {
+        clearTimeout(timer);
+        if (abortSignal) {
+          abortSignal.removeEventListener('abort', abortHandler);
+        }
+        return resolve({
+          stdout: '',
+          stderr: `Spawn invocation failed: ${err.message}`,
+          exitCode: 1,
+          durationMs: Date.now() - startTime,
+          timedOut: false,
+          cancelled: false,
+        });
+      }
+
+      child.stdout?.on('data', (data) => {
+        const chunk = data.toString();
         if (stdout.length < this.maxOutputBytes) {
-          stdout += data.toString();
+          stdout += chunk;
         } else if (!stdout.endsWith('\n... [Output truncated: buffer exceeded 500KB]')) {
           stdout += '\n... [Output truncated: buffer exceeded 500KB]';
         }
       });
 
-      child.stderr.on('data', (data) => {
+      child.stderr?.on('data', (data) => {
+        const chunk = data.toString();
         if (stderr.length < this.maxOutputBytes) {
-          stderr += data.toString();
+          stderr += chunk;
         } else if (!stderr.endsWith('\n... [Output truncated: buffer exceeded 500KB]')) {
           stderr += '\n... [Output truncated: buffer exceeded 500KB]';
         }
@@ -290,6 +346,15 @@ export class AgentToolbox {
     });
   }
 
+  async executeCommand(
+    commandStr: string,
+    timeoutMs = 60000,
+    customEnv: Record<string, string> = {},
+    abortSignal?: AbortSignal
+  ): Promise<CommandResult> {
+    return this.executeUnified({ type: 'shell', commandStr }, commandStr, timeoutMs, customEnv, abortSignal);
+  }
+
   async executeCommandWithArgs(
     executable: string,
     args: string[],
@@ -298,146 +363,6 @@ export class AgentToolbox {
     abortSignal?: AbortSignal
   ): Promise<CommandResult> {
     const fullCommandStr = `${executable} ${args.join(' ')}`.trim();
-    const policy = SecurityPolicyEngine.evaluateCommandRisk(fullCommandStr);
-    if (policy.requiresApproval) {
-      if (!this.onRequestApproval) {
-        throw new Error(
-          `Security Exception [Approval Required]: Command "${fullCommandStr}" requires approval (${policy.riskLevel}: ${policy.reason}), but no approval handler is configured.`
-        );
-      }
-      const isApproved = await this.onRequestApproval(fullCommandStr, policy);
-      if (!isApproved) {
-        throw new Error(
-          `Security Exception [Approval Denied]: Execution of command "${fullCommandStr}" was rejected by the operator.`
-        );
-      }
-    }
-
-    if (abortSignal?.aborted) {
-      return {
-        stdout: '',
-        stderr: 'Command execution aborted prior to spawn.',
-        exitCode: 130,
-        durationMs: 0,
-        cancelled: true,
-      };
-    }
-
-    const startTime = Date.now();
-    const sanitizedEnv = SecurityPolicyEngine.getSanitizedProcessEnv(customEnv);
-
-    return new Promise((resolve) => {
-      let child: ReturnType<typeof spawn>;
-      let timedOut = false;
-      let cancelled = false;
-
-      let spawnExec = executable;
-      let spawnArgs = args;
-
-      // P0/P1 FIX: Robust Windows script launcher & execution
-      if (process.platform === 'win32') {
-        const lower = executable.toLowerCase();
-        if (lower.endsWith('.cmd') || lower.endsWith('.bat') || lower === 'aider' || lower === 'claude') {
-          spawnExec = process.env.COMSPEC || 'cmd.exe';
-          spawnArgs = ['/d', '/s', '/c', executable, ...args];
-        }
-      }
-
-      // P0 FIX: Route through container isolation if enabled
-      if (process.env.USE_CONTAINER_SANDBOX === 'true' || config.useContainerSandbox) {
-        const wrapped = ContainerSandbox.buildDockerRunArgs(this.workspacePath, `${executable} ${args.join(' ')}`);
-        spawnExec = wrapped.executable;
-        spawnArgs = wrapped.args;
-      }
-
-      try {
-        child = spawn(spawnExec, spawnArgs, {
-          cwd: this.workspacePath,
-          env: sanitizedEnv,
-          shell: false,
-          windowsHide: true,
-        });
-      } catch (err: any) {
-        return resolve({
-          stdout: '',
-          stderr: `Spawn invocation failed: ${err.message}`,
-          exitCode: 1,
-          durationMs: Date.now() - startTime,
-          timedOut: false,
-          cancelled: false,
-        });
-      }
-
-      let stdout = '';
-      let stderr = '';
-
-      const timer = setTimeout(() => {
-        timedOut = true;
-        if (child.pid) {
-          treeKill(child.pid, 'SIGKILL', () => {});
-        }
-      }, timeoutMs);
-
-      const abortHandler = () => {
-        cancelled = true;
-        if (child.pid) {
-          treeKill(child.pid, 'SIGKILL', () => {});
-        }
-      };
-
-      if (abortSignal) {
-        abortSignal.addEventListener('abort', abortHandler, { once: true });
-      }
-
-      child.stdout?.on('data', (chunk) => {
-        if (stdout.length < this.maxOutputBytes) {
-          stdout += chunk.toString();
-        }
-      });
-
-      child.stderr?.on('data', (chunk) => {
-        if (stderr.length < this.maxOutputBytes) {
-          stderr += chunk.toString();
-        }
-      });
-
-      child.on('close', (code) => {
-        clearTimeout(timer);
-        if (abortSignal) {
-          abortSignal.removeEventListener('abort', abortHandler);
-        }
-
-        let finalStderr = stderr;
-        if (timedOut) {
-          finalStderr = `${stderr}\nExecution timeout reached after ${timeoutMs}ms.`;
-        } else if (cancelled) {
-          finalStderr = `${stderr}\nExecution cancelled by abort signal.`;
-        }
-
-        resolve({
-          stdout: SecurityPolicyEngine.redactSensitiveData(stdout),
-          stderr: SecurityPolicyEngine.redactSensitiveData(finalStderr),
-          exitCode: timedOut ? 124 : cancelled ? 130 : (code ?? 1),
-          durationMs: Date.now() - startTime,
-          timedOut,
-          cancelled,
-        });
-      });
-
-      child.on('error', (err) => {
-        clearTimeout(timer);
-        if (abortSignal) {
-          abortSignal.removeEventListener('abort', abortHandler);
-        }
-        resolve({
-          stdout: SecurityPolicyEngine.redactSensitiveData(stdout),
-          stderr: SecurityPolicyEngine.redactSensitiveData(`Subprocess spawn error: ${err.message}`),
-          exitCode: 1,
-          durationMs: Date.now() - startTime,
-          timedOut: false,
-          cancelled,
-        });
-      });
-    });
+    return this.executeUnified({ type: 'exec', executable, args }, fullCommandStr, timeoutMs, customEnv, abortSignal);
   }
 }

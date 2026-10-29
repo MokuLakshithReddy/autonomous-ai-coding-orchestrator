@@ -817,6 +817,7 @@ export default function App() {
                 <input
                   type="text"
                   className="form-input"
+                  placeholder="Leave blank for project workspace or enter Git repository path"
                   value={newWorkspace}
                   onChange={(e) => setNewWorkspace(e.target.value)}
                 />

@@ -1,6 +1,7 @@
 import { Command } from 'commander';
 import chalk from 'chalk';
 import path from 'node:path';
+import fs from 'node:fs';
 import { createServer, serverApiToken } from '../server/index.js';
 import { orchestrator, type OrchestratorEvent } from '../orchestrator/engine.js';
 import { initDatabase, taskRepo } from '../db/index.js';
@@ -28,10 +29,13 @@ program
     const server = await createServer();
     try {
       const address = await server.listen({ port, host });
+      try {
+        fs.writeFileSync('.orchestrator-token', serverApiToken, { mode: 0o600 });
+      } catch {}
       console.log(chalk.green(`\n✓ Server listening at: ${chalk.bold(address)}`));
       console.log(chalk.cyan(`✓ Web Dashboard: ${chalk.bold(address)}`));
       console.log(chalk.blue(`✓ Realtime WebSocket: ${chalk.bold(`ws://${host}:${port}/ws`)}`));
-      console.log(chalk.yellow(`✓ API Auth Token: ${chalk.bold(serverApiToken)}\n`));
+      console.log(chalk.yellow(`✓ API Auth Token: ${chalk.bold('[CONFIGURED]')} (Hidden for security; saved to .orchestrator-token)\n`));
     } catch (err: any) {
       console.error(chalk.red('Failed to start server:'), err);
       process.exit(1);

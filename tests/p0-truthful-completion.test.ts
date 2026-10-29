@@ -5,6 +5,7 @@ import fs from 'node:fs/promises';
 import { WebSocket } from 'ws';
 import { TaskStateMachine, IllegalStateTransitionError } from '../src/core/state-machine.js';
 import { SecurityPolicyEngine } from '../src/security/policy.js';
+import { ContainerSandbox } from '../src/security/sandbox.js';
 import { IndependentVerifier } from '../src/verifier/index.js';
 import { AgentToolbox } from '../src/agent/tools.js';
 import { BuiltInAutonomousAgent } from '../src/agent/index.js';
@@ -1285,6 +1286,69 @@ diff --git a/tests/math.test.ts b/tests/math.test.ts
   );
   await fs.rm(test29Dir, { recursive: true, force: true });
   console.log('   ✓ Anti-tamper engine strictly detects deleted test assertions.');
+
+  // Test 30: Unified Container Sandbox Enforcement & Boundary Preservation (P0)
+  console.log('\n30. Testing Unified Container Sandbox Enforcement & Boundary Preservation (P0)...');
+  const test30Dir = await fs.mkdtemp(path.join(os.tmpdir(), 'test-sandbox-'));
+
+  // Verify buildDockerRunArgs preserves argument boundaries without string concatenation
+  const execRunArgs = ContainerSandbox.buildDockerRunArgs(test30Dir, {
+    type: 'exec',
+    executable: 'aider',
+    args: ['--message', 'Fix the issue; rm -rf /', '--yes'],
+  });
+  assert.strictEqual(execRunArgs.executable, 'docker');
+  assert.ok(execRunArgs.args.includes('--network'), 'Docker args must include network containment');
+  assert.ok(execRunArgs.args.includes('none'), 'Docker args must default to network none');
+  assert.ok(execRunArgs.args.includes('--cap-drop'), 'Docker args must drop capabilities');
+  assert.ok(
+    execRunArgs.args.includes('--message') && execRunArgs.args.includes('Fix the issue; rm -rf /'),
+    'Docker arguments must strictly preserve individual argument boundaries'
+  );
+
+  // Verify both executeCommand and executeCommandWithArgs route through unified sandbox and fail closed if unavailable
+  const prevEnvSandbox = process.env.USE_CONTAINER_SANDBOX;
+  process.env.USE_CONTAINER_SANDBOX = 'true';
+  const origIsDockerAvailable = ContainerSandbox.isDockerAvailable;
+  (ContainerSandbox as any).isDockerAvailable = async () => false;
+
+  const toolbox30 = new AgentToolbox(test30Dir);
+  await assert.rejects(
+    async () => toolbox30.executeCommand('npm test'),
+    /Security Exception \[Sandbox Unavailable\]/,
+    'executeCommand must fail closed when container sandbox is enabled but Docker is unavailable'
+  );
+  await assert.rejects(
+    async () => toolbox30.executeCommandWithArgs('aider', ['--yes']),
+    /Security Exception \[Sandbox Unavailable\]/,
+    'executeCommandWithArgs must fail closed when container sandbox is enabled but Docker is unavailable'
+  );
+
+  // Restore
+  (ContainerSandbox as any).isDockerAvailable = origIsDockerAvailable;
+  if (prevEnvSandbox !== undefined) {
+    process.env.USE_CONTAINER_SANDBOX = prevEnvSandbox;
+  } else {
+    delete process.env.USE_CONTAINER_SANDBOX;
+  }
+  await fs.rm(test30Dir, { recursive: true, force: true });
+  console.log('   ✓ Unified container sandbox strictly enforced across all commands with boundary preservation.');
+
+  // Test 31: Unauthenticated System Status Information Non-Disclosure (P1)
+  console.log('\n31. Testing System Status Public Endpoint Information Non-Disclosure (P1)...');
+  const { createServer: createServer31 } = await import('../src/server/index.js');
+  const server31 = await createServer31();
+  const statusRes = await server31.inject({
+    method: 'GET',
+    url: '/api/system/status',
+  });
+  assert.strictEqual(statusRes.statusCode, 200);
+  const statusBody = JSON.parse(statusRes.payload);
+  assert.strictEqual(statusBody.status, 'online');
+  assert.strictEqual(statusBody.defaultWorkspace, undefined, 'Unauthenticated status must not disclose defaultWorkspace path');
+  assert.strictEqual(statusBody.allowedWorkspaces, undefined, 'Unauthenticated status must not disclose allowedWorkspaces roots');
+  await server31.close();
+  console.log('   ✓ Public system status endpoint strictly excludes sensitive host filesystem paths.');
 
   console.log('\n=== ALL P0/P1 CORRECTNESS, SAFETY & VERIFICATION TESTS PASSED! ===\n');
 }

@@ -286,6 +286,8 @@ export async function createServer() {
   });
 
   // System & Health Endpoints
+  // P1 FIX: Return only non-sensitive status information from unauthenticated public endpoint.
+  // Absolute host paths (defaultWorkspace, allowedWorkspaces) are excluded to prevent host filesystem information disclosure.
   fastify.get('/api/system/status', async () => {
     const brain = new LLMBrain();
     return {
@@ -295,8 +297,8 @@ export async function createServer() {
       maxRetryBudget: config.maxRetryBudget,
       stepTimeoutSeconds: config.stepTimeoutSeconds,
       autoRepairEnabled: config.autoRepairEnabled,
-      defaultWorkspace: process.cwd(),
-      allowedWorkspaces: config.allowedWorkspaces.length > 0 ? config.allowedWorkspaces : [process.cwd()],
+      containerSandboxEnabled: config.useContainerSandbox,
+      workspacePolicy: config.allowUnrestrictedWorkspaces ? 'unrestricted' : 'restricted',
       version: '1.0.0',
     };
   });
