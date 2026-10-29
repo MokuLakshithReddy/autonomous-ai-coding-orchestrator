@@ -229,27 +229,21 @@ export class OrchestrationEngine extends EventEmitter {
     let taskBranchName: string | undefined;
 
     const isGit = await inspector.isGitRepository();
-    if (isGit) {
-      try {
-        taskWorktreePath = await inspector.createIsolatedWorktree(taskId);
-        executionPath = taskWorktreePath;
-        isWorktree = true;
-        taskBranchName = `task/${taskId.slice(0, 8)}`;
-      } catch (err: any) {
-        const errMsg = `Safety Exception [Isolation Failure]: Mandatory Git worktree isolation failed for task ${taskId}: ${err.message}. Execution aborted to prevent altering user workspace.`;
-        await this.transitionTaskState(taskId, stateMachine, 'failed', errMsg, errMsg);
-        throw new Error(errMsg);
-      }
-    } else {
-      try {
-        taskWorktreePath = await inspector.createIsolatedSandbox(taskId);
-        executionPath = taskWorktreePath;
-        isWorktree = false;
-      } catch (err: any) {
-        const errMsg = `Safety Exception [Sandbox Failure]: Mandatory sandbox isolation failed for non-git task ${taskId}: ${err.message}. Execution aborted.`;
-        await this.transitionTaskState(taskId, stateMachine, 'failed', errMsg, errMsg);
-        throw new Error(errMsg);
-      }
+    if (!isGit) {
+      const errMsg = `Safety Exception [Git Required]: Workspace "${params.workspacePath}" is not a Git repository. Autonomous coding requires a Git repository for isolated branch checkpoints, worktrees, and safe rollbacks. Please run "git init" in your workspace or select an existing Git repository.`;
+      await this.transitionTaskState(taskId, stateMachine, 'failed', errMsg, errMsg);
+      throw new Error(errMsg);
+    }
+
+    try {
+      taskWorktreePath = await inspector.createIsolatedWorktree(taskId);
+      executionPath = taskWorktreePath;
+      isWorktree = true;
+      taskBranchName = `task/${taskId.slice(0, 8)}`;
+    } catch (err: any) {
+      const errMsg = `Safety Exception [Isolation Failure]: Mandatory Git worktree isolation failed for task ${taskId}: ${err.message}. Execution aborted to prevent altering user workspace.`;
+      await this.transitionTaskState(taskId, stateMachine, 'failed', errMsg, errMsg);
+      throw new Error(errMsg);
     }
 
     const taskInspector = taskWorktreePath ? new RepoInspector(taskWorktreePath) : inspector;
@@ -821,8 +815,9 @@ export class OrchestrationEngine extends EventEmitter {
           // Perform merge
           await mainGit.merge([taskBranchName]);
 
-          // Independent post-merge reverification on destination branch
-          const postMergeReport = await verifier.verify(
+          // P1 FIX: Independent post-merge reverification on actual destination checkout (not worktree)
+          const destinationVerifier = new IndependentVerifier(params.workspacePath);
+          const postMergeReport = await destinationVerifier.verify(
             repoMeta,
             plan.acceptanceCriteria,
             plan.steps[plan.steps.length - 1]?.verificationCommand || undefined,
@@ -830,6 +825,12 @@ export class OrchestrationEngine extends EventEmitter {
           );
 
           if (!postMergeReport.isVerified) {
+            // Roll back destination checkout to clean pre-merge baseline commit
+            try {
+              if (baseline?.baseCommit && baseline.baseCommit !== 'initial') {
+                await mainGit.reset(['--hard', baseline.baseCommit]);
+              }
+            } catch {}
             throw new Error(
               `Post-merge independent verification failed on destination branch: ${postMergeReport.blockingReasons.join('; ')}`
             );
@@ -837,6 +838,10 @@ export class OrchestrationEngine extends EventEmitter {
 
           autoMergeSucceeded = true;
         } catch (mergeErr: any) {
+          // If merge ended with conflict or aborted state, abort merge to restore clean working tree
+          try {
+            await (inspector as any).git.merge(['--abort']);
+          } catch {}
           autoMergeError = mergeErr.message || String(mergeErr);
           console.warn(`[Auto-Merge Notice] Auto-merge failed: ${autoMergeError}`);
         }

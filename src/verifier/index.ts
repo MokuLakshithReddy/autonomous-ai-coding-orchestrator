@@ -169,110 +169,14 @@ export class IndependentVerifier {
     }
     const allCumulativeFiles = Array.from(allFilesChangedSet);
 
-    let hasSuspiciousDeletions = false;
-    let hasForbiddenModifications = false;
-    let hasPlaceholderStubs = false;
+    // Anti-tamper & integrity check across all changed files and diff lines
     const diffNotes: string[] = [];
-
-    // Security check for sensitive secret files across ALL cumulative changes
-    for (const f of allCumulativeFiles) {
-      const lower = f.toLowerCase();
-      // Allow harmless example / template / distribution files
-      if (
-        lower.endsWith('.example') ||
-        lower.endsWith('.sample') ||
-        lower.endsWith('.template') ||
-        lower.endsWith('.dist')
-      ) {
-        continue;
-      }
-      if (
-        lower.includes('.env') ||
-        lower.includes('credentials') ||
-        lower.includes('id_rsa') ||
-        lower.includes('.pem') ||
-        lower.includes('.key')
-      ) {
-        hasForbiddenModifications = true;
-        diffNotes.push(`Sensitive secret file modified in task history: ${f}`);
-        blockingReasons.push(`Unauthorized modification of sensitive secret file: ${f}`);
-      }
-    }
-
-    // Anti-Tamper & Content Check: Inspect added and deleted lines across diff
-    const addedTestLines: string[] = [];
-    const addedPackageJsonLines: string[] = [];
-    const addedAllLines: string[] = [];
-    const deletedTestLines: string[] = [];
-    let deletedAssertionCount = 0;
-    let currentDiffFile = '';
-
-    for (const line of diff.split('\n')) {
-      if (line.startsWith('diff --git ')) {
-        const match = line.match(/^diff --git\s+a\/(.+?)\s+b\/(.+?)$/);
-        currentDiffFile = match ? match[2].trim() : '';
-      } else if (line.startsWith('+') && !line.startsWith('+++')) {
-        const added = line.slice(1);
-        addedAllLines.push(added);
-        if (/(\.test\.|\.spec\.|[\\/]tests?[\\/])/i.test(currentDiffFile)) {
-          addedTestLines.push(added);
-        }
-        if (currentDiffFile.endsWith('package.json')) {
-          addedPackageJsonLines.push(added);
-        }
-      } else if (line.startsWith('-') && !line.startsWith('---')) {
-        const deleted = line.slice(1);
-        if (/(\.test\.|\.spec\.|[\\/]tests?[\\/])/i.test(currentDiffFile)) {
-          deletedTestLines.push(deleted);
-          if (/\b(assert|expect|test|it)\s*[\.(]/i.test(deleted)) {
-            deletedAssertionCount++;
-          }
-        }
-      }
-    }
-
-    // Anti-Tamper Check: Detect suspicious test bypassing / skipping inserted into test files
-    const testDiffContent = addedTestLines.join('\n');
-    if (
-      /\b(test\.skip|it\.skip|describe\.skip|xit|xdescribe)\s*\(/i.test(testDiffContent) ||
-      /@pytest\.mark\.skip/i.test(testDiffContent)
-    ) {
-      hasSuspiciousDeletions = true;
-      diffNotes.push('Anti-Tamper Warning: Suspicious test-skipping statements detected in test diff.');
-      blockingReasons.push('Test assertions were bypassed or marked skipped in diff.');
-    }
-
-    // Anti-Tamper Check: Detect suspicious deletion of multiple existing test assertions
-    if (deletedAssertionCount >= 5 && addedTestLines.length === 0) {
-      hasSuspiciousDeletions = true;
-      diffNotes.push(`Anti-Tamper Warning: ${deletedAssertionCount} existing test assertions were deleted.`);
-      blockingReasons.push(`Anti-tamper violation: ${deletedAssertionCount} existing test assertions were deleted without replacement.`);
-    }
-
-    // Anti-Tamper Check: Detect package.json test script tampering to exit 0 or bypass test execution
-    const pkgDiffContent = addedPackageJsonLines.join('\n');
-    if (
-      /\"(test|pretest|posttest)\"\s*:\s*\"(exit\s*0|true|echo\b.*exit\s*0|echo\b.*ok|node\s+-e\s+['"]process\.exit\(0\))/i.test(
-        pkgDiffContent
-      )
-    ) {
-      hasForbiddenModifications = true;
-      diffNotes.push('Anti-Tamper Warning: package.json test script modified to trivially exit 0 or bypass execution.');
-      blockingReasons.push('Anti-tamper violation: package.json test script was modified to bypass execution.');
-    }
-
-    // Placeholder Stubs Detection in added lines
-    const addedCodeContent = addedAllLines.join('\n');
-    if (
-      /\/\/\s*TODO:\s*implement/i.test(addedCodeContent) ||
-      /#\s*TODO:\s*implement/i.test(addedCodeContent) ||
-      /\bthrow new NotImplementedError\b/i.test(addedCodeContent) ||
-      /\bpass\s*#\s*todo\b/i.test(addedCodeContent)
-    ) {
-      hasPlaceholderStubs = true;
-      diffNotes.push('Placeholder stub or unimplemented function found in diff.');
-      blockingReasons.push('Implementation contains unfulfilled placeholder stubs or TODOs.');
-    }
+    const diffIntegrity = IndependentVerifier.verifyDiffIntegrity(diff, allCumulativeFiles);
+    diffNotes.push(...diffIntegrity.diffNotes);
+    blockingReasons.push(...diffIntegrity.blockingReasons);
+    const hasSuspiciousDeletions = diffIntegrity.hasSuspiciousDeletions;
+    const hasForbiddenModifications = diffIntegrity.hasForbiddenModifications;
+    const hasPlaceholderStubs = diffIntegrity.hasPlaceholderStubs;
 
     // 5. Explicit Acceptance Criteria Verification
     // Intermediate step check vs Final task verification gate
@@ -470,5 +374,138 @@ export class IndependentVerifier {
       diagnostics: diagnosticsList.join('\n\n'),
       blockingReasons,
     };
+  }
+
+  /**
+   * P1 FIX: Independent anti-tamper and diff integrity auditor.
+   */
+  static verifyDiffIntegrity(diff: string, filesChanged: string[] = []): {
+    isClean: boolean;
+    hasForbiddenModifications: boolean;
+    hasSuspiciousDeletions: boolean;
+    hasPlaceholderStubs: boolean;
+    diffNotes: string[];
+    blockingReasons: string[];
+  } {
+    const blockingReasons: string[] = [];
+    const diffNotes: string[] = [];
+    let hasForbiddenModifications = false;
+    let hasSuspiciousDeletions = false;
+    let hasPlaceholderStubs = false;
+
+    // Security check for sensitive secret files across all changed files
+    for (const f of filesChanged) {
+      const lower = f.toLowerCase();
+      if (
+        lower.endsWith('.example') ||
+        lower.endsWith('.sample') ||
+        lower.endsWith('.template') ||
+        lower.endsWith('.dist')
+      ) {
+        continue;
+      }
+      if (
+        lower.includes('.env') ||
+        lower.includes('credentials') ||
+        lower.includes('id_rsa') ||
+        lower.includes('.pem') ||
+        lower.includes('.key')
+      ) {
+        hasForbiddenModifications = true;
+        diffNotes.push(`Sensitive secret file modified in task history: ${f}`);
+        blockingReasons.push(`Unauthorized modification of sensitive secret file: ${f}`);
+      }
+    }
+
+    const addedTestLines: string[] = [];
+    const addedPackageJsonLines: string[] = [];
+    const addedAllLines: string[] = [];
+    const deletedTestLines: string[] = [];
+    let deletedAssertionCount = 0;
+    let addedAssertionCount = 0;
+    let currentDiffFile = '';
+
+    for (const line of diff.split('\n')) {
+      if (line.startsWith('diff --git ')) {
+        const match = line.match(/^diff --git\s+a\/(.+?)\s+b\/(.+?)$/);
+        currentDiffFile = match ? match[2].trim() : '';
+      } else if (line.startsWith('+') && !line.startsWith('+++')) {
+        const added = line.slice(1);
+        addedAllLines.push(added);
+        if (/(\.test\.|\.spec\.|[\\/]tests?[\\/])/i.test(currentDiffFile)) {
+          addedTestLines.push(added);
+          if (/\b(assert|expect|test|it)\s*[\.(]/i.test(added)) {
+            addedAssertionCount++;
+          }
+        }
+        if (currentDiffFile.endsWith('package.json')) {
+          addedPackageJsonLines.push(added);
+        }
+      } else if (line.startsWith('-') && !line.startsWith('---')) {
+        const deleted = line.slice(1);
+        if (/(\.test\.|\.spec\.|[\\/]tests?[\\/])/i.test(currentDiffFile)) {
+          deletedTestLines.push(deleted);
+          if (/\b(assert|expect|test|it)\s*[\.(]/i.test(deleted)) {
+            deletedAssertionCount++;
+          }
+        }
+      }
+    }
+
+    const testDiffContent = addedTestLines.join('\n');
+    if (
+      /\b(test\.skip|it\.skip|describe\.skip|xit|xdescribe)\s*\(/i.test(testDiffContent) ||
+      /@pytest\.mark\.skip/i.test(testDiffContent)
+    ) {
+      hasSuspiciousDeletions = true;
+      diffNotes.push('Anti-Tamper Warning: Suspicious test-skipping statements detected in test diff.');
+      blockingReasons.push('Test assertions were bypassed or marked skipped in diff.');
+    }
+
+    if (deletedAssertionCount >= 3 && deletedAssertionCount > addedAssertionCount) {
+      hasSuspiciousDeletions = true;
+      diffNotes.push(
+        `Anti-Tamper Warning: ${deletedAssertionCount} existing test assertions were deleted (${addedAssertionCount} added).`
+      );
+      blockingReasons.push(
+        `Anti-tamper violation: ${deletedAssertionCount} test assertions were deleted without equivalent additions.`
+      );
+    }
+
+    const pkgDiffContent = addedPackageJsonLines.join('\n');
+    if (
+      /\"(test|pretest|posttest)\"\s*:\s*\"(exit\s*0|true|echo\b.*exit\s*0|echo\b.*ok|node\s+-e\s+['"]process\.exit\(0\))/i.test(
+        pkgDiffContent
+      )
+    ) {
+      hasForbiddenModifications = true;
+      diffNotes.push('Anti-Tamper Warning: package.json test script modified to trivially exit 0 or bypass execution.');
+      blockingReasons.push('Anti-tamper violation: package.json test script was modified to bypass execution.');
+    }
+
+    const addedCodeContent = addedAllLines.join('\n');
+    if (
+      /\/\/\s*TODO:\s*implement/i.test(addedCodeContent) ||
+      /#\s*TODO:\s*implement/i.test(addedCodeContent) ||
+      /\bthrow new NotImplementedError\b/i.test(addedCodeContent) ||
+      /\bpass\s*#\s*todo\b/i.test(addedCodeContent)
+    ) {
+      hasPlaceholderStubs = true;
+      diffNotes.push('Placeholder stub or unimplemented function found in diff.');
+      blockingReasons.push('Implementation contains unfulfilled placeholder stubs or TODOs.');
+    }
+
+    return {
+      isClean: blockingReasons.length === 0,
+      hasForbiddenModifications,
+      hasSuspiciousDeletions,
+      hasPlaceholderStubs,
+      diffNotes,
+      blockingReasons,
+    };
+  }
+
+  verifyDiffIntegrity(diff: string, filesChanged: string[] = []) {
+    return IndependentVerifier.verifyDiffIntegrity(diff, filesChanged);
   }
 }

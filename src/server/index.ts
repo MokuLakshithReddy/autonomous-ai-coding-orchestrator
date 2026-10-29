@@ -61,7 +61,7 @@ export function consumeWsTicket(ticket: string, now = Date.now()): boolean {
 
 export function validateWorkspacePath(
   requestedPath?: string,
-  allowedRoots: string[] = config.allowedWorkspaces,
+  allowedRoots: string[] = config.allowedWorkspaces.length > 0 ? config.allowedWorkspaces : [process.cwd()],
   options?: { allowUnrestricted?: boolean; forceCaseSensitive?: boolean }
 ): string {
   const targetRaw = requestedPath || process.cwd();
@@ -317,10 +317,17 @@ export async function createServer() {
       // P0 FIX: Validate against authorized workspace roots
       const safeWorkspace = validateWorkspacePath(req.body?.workspacePath);
       const inspector = new RepoInspector(safeWorkspace);
+      const isGit = await inspector.isGitRepository();
+      if (!isGit) {
+        return reply.status(400).send({
+          error: `Workspace "${safeWorkspace}" is not a Git repository. Autonomous coding requires a Git repository.`,
+          message: `Workspace "${safeWorkspace}" is not a Git repository. Autonomous coding requires a Git repository.`,
+        });
+      }
       const meta = await inspector.inspect();
       return { workspacePath: safeWorkspace, meta };
     } catch (err: any) {
-      return reply.status(403).send({ error: err.message });
+      return reply.status(403).send({ error: err.message, message: err.message });
     }
   });
 
@@ -359,7 +366,7 @@ export async function createServer() {
   }>('/api/tasks', async (req, reply) => {
     const { prompt, workspacePath, title, maxRetries, agent, autoMerge } = req.body;
     if (!prompt) {
-      return reply.status(400).send({ error: 'Prompt is required' });
+      return reply.status(400).send({ error: 'Prompt is required', message: 'Prompt is required' });
     }
 
     // P0 FIX: Verify workspace is within authorized boundaries
@@ -367,7 +374,17 @@ export async function createServer() {
     try {
       resolvedWorkspace = validateWorkspacePath(workspacePath);
     } catch (err: any) {
-      return reply.status(403).send({ error: err.message });
+      return reply.status(403).send({ error: err.message, message: err.message });
+    }
+
+    // P1 FIX: Explicitly require Git workspace upfront
+    const inspector = new RepoInspector(resolvedWorkspace);
+    const isGit = await inspector.isGitRepository();
+    if (!isGit) {
+      return reply.status(400).send({
+        error: `Workspace "${resolvedWorkspace}" is not a Git repository. Autonomous coding requires a Git repository for isolated branch checkpoints, worktrees, and safe rollbacks. Please run "git init" in that directory or select an existing Git repository.`,
+        message: `Workspace "${resolvedWorkspace}" is not a Git repository. Autonomous coding requires a Git repository for isolated branch checkpoints, worktrees, and safe rollbacks. Please run "git init" in that directory or select an existing Git repository.`,
+      });
     }
 
     const task = await orchestrator.runTask({

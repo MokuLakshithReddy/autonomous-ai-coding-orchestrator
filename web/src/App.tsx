@@ -324,10 +324,16 @@ export default function App() {
         setSelectedTaskId(data.task.id);
       } else {
         const errData = await res.json().catch(() => ({}));
-        alert(`Failed to launch task: ${errData.error || errData.message || res.statusText || 'Unauthorized'}`);
+        const detailedMessage =
+          (typeof errData.message === 'string' && errData.message && errData.message !== 'Forbidden')
+            ? errData.message
+            : (typeof errData.error === 'string' && errData.error && errData.error !== 'Forbidden')
+            ? errData.error
+            : errData.message || errData.error || res.statusText || 'Unauthorized';
+        alert(`Failed to launch task:\n\n${detailedMessage}`);
       }
-    } catch (err) {
-      alert('Failed to launch task.');
+    } catch (err: any) {
+      alert(`Failed to launch task: ${err?.message || 'Network error'}`);
     }
   };
 
@@ -815,7 +821,7 @@ export default function App() {
                   onChange={(e) => setNewWorkspace(e.target.value)}
                 />
                 <small style={{ color: '#64748b', fontSize: '0.75rem', marginTop: '0.25rem', display: 'block' }}>
-                  Must be within authorized workspace roots (configured in .env under ALLOWED_DIRECTORIES).
+                  Must be an initialized Git repository within authorized workspace roots (ALLOWED_DIRECTORIES in .env).
                 </small>
               </div>
 

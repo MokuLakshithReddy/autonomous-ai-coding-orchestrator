@@ -37,12 +37,46 @@ export class SecurityPolicyEngine {
    * directories do not exist yet. Traverses up to the nearest existing ancestor,
    * canonicalizes it with native realpath, and appends the non-existent trail.
    */
+  /**
+   * P1 FIX: Resolves the true canonical path of a target, properly resolving symlinks
+   * (including dangling symlinks) to eliminate external path-traversal bypasses.
+   * Traverses existing ancestors, reads symlink targets with cycle detection,
+   * canonicalizes with realpath, and appends remaining non-existent segments.
+   */
   static resolveCanonicalPath(filePath: string): string {
     const resolved = path.resolve(filePath);
     let current = resolved;
     const segments: string[] = [];
+    const visitedSymlinks = new Set<string>();
 
-    while (!fs.existsSync(current)) {
+    while (true) {
+      let stat: fs.Stats | undefined;
+      try {
+        stat = fs.lstatSync(current);
+      } catch {
+        stat = undefined;
+      }
+
+      if (stat) {
+        if (stat.isSymbolicLink()) {
+          const canonicalLink = path.resolve(current);
+          if (visitedSymlinks.has(canonicalLink)) {
+            throw new Error(`Security Exception [Cyclic Symlink]: Symlink cycle detected at "${current}".`);
+          }
+          visitedSymlinks.add(canonicalLink);
+
+          try {
+            const linkTarget = fs.readlinkSync(current);
+            // Link target may be relative to the directory containing the symlink
+            current = path.resolve(path.dirname(current), linkTarget);
+            continue; // Re-evaluate resolved target
+          } catch {
+            break;
+          }
+        }
+        break; // Found an existing non-symlink file or directory
+      }
+
       const parent = path.dirname(current);
       if (parent === current) {
         break;
@@ -242,7 +276,7 @@ export class SecurityPolicyEngine {
   }
 
   /**
-   * P0 FIX: Checks if a path targets sensitive secrets, credentials, or private keys.
+   * P0 FIX: Checks if a path targets sensitive secrets, credentials, tokens, or private keys.
    * Excludes harmless example/template configurations.
    */
   static isSensitiveSecret(filePath: string): boolean {
@@ -259,9 +293,23 @@ export class SecurityPolicyEngine {
     return (
       base === '.env' ||
       base.startsWith('.env.') ||
+      base === '.npmrc' ||
+      base === '.dockercfg' ||
+      base === '.netrc' ||
+      base === 'id_rsa' ||
+      base === 'id_ed25519' ||
+      base === 'id_ecdsa' ||
+      base === 'id_dsa' ||
+      normalized.includes('.docker/config.json') ||
+      normalized.includes('.aws/') ||
+      normalized.includes('.kube/') ||
+      normalized.includes('.ssh/') ||
+      normalized.includes('.gcloud/') ||
       base.includes('credential') ||
-      base.includes('id_rsa') ||
-      base.includes('id_ed25519') ||
+      base.includes('secret') ||
+      base.includes('token') ||
+      base.includes('password') ||
+      base.includes('private_key') ||
       base.endsWith('.pem') ||
       base.endsWith('.key') ||
       base.endsWith('.p12') ||
@@ -271,6 +319,52 @@ export class SecurityPolicyEngine {
       base === 'passwd' ||
       base === 'shadow'
     );
+  }
+
+  /**
+   * P1 FIX: Content-based secret scanner.
+   * Scans strings/files for credentials, private keys, high-entropy tokens, and cloud API keys.
+   */
+  static containsSensitiveSecret(content: string): { hasSecret: boolean; reason?: string } {
+    if (!content || typeof content !== 'string') {
+      return { hasSecret: false };
+    }
+
+    // 1. Private cryptographic keys
+    if (/-----BEGIN\s+(?:[A-Z0-9_\- ]+)?PRIVATE KEY-----/i.test(content)) {
+      return { hasSecret: true, reason: 'Private cryptographic key header detected' };
+    }
+
+    // 2. Cloud provider credentials & access tokens
+    if (/\bAKIA[0-9A-Z]{16}\b/.test(content)) {
+      return { hasSecret: true, reason: 'AWS Access Key ID detected' };
+    }
+    if (
+      /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{36,}\b/.test(content) ||
+      /\bgithub_pat_[A-Za-z0-9_]{50,}\b/.test(content)
+    ) {
+      return { hasSecret: true, reason: 'GitHub Personal Access Token detected' };
+    }
+    if (/\bAIza[0-9A-Za-z\-_]{35}\b/.test(content)) {
+      return { hasSecret: true, reason: 'Google API key detected' };
+    }
+    if (/\bsk-[a-zA-Z0-9_\-]{32,}\b/.test(content)) {
+      return { hasSecret: true, reason: 'API Secret Key detected' };
+    }
+    if (/\bxox[baprs]-[0-9a-zA-Z-]{10,}\b/.test(content)) {
+      return { hasSecret: true, reason: 'Slack Token detected' };
+    }
+
+    // 3. Embedded secret assignments
+    if (
+      /(?:api[_-]?key|secret[_-]?key|private[_-]?key|auth[_-]?token|access[_-]?token|password)\s*[:=]\s*['"][a-zA-Z0-9_\-\.\/+=]{20,}['"]/i.test(
+        content
+      )
+    ) {
+      return { hasSecret: true, reason: 'High-entropy credential assignment detected' };
+    }
+
+    return { hasSecret: false };
   }
 
   /**

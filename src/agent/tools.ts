@@ -3,6 +3,8 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import treeKill from 'tree-kill';
 import { SecurityPolicyEngine, type ActionPolicy } from '../security/policy.js';
+import { ContainerSandbox } from '../security/sandbox.js';
+import { config } from '../config/index.js';
 
 export interface CommandResult {
   stdout: string;
@@ -36,7 +38,14 @@ export class AgentToolbox {
         `Security Exception [Access Denied]: Reading sensitive secret file "${filePath}" is strictly prohibited.`
       );
     }
-    return await fs.readFile(fullPath, 'utf8');
+    const content = await fs.readFile(fullPath, 'utf8');
+    const secretScan = SecurityPolicyEngine.containsSensitiveSecret(content);
+    if (secretScan.hasSecret) {
+      throw new Error(
+        `Security Exception [Secret Blocked]: File "${filePath}" contains detected credentials or secret material (${secretScan.reason}) and cannot be read.`
+      );
+    }
+    return content;
   }
 
   async writeFile(filePath: string, content: string): Promise<void> {
@@ -322,8 +331,27 @@ export class AgentToolbox {
       let timedOut = false;
       let cancelled = false;
 
+      let spawnExec = executable;
+      let spawnArgs = args;
+
+      // P0/P1 FIX: Robust Windows script launcher & execution
+      if (process.platform === 'win32') {
+        const lower = executable.toLowerCase();
+        if (lower.endsWith('.cmd') || lower.endsWith('.bat') || lower === 'aider' || lower === 'claude') {
+          spawnExec = process.env.COMSPEC || 'cmd.exe';
+          spawnArgs = ['/d', '/s', '/c', executable, ...args];
+        }
+      }
+
+      // P0 FIX: Route through container isolation if enabled
+      if (process.env.USE_CONTAINER_SANDBOX === 'true' || config.useContainerSandbox) {
+        const wrapped = ContainerSandbox.buildDockerRunArgs(this.workspacePath, `${executable} ${args.join(' ')}`);
+        spawnExec = wrapped.executable;
+        spawnArgs = wrapped.args;
+      }
+
       try {
-        child = spawn(executable, args, {
+        child = spawn(spawnExec, spawnArgs, {
           cwd: this.workspacePath,
           env: sanitizedEnv,
           shell: false,
