@@ -49,79 +49,79 @@ export function getStatusColor(status?: string): {
     case 'completed':
     case 'passed':
       return {
-        bg: 'rgba(16, 185, 129, 0.12)',
-        text: '#34d399',
-        border: 'rgba(16, 185, 129, 0.25)',
-        dot: '#10b981',
+        bg: 'rgba(52, 211, 153, 0.12)',
+        text: '#34D399',
+        border: 'rgba(52, 211, 153, 0.28)',
+        dot: '#34D399',
       };
     case 'executing':
     case 'running':
+    case 'ready':
       return {
-        bg: 'rgba(59, 130, 246, 0.12)',
-        text: '#60a5fa',
-        border: 'rgba(59, 130, 246, 0.25)',
-        dot: '#3b82f6',
+        bg: 'rgba(56, 189, 248, 0.12)',
+        text: '#38BDF8',
+        border: 'rgba(56, 189, 248, 0.28)',
+        dot: '#38BDF8',
       };
     case 'verifying':
       return {
-        bg: 'rgba(14, 165, 233, 0.12)',
-        text: '#38bdf8',
-        border: 'rgba(14, 165, 233, 0.25)',
-        dot: '#0ea5e9',
+        bg: 'rgba(56, 189, 248, 0.14)',
+        text: '#38BDF8',
+        border: 'rgba(56, 189, 248, 0.32)',
+        dot: '#38BDF8',
       };
     case 'diagnosing':
       return {
-        bg: 'rgba(245, 158, 11, 0.12)',
-        text: '#fbbf24',
-        border: 'rgba(245, 158, 11, 0.25)',
-        dot: '#f59e0b',
+        bg: 'rgba(251, 191, 36, 0.12)',
+        text: '#FBBF24',
+        border: 'rgba(251, 191, 36, 0.28)',
+        dot: '#FBBF24',
       };
     case 'repairing':
       return {
-        bg: 'rgba(236, 72, 153, 0.12)',
-        text: '#f472b6',
-        border: 'rgba(236, 72, 153, 0.25)',
-        dot: '#ec4899',
+        bg: 'rgba(167, 139, 250, 0.14)',
+        text: '#A78BFA',
+        border: 'rgba(167, 139, 250, 0.32)',
+        dot: '#A78BFA',
       };
     case 'planning':
     case 'discovering':
       return {
-        bg: 'rgba(168, 85, 247, 0.12)',
-        text: '#c084fc',
-        border: 'rgba(168, 85, 247, 0.25)',
-        dot: '#a855f7',
+        bg: 'rgba(139, 124, 255, 0.12)',
+        text: '#8B7CFF',
+        border: 'rgba(139, 124, 255, 0.28)',
+        dot: '#8B7CFF',
       };
     case 'awaiting_approval':
     case 'needs_human_review':
     case 'blocked':
       return {
-        bg: 'rgba(249, 115, 22, 0.12)',
-        text: '#fb923c',
-        border: 'rgba(249, 115, 22, 0.25)',
-        dot: '#f97316',
+        bg: 'rgba(251, 191, 36, 0.12)',
+        text: '#FBBF24',
+        border: 'rgba(251, 191, 36, 0.28)',
+        dot: '#FBBF24',
       };
     case 'failed':
       return {
-        bg: 'rgba(244, 63, 94, 0.12)',
-        text: '#fb7185',
-        border: 'rgba(244, 63, 94, 0.25)',
-        dot: '#f43f5e',
+        bg: 'rgba(251, 113, 133, 0.12)',
+        text: '#FB7185',
+        border: 'rgba(251, 113, 133, 0.28)',
+        dot: '#FB7185',
       };
     case 'cancelled':
     case 'cancelling':
       return {
-        bg: 'rgba(100, 116, 139, 0.12)',
-        text: '#94a3b8',
-        border: 'rgba(100, 116, 139, 0.25)',
-        dot: '#64748b',
+        bg: 'rgba(148, 163, 184, 0.12)',
+        text: '#94A3B8',
+        border: 'rgba(148, 163, 184, 0.24)',
+        dot: '#94A3B8',
       };
     default:
       return {
         bg: 'rgba(148, 163, 184, 0.08)',
-        text: '#cbd5e1',
-        border: 'rgba(148, 163, 184, 0.2)',
-        dot: '#94a3b8',
+        text: '#A7B4C7',
+        border: 'rgba(148, 163, 184, 0.18)',
+        dot: '#94A3B8',
       };
   }
 }
-

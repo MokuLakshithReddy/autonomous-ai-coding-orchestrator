@@ -1,6 +1,5 @@
 import React, { useState } from 'react';
-import { Copy, Check, FileDiff, GitCommit } from 'lucide-react';
-import { Button } from '../ui/Button.js';
+import { Copy, Check, FileDiff } from 'lucide-react';
 
 interface DiffViewerProps {
   diffText?: string;
@@ -13,8 +12,10 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({ diffText }) => {
     return (
       <div className="diff-empty-state">
         <FileDiff size={32} className="text-muted" />
-        <p className="empty-heading">No active diff recorded</p>
-        <p className="empty-subtext">
+        <p style={{ fontWeight: 600, fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+          No active diff recorded
+        </p>
+        <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
           Once the agent modifies files in the isolated worktree, the verified git diff will appear here.
         </p>
       </div>
@@ -44,7 +45,7 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({ diffText }) => {
         <button className="diff-copy-btn" onClick={handleCopy}>
           {copied ? (
             <>
-              <Check size={12} className="text-emerald" />
+              <Check size={12} style={{ color: 'var(--status-success)' }} />
               <span>Copied</span>
             </>
           ) : (
@@ -83,4 +84,3 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({ diffText }) => {
     </div>
   );
 };
-

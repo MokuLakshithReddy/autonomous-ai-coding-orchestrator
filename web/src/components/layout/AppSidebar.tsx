@@ -6,6 +6,9 @@ import {
   GitBranch,
   FolderGit2,
   RotateCcw,
+  TerminalSquare,
+  LayoutDashboard,
+  History,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import type { Task, RepoMeta } from '../../types/index.js';
@@ -19,6 +22,8 @@ interface AppSidebarProps {
   onRefreshTasks: () => void;
   repoMeta: RepoMeta | null;
   className?: string;
+  activeView?: 'dashboard' | 'workspace' | 'history';
+  onViewChange?: (view: 'dashboard' | 'workspace' | 'history') => void;
 }
 
 export const AppSidebar: React.FC<AppSidebarProps> = ({
@@ -28,6 +33,8 @@ export const AppSidebar: React.FC<AppSidebarProps> = ({
   onRefreshTasks,
   repoMeta,
   className = '',
+  activeView = 'workspace',
+  onViewChange,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('ALL');
@@ -62,6 +69,33 @@ export const AppSidebar: React.FC<AppSidebarProps> = ({
 
   return (
     <aside className={`app-sidebar ${className}`}>
+      {/* Mobile Navigation Drawer Links (Visible on Mobile Viewports) */}
+      {onViewChange && (
+        <div className="sidebar-mobile-nav">
+          <button
+            className={`sidebar-nav-tab ${activeView === 'workspace' ? 'active' : ''}`}
+            onClick={() => onViewChange('workspace')}
+          >
+            <TerminalSquare size={13} />
+            <span>Mission Control</span>
+          </button>
+          <button
+            className={`sidebar-nav-tab ${activeView === 'dashboard' ? 'active' : ''}`}
+            onClick={() => onViewChange('dashboard')}
+          >
+            <LayoutDashboard size={13} />
+            <span>Observability</span>
+          </button>
+          <button
+            className={`sidebar-nav-tab ${activeView === 'history' ? 'active' : ''}`}
+            onClick={() => onViewChange('history')}
+          >
+            <History size={13} />
+            <span>Task History</span>
+          </button>
+        </div>
+      )}
+
       {/* Sidebar Header */}
       <div className="sidebar-top">
         <div className="sidebar-header-row">
@@ -196,7 +230,7 @@ export const AppSidebar: React.FC<AppSidebarProps> = ({
         <div className="sidebar-repo-card">
           <div className="repo-card-header">
             <div className="repo-card-title">
-              <FolderGit2 size={13} className="text-sky" />
+              <FolderGit2 size={13} style={{ color: 'var(--accent-secondary)' }} />
               <span>Workspace</span>
             </div>
             {repoMeta.branch && (

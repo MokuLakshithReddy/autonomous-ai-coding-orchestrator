@@ -7,7 +7,7 @@ import {
   RotateCcw,
   Clock,
   ArrowUpRight,
-  Filter,
+  GitBranch,
 } from 'lucide-react';
 import type { Task } from '../../types/index.js';
 import { Badge } from '../ui/Badge.js';
@@ -81,6 +81,7 @@ export const TaskHistoryView: React.FC<TaskHistoryViewProps> = ({ tasks, onSelec
         </div>
       </div>
 
+      {/* Desktop / Tablet Table View */}
       <div className="history-table-container">
         {filtered.length === 0 ? (
           <div className="history-empty">
@@ -144,7 +145,37 @@ export const TaskHistoryView: React.FC<TaskHistoryViewProps> = ({ tasks, onSelec
           </table>
         )}
       </div>
+
+      {/* Mobile Card View (renders on screens < 768px without hiding info) */}
+      <div className="history-mobile-cards">
+        {filtered.length === 0 ? (
+          <div className="history-empty">
+            <p>No historical runs match the current criteria.</p>
+          </div>
+        ) : (
+          filtered.map((task) => (
+            <div
+              key={task.id}
+              className="history-mobile-card"
+              onClick={() => onSelectTask(task.id)}
+            >
+              <div className="history-mobile-header">
+                <span className="history-mobile-title">{task.title}</span>
+                <Badge status={task.status} size="sm" />
+              </div>
+              <p className="history-mobile-prompt">{task.prompt}</p>
+              <div className="history-mobile-meta">
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem' }}>
+                  <GitBranch size={11} style={{ color: 'var(--accent-secondary)' }} />
+                  <code>task/{task.id.slice(0, 8)}</code>
+                </span>
+                <span>{formatDuration(task.createdAt, task.updatedAt)}</span>
+                <span>{formatDateRel(task.createdAt)}</span>
+              </div>
+            </div>
+          ))
+        )}
+      </div>
     </div>
   );
 };
-

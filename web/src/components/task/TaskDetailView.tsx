@@ -9,10 +9,6 @@ import {
   XCircle,
   Cpu,
   StopCircle,
-  FileCode,
-  FolderGit2,
-  Layers,
-  Sparkles,
 } from 'lucide-react';
 import type { Task, Step, Verification, Approval, ExecutionPlan } from '../../types/index.js';
 import { StateStepper } from './StateStepper.js';
@@ -22,7 +18,7 @@ import { DependencyGraph } from './DependencyGraph.js';
 import { AcceptanceCriteriaList } from './AcceptanceCriteriaList.js';
 import { Badge } from '../ui/Badge.js';
 import { Button } from '../ui/Button.js';
-import { formatDuration, formatDateRel } from '../../lib/formatters.js';
+import { formatDuration } from '../../lib/formatters.js';
 
 interface TaskDetailViewProps {
   task: Task;
@@ -55,7 +51,6 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
   }
 
   const isCompleted = task.status.toLowerCase() === 'completed';
-  const isFailed = task.status.toLowerCase() === 'failed';
   const isCancellable = [
     'discovering',
     'planning',
@@ -94,7 +89,7 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
             </span>
 
             <span className="meta-item" title="Git Task Branch">
-              <GitBranch size={12} className="meta-icon text-sky" />
+              <GitBranch size={12} className="meta-icon" style={{ color: 'var(--accent-secondary)' }} />
               <span>task/{task.id.slice(0, 8)}</span>
             </span>
 
@@ -104,7 +99,7 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
             </span>
 
             {task.retryCount > 0 && (
-              <span className="meta-item text-amber" title="Self-Repair Retries">
+              <span className="meta-item" style={{ color: 'var(--status-warning)' }} title="Self-Repair Retries">
                 <RotateCcw size={12} className="meta-icon" />
                 <span>
                   Retries: {task.retryCount} / {task.maxRetries}
@@ -130,8 +125,8 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
         </div>
       </div>
 
-      {/* State Machine Transition Visualizer */}
-      <StateStepper currentStatus={task.status} />
+      {/* State Machine Transition Visualizer with Steps Evidence */}
+      <StateStepper currentStatus={task.status} steps={steps} />
 
       {/* Scrollable Center Content */}
       <div className="task-detail-body">
@@ -146,7 +141,7 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
         {task.summary && (
           <div className={`verified-summary-card ${isCompleted ? 'completed' : ''}`}>
             <div className="summary-header">
-              <CheckCircle2 size={16} className="text-emerald" />
+              <CheckCircle2 size={16} style={{ color: 'var(--status-success)' }} />
               <span className="summary-title">Verified Outcome & Repair Summary</span>
             </div>
             <p className="summary-body">{task.summary}</p>
@@ -179,4 +174,3 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
     </div>
   );
 };
-

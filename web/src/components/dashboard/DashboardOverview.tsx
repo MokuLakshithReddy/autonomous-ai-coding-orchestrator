@@ -44,8 +44,9 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
   );
   const repairedTasks = tasks.filter((t) => t.status.toLowerCase() === 'completed' && t.retryCount > 0);
 
+  // Truthful calculation: if no tasks exist, show '--' rather than 100% or 0%
   const verificationSuccessRate =
-    totalTasks > 0 ? Math.round((completedTasks.length / totalTasks) * 100) : 100;
+    totalTasks > 0 ? `${Math.round((completedTasks.length / totalTasks) * 100)}%` : '--';
 
   return (
     <div className="dashboard-overview-container">
@@ -90,7 +91,7 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
         >
           <div className="metric-header">
             <span className="metric-title">Active Missions</span>
-            <Activity size={16} className="text-sky" />
+            <Activity size={16} style={{ color: 'var(--accent-secondary)' }} />
           </div>
           <div className="metric-value">{activeTasks.length}</div>
           <div className="metric-subtext">Currently executing in isolated worktrees</div>
@@ -105,10 +106,16 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
         >
           <div className="metric-header">
             <span className="metric-title">Verified Passed</span>
-            <CheckCircle2 size={16} className="text-emerald" />
+            <CheckCircle2 size={16} style={{ color: 'var(--status-success)' }} />
           </div>
-          <div className="metric-value text-emerald">{completedTasks.length}</div>
-          <div className="metric-subtext">{verificationSuccessRate}% verified completion rate</div>
+          <div className="metric-value" style={{ color: 'var(--status-success)' }}>
+            {completedTasks.length}
+          </div>
+          <div className="metric-subtext">
+            {verificationSuccessRate !== '--'
+              ? `${verificationSuccessRate} verified completion rate`
+              : 'No missions recorded yet'}
+          </div>
         </motion.div>
 
         <motion.div
@@ -120,9 +127,11 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
         >
           <div className="metric-header">
             <span className="metric-title">Self-Repair Recoveries</span>
-            <RotateCcw size={16} className="text-pink" />
+            <RotateCcw size={16} style={{ color: 'var(--status-repair)' }} />
           </div>
-          <div className="metric-value text-pink">{repairedTasks.length}</div>
+          <div className="metric-value" style={{ color: 'var(--status-repair)' }}>
+            {repairedTasks.length}
+          </div>
           <div className="metric-subtext">Autonomously resolved compilation/test regressions</div>
         </motion.div>
 
@@ -135,9 +144,11 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
         >
           <div className="metric-header">
             <span className="metric-title">Failed / Blocked</span>
-            <XCircle size={16} className="text-rose" />
+            <XCircle size={16} style={{ color: 'var(--status-danger)' }} />
           </div>
-          <div className="metric-value text-rose">{failedTasks.length}</div>
+          <div className="metric-value" style={{ color: 'var(--status-danger)' }}>
+            {failedTasks.length}
+          </div>
           <div className="metric-subtext">Failed closed with truthful reporting</div>
         </motion.div>
       </div>
@@ -153,15 +164,17 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
         >
           <div className="panel-title-bar">
             <div className="panel-title-text">
-              <Layers size={15} className="text-indigo" />
+              <Layers size={15} style={{ color: 'var(--accent-primary)' }} />
               <span>Recent Orchestration Missions</span>
             </div>
-            <span className="panel-count">{tasks.length} runs</span>
+            <span className="panel-count">{tasks.length} missions</span>
           </div>
 
           <div className="runs-table-wrapper">
             {tasks.length === 0 ? (
-              <div className="runs-empty-state">No missions recorded yet.</div>
+              <div style={{ padding: '2.5rem', textAlign: 'center', color: 'var(--text-muted)' }}>
+                No missions recorded yet. Click "Launch Autonomous Mission" to begin.
+              </div>
             ) : (
               <table className="runs-table">
                 <thead>
@@ -220,7 +233,7 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
         >
           <div className="panel-title-bar">
             <div className="panel-title-text">
-              <Cpu size={15} className="text-sky" />
+              <Cpu size={15} style={{ color: 'var(--accent-secondary)' }} />
               <span>Orchestrator Architecture & Gates</span>
             </div>
           </div>
@@ -238,15 +251,17 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
 
             <div className="spec-row">
               <div className="spec-label">
-                <ShieldCheck size={13} className="text-emerald" />
+                <ShieldCheck size={13} style={{ color: 'var(--status-success)' }} />
                 <span>Verification Gate</span>
               </div>
-              <span className="spec-value text-emerald">Strict Independent Authority</span>
+              <span className="spec-value" style={{ color: 'var(--status-success)' }}>
+                Strict Independent Authority
+              </span>
             </div>
 
             <div className="spec-row">
               <div className="spec-label">
-                <Box size={13} className="text-sky" />
+                <Box size={13} style={{ color: 'var(--accent-secondary)' }} />
                 <span>OS Container Sandbox</span>
               </div>
               <span className="spec-value">
@@ -258,7 +273,7 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
 
             <div className="spec-row">
               <div className="spec-label">
-                <RotateCcw size={13} className="text-pink" />
+                <RotateCcw size={13} style={{ color: 'var(--status-repair)' }} />
                 <span>Self-Repair Budget</span>
               </div>
               <span className="spec-value">

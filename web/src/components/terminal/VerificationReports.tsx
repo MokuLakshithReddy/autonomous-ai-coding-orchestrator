@@ -13,9 +13,11 @@ export const VerificationReports: React.FC<VerificationReportsProps> = ({ verifi
     return (
       <div className="verifications-empty-state">
         <ShieldCheck size={32} className="text-muted" />
-        <p className="empty-heading">No verification reports yet</p>
-        <p className="empty-subtext">
-          Independent verification runs after each agent step and on completion.
+        <p style={{ fontWeight: 600, fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+          No verification reports yet
+        </p>
+        <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+          Independent verification runs after each agent step and upon final task completion.
         </p>
       </div>
     );
@@ -34,16 +36,16 @@ export const VerificationReports: React.FC<VerificationReportsProps> = ({ verifi
           >
             <div className="verification-card-header">
               <div className="verif-title-row">
-                <span className="verif-run-num">Run #{verifications.length - index}</span>
+                <span className="verif-run-num">Verification Run #{verifications.length - index}</span>
                 <Badge status={v.status} size="sm" />
               </div>
               <span className="verif-time">{formatTimestamp(v.createdAt)}</span>
             </div>
 
-            {/* Sub-check chips */}
+            {/* Sub-checks: Build, Test Suite, Linter */}
             <div className="verif-subchecks-grid">
               <div className="subcheck-item">
-                <span className="subcheck-label">Build</span>
+                <span className="subcheck-label">Build Gate</span>
                 <span className={`subcheck-val val-${v.buildStatus.toLowerCase()}`}>
                   {v.buildStatus}
                 </span>
@@ -55,22 +57,22 @@ export const VerificationReports: React.FC<VerificationReportsProps> = ({ verifi
                 </span>
               </div>
               <div className="subcheck-item">
-                <span className="subcheck-label">Linter</span>
+                <span className="subcheck-label">Static Analysis</span>
                 <span className={`subcheck-val val-${v.lintStatus.toLowerCase()}`}>
                   {v.lintStatus}
                 </span>
               </div>
             </div>
 
-            {/* Diff summary inspection */}
+            {/* Diff Inspection Evidence */}
             {v.diffInspection && (
               <div className="verif-diff-inspection">
                 <span className="diff-inspect-label">Diff Inspection:</span>
-                <span className="diff-inspect-val">{v.diffInspection}</span>
+                <span style={{ color: 'var(--text-primary)' }}>{v.diffInspection}</span>
               </div>
             )}
 
-            {/* Diagnostics if failing */}
+            {/* Compiler / Test Diagnostics */}
             {v.diagnostics && (
               <div className="verif-diagnostics-box">
                 <div className="diag-header">
@@ -86,4 +88,3 @@ export const VerificationReports: React.FC<VerificationReportsProps> = ({ verifi
     </div>
   );
 };
-

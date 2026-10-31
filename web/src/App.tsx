@@ -10,6 +10,7 @@ import {
   Settings,
   FolderGit2,
   AlertCircle,
+  X,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import type {
@@ -51,6 +52,7 @@ export default function App() {
   // Navigation & View
   const [activeView, setActiveView] = useState<'workspace' | 'dashboard' | 'history'>('workspace');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [inspectorDrawerOpen, setInspectorDrawerOpen] = useState(false);
 
   // Tasks state
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -416,6 +418,8 @@ export default function App() {
         onOpenAuth={() => setShowAuthModal(true)}
         mobileMenuOpen={mobileMenuOpen}
         onToggleMobileMenu={() => setMobileMenuOpen(!mobileMenuOpen)}
+        onToggleInspectorDrawer={() => setInspectorDrawerOpen((prev) => !prev)}
+        inspectorDrawerOpen={inspectorDrawerOpen}
       />
 
       {/* Main View Router with Smooth Motion Transitions */}
@@ -466,6 +470,11 @@ export default function App() {
               onRefreshTasks={fetchTasks}
               repoMeta={repoMeta}
               className={mobileMenuOpen ? 'mobile-open' : ''}
+              activeView={activeView}
+              onViewChange={(view) => {
+                setActiveView(view);
+                setMobileMenuOpen(false);
+              }}
             />
 
             {/* Center Column: Execution Workspace */}
@@ -550,6 +559,96 @@ export default function App() {
               </div>
             </aside>
           </motion.main>
+        )}
+      </AnimatePresence>
+
+      {/* Mobile Sidebar Backdrop */}
+      {mobileMenuOpen && (
+        <div
+          className="sidebar-mobile-backdrop"
+          style={{
+            position: 'fixed',
+            inset: 0,
+            top: '58px',
+            background: 'rgba(0, 0, 0, 0.65)',
+            backdropFilter: 'blur(4px)',
+            zIndex: 45,
+          }}
+          onClick={() => setMobileMenuOpen(false)}
+        />
+      )}
+
+      {/* Responsive Inspector Drawer Sheet (Tablets & Mobile) */}
+      <AnimatePresence>
+        {inspectorDrawerOpen && (
+          <div
+            className="inspector-drawer-backdrop"
+            onClick={() => setInspectorDrawerOpen(false)}
+          >
+            <motion.div
+              className="inspector-drawer-sheet"
+              initial={{ x: '100%' }}
+              animate={{ x: 0 }}
+              exit={{ x: '100%' }}
+              transition={{ type: 'spring', damping: 26, stiffness: 280 }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="inspector-drawer-header">
+                <div className="inspector-tabs-header" style={{ borderBottom: 'none', padding: 0 }}>
+                  <button
+                    className={`inspector-tab-btn ${rightPanelTab === 'stream' ? 'active' : ''}`}
+                    onClick={() => setRightPanelTab('stream')}
+                  >
+                    <Terminal size={13} />
+                    <span>Live Stream</span>
+                    {logs.length > 0 && <span className="tab-pill">{logs.length}</span>}
+                  </button>
+
+                  <button
+                    className={`inspector-tab-btn ${rightPanelTab === 'verifications' ? 'active' : ''}`}
+                    onClick={() => setRightPanelTab('verifications')}
+                  >
+                    <ShieldCheck size={13} />
+                    <span>Verifications</span>
+                    {taskDetails?.verifications && taskDetails.verifications.length > 0 && (
+                      <span className="tab-pill">{taskDetails.verifications.length}</span>
+                    )}
+                  </button>
+
+                  <button
+                    className={`inspector-tab-btn ${rightPanelTab === 'diff' ? 'active' : ''}`}
+                    onClick={() => setRightPanelTab('diff')}
+                  >
+                    <FileCode size={13} />
+                    <span>Git Diff</span>
+                    {activeDiff && <span className="diff-active-dot" />}
+                  </button>
+                </div>
+
+                <button
+                  className="header-icon-btn"
+                  onClick={() => setInspectorDrawerOpen(false)}
+                  aria-label="Close inspector drawer"
+                >
+                  <X size={16} />
+                </button>
+              </div>
+
+              <div className="inspector-tab-content">
+                {rightPanelTab === 'stream' && (
+                  <LiveTerminal logs={logs} selectedTaskId={selectedTaskId} />
+                )}
+
+                {rightPanelTab === 'verifications' && (
+                  <VerificationReports
+                    verifications={taskDetails?.verifications || []}
+                  />
+                )}
+
+                {rightPanelTab === 'diff' && <DiffViewer diffText={activeDiff} />}
+              </div>
+            </motion.div>
+          </div>
         )}
       </AnimatePresence>
 

@@ -12,10 +12,11 @@ import {
   Box,
   Menu,
   X,
+  SlidersHorizontal,
 } from 'lucide-react';
+import { motion } from 'motion/react';
 import type { SystemStatus } from '../../types/index.js';
 import { Button } from '../ui/Button.js';
-import { Badge } from '../ui/Badge.js';
 
 interface AppHeaderProps {
   systemStatus: SystemStatus | null;
@@ -27,6 +28,8 @@ interface AppHeaderProps {
   onOpenAuth: () => void;
   mobileMenuOpen: boolean;
   onToggleMobileMenu: () => void;
+  onToggleInspectorDrawer?: () => void;
+  inspectorDrawerOpen?: boolean;
 }
 
 export const AppHeader: React.FC<AppHeaderProps> = ({
@@ -39,7 +42,11 @@ export const AppHeader: React.FC<AppHeaderProps> = ({
   onOpenAuth,
   mobileMenuOpen,
   onToggleMobileMenu,
+  onToggleInspectorDrawer,
+  inspectorDrawerOpen,
 }) => {
+  const isOnline = systemStatus?.status === 'online';
+
   return (
     <header className="app-header">
       <div className="header-left">
@@ -63,7 +70,7 @@ export const AppHeader: React.FC<AppHeaderProps> = ({
           </div>
         </div>
 
-        {/* View Switcher Tabs (Linear / Vercel style) */}
+        {/* View Switcher Tabs (Midnight Slate + Electric Violet) */}
         <nav className="header-nav">
           <button
             className={`nav-tab ${activeView === 'workspace' ? 'active' : ''}`}
@@ -94,16 +101,16 @@ export const AppHeader: React.FC<AppHeaderProps> = ({
         <div className="status-pill-group">
           {/* Brain Model Pill */}
           <div className="system-pill" title="Active LLM Brain">
-            <span className="status-dot online" />
+            <span className={`status-dot ${isOnline ? 'online' : 'offline'}`} />
             <span className="pill-label">Brain:</span>
             <span className="pill-value">{systemStatus?.geminiModel || 'Gemini'}</span>
           </div>
 
           {/* Independent Verifier Pill */}
           <div className="system-pill" title="Independent Verification Gate">
-            <ShieldCheck size={13} className="text-emerald" />
+            <ShieldCheck size={13} style={{ color: 'var(--status-success)' }} />
             <span className="pill-label">Verifier:</span>
-            <span className="pill-value text-emerald">Strict</span>
+            <span className="pill-value" style={{ color: 'var(--status-success)' }}>Strict</span>
           </div>
 
           {/* Docker Sandbox Pill */}
@@ -115,13 +122,25 @@ export const AppHeader: React.FC<AppHeaderProps> = ({
                 : 'Host Process Sandbox Active'
             }
           >
-            <Box size={13} className="text-sky" />
+            <Box size={13} style={{ color: 'var(--accent-secondary)' }} />
             <span className="pill-label">Sandbox:</span>
             <span className="pill-value">
               {systemStatus?.containerSandboxEnabled ? 'Docker' : 'Local'}
             </span>
           </div>
         </div>
+
+        {/* Tablet Inspector Toggle Button */}
+        {onToggleInspectorDrawer && (
+          <button
+            className={`header-icon-btn mobile-inspector-toggle-btn ${inspectorDrawerOpen ? 'active' : ''}`}
+            onClick={onToggleInspectorDrawer}
+            title="Toggle Telemetry Inspector"
+            aria-label="Toggle Telemetry Inspector"
+          >
+            <SlidersHorizontal size={15} />
+          </button>
+        )}
 
         {/* Authentication Button */}
         <button
@@ -142,7 +161,7 @@ export const AppHeader: React.FC<AppHeaderProps> = ({
           )}
         </button>
 
-        {/* Action Buttons */}
+        {/* Primary Action Button */}
         <Button
           variant="primary"
           size="sm"
@@ -152,6 +171,7 @@ export const AppHeader: React.FC<AppHeaderProps> = ({
           New Mission
         </Button>
 
+        {/* Settings Button */}
         <button
           className="header-icon-btn"
           onClick={onOpenSettings}
@@ -163,4 +183,3 @@ export const AppHeader: React.FC<AppHeaderProps> = ({
     </header>
   );
 };
-
