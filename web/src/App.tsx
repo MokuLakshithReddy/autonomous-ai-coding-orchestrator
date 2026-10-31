@@ -1,223 +1,198 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
-  Play,
   Terminal,
   ShieldCheck,
-  Cpu,
-  GitBranch,
-  RefreshCw,
-  PlusCircle,
   FileCode,
-  CheckCircle2,
-  AlertTriangle,
-  XCircle,
-  Settings,
   Layers,
-  ArrowRight,
-  ShieldAlert,
+  Cpu,
+  RefreshCw,
+  Plus,
+  Settings,
   FolderGit2,
-  Key,
-  Lock,
-  Unlock
+  AlertCircle,
 } from 'lucide-react';
+import type {
+  Task,
+  Step,
+  Verification,
+  Approval,
+  TaskDetailsData,
+  WsEvent,
+  SystemStatus,
+  RepoMeta,
+} from './types/index.js';
+import {
+  apiFetch,
+  requestWsTicket,
+  getStoredApiToken,
+  setStoredApiToken,
+} from './lib/api.js';
 
-interface Task {
-  id: string;
-  title: string;
-  prompt: string;
-  workspacePath: string;
-  status: string;
-  retryCount: number;
-  maxRetries: number;
-  planJson?: string;
-  summary?: string;
-  createdAt: string;
-  updatedAt: string;
-}
+// Layout & Views
+import { AppHeader } from './components/layout/AppHeader.js';
+import { AppSidebar } from './components/layout/AppSidebar.js';
+import { DashboardOverview } from './components/dashboard/DashboardOverview.js';
+import { TaskDetailView } from './components/task/TaskDetailView.js';
+import { TaskHistoryView } from './components/history/TaskHistoryView.js';
 
-interface Step {
-  id: string;
-  taskId: string;
-  stepIndex: number;
-  title: string;
-  instruction: string;
-  status: string;
-  agent: string;
-  toolsUsedJson?: string;
-  outputLog?: string;
-  diffSummary?: string;
-  exitCode?: number;
-}
+// Terminal & Inspector
+import { LiveTerminal } from './components/terminal/LiveTerminal.js';
+import { VerificationReports } from './components/terminal/VerificationReports.js';
+import { DiffViewer } from './components/terminal/DiffViewer.js';
 
-interface Verification {
-  id: string;
-  taskId: string;
-  status: string;
-  buildStatus: string;
-  testStatus: string;
-  lintStatus: string;
-  diffInspection: string;
-  diagnostics?: string;
-  createdAt: string;
-}
-
-interface WsEvent {
-  id: string;
-  taskId: string;
-  type: string;
-  message: string;
-  data?: any;
-  timestamp: string;
-}
+// Modals
+import { NewTaskModal } from './components/modals/NewTaskModal.js';
+import { SettingsModal } from './components/modals/SettingsModal.js';
+import { AuthModal } from './components/modals/AuthModal.js';
 
 export default function App() {
+  // Navigation & View
+  const [activeView, setActiveView] = useState<'workspace' | 'dashboard' | 'history'>('workspace');
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+
+  // Tasks state
   const [tasks, setTasks] = useState<Task[]>([]);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
-  const [taskDetails, setTaskDetails] = useState<{
-    task: Task;
-    steps: Step[];
-    verifications: Verification[];
-    pendingApprovals: any[];
-  } | null>(null);
+  const [taskDetails, setTaskDetails] = useState<TaskDetailsData | null>(null);
+  const [isLoadingTask, setIsLoadingTask] = useState(false);
 
-  const [systemStatus, setSystemStatus] = useState<any>(null);
-  const [repoMeta, setRepoMeta] = useState<any>(null);
+  // System & Repo metadata
+  const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
+  const [repoMeta, setRepoMeta] = useState<RepoMeta | null>(null);
+  const [defaultWorkspace, setDefaultWorkspace] = useState<string>('');
+
+  // Right Panel Tabs
+  const [rightPanelTab, setRightPanelTab] = useState<'stream' | 'verifications' | 'diff'>('stream');
+
+  // Logs stream
   const [logs, setLogs] = useState<WsEvent[]>([]);
-  const [activeTab, setActiveTab] = useState<'stream' | 'verifications' | 'diff'>('stream');
 
-  // Authentication states
-  const [apiToken, setApiToken] = useState<string>(() => {
-    return localStorage.getItem('orchestrator_api_token') || '';
-  });
-  const [tokenInput, setTokenInput] = useState<string>('');
+  // Authentication state
+  const [apiToken, setApiToken] = useState<string>(getStoredApiToken);
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
   const [showAuthModal, setShowAuthModal] = useState<boolean>(false);
   const [authError, setAuthError] = useState<string>('');
 
-  // Modals
+  // Modals state
   const [showNewTaskModal, setShowNewTaskModal] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
 
-  // Form states
-  const [newPrompt, setNewPrompt] = useState('');
-  const [newWorkspace, setNewWorkspace] = useState('');
-  const [newRetries, setNewRetries] = useState(3);
-  const [selectedAgent, setSelectedAgent] = useState<'builtin' | 'aider' | 'claude'>('builtin');
-  const [autoMerge, setAutoMerge] = useState(false);
-  const [apiKeyInput, setApiKeyInput] = useState('');
-  const [modelInput, setModelInput] = useState('gemini-2.5-flash');
-
-  const terminalEndRef = useRef<HTMLDivElement>(null);
+  // WebSocket reference
   const wsRef = useRef<WebSocket | null>(null);
 
-  // Authenticated fetch wrapper
-  const apiFetch = useCallback(
-    async (url: string, options: RequestInit = {}, explicitToken?: string) => {
-      const token = explicitToken ?? (apiToken || localStorage.getItem('orchestrator_api_token') || '');
-      const headers: Record<string, string> = {
-        ...((options.headers as Record<string, string>) || {}),
-      };
-      if (token) {
-        headers['Authorization'] = `Bearer ${token}`;
-        headers['x-api-token'] = token;
-      }
-
-      const res = await fetch(url, { ...options, headers });
-      if (res.status === 401) {
-        setIsAuthenticated(false);
-        setShowAuthModal(true);
-        setAuthError('Authentication required or token expired. Please enter your API token.');
-      } else if (res.ok) {
-        setIsAuthenticated(true);
-        setAuthError('');
-      }
-      return res;
-    },
-    [apiToken]
-  );
-
-  // Load system status & task list
-  const fetchStatus = async () => {
+  // Fetch system status
+  const fetchSystemStatus = useCallback(async () => {
     try {
       const res = await fetch('/api/system/status');
-      const data = await res.json();
-      setSystemStatus(data);
-      if (!newWorkspace && data.defaultWorkspace) {
-        setNewWorkspace(data.defaultWorkspace);
-      }
-    } catch {}
-  };
-
-  const fetchTasks = async (overrideToken?: string) => {
-    try {
-      const res = await apiFetch('/api/tasks', {}, overrideToken);
       if (res.ok) {
         const data = await res.json();
-        setTasks(data.tasks || []);
-        if (data.tasks?.length > 0 && !selectedTaskId) {
-          setSelectedTaskId(data.tasks[0].id);
+        setSystemStatus(data);
+        if (data.defaultWorkspace) {
+          setDefaultWorkspace(data.defaultWorkspace);
         }
       }
-    } catch {}
-  };
+    } catch (err) {
+      console.warn('Failed to fetch system status:', err);
+    }
+  }, []);
 
-  const fetchTaskDetails = async (id: string, overrideToken?: string) => {
+  // Fetch task list
+  const fetchTasks = useCallback(
+    async (tokenOverride?: string) => {
+      try {
+        const res = await apiFetch('/api/tasks', {
+          explicitToken: tokenOverride,
+          onUnauthorized: () => {
+            setIsAuthenticated(false);
+            setShowAuthModal(true);
+            setAuthError('Authentication required to access tasks.');
+          },
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          setTasks(data.tasks || []);
+          setIsAuthenticated(true);
+          setAuthError('');
+
+          // Select first task if none selected
+          if (data.tasks?.length > 0 && !selectedTaskId) {
+            setSelectedTaskId(data.tasks[0].id);
+          }
+        }
+      } catch (err) {
+        console.warn('Failed to fetch tasks:', err);
+      }
+    },
+    [selectedTaskId]
+  );
+
+  // Fetch task details
+  const fetchTaskDetails = useCallback(
+    async (id: string, tokenOverride?: string) => {
+      setIsLoadingTask(true);
+      try {
+        const res = await apiFetch(`/api/tasks/${id}`, {
+          explicitToken: tokenOverride,
+          onUnauthorized: () => {
+            setIsAuthenticated(false);
+            setShowAuthModal(true);
+          },
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          setTaskDetails(data);
+          setIsAuthenticated(true);
+
+          if (data.task?.workspacePath) {
+            inspectWorkspace(data.task.workspacePath, tokenOverride);
+          }
+        }
+      } catch (err) {
+        console.warn(`Failed to fetch task details for ${id}:`, err);
+      } finally {
+        setIsLoadingTask(false);
+      }
+    },
+    []
+  );
+
+  // Inspect repository workspace
+  const inspectWorkspace = useCallback(async (workspacePath: string, tokenOverride?: string) => {
     try {
-      const res = await apiFetch(`/api/tasks/${id}`, {}, overrideToken);
+      const res = await apiFetch('/api/repo/inspect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspacePath }),
+        explicitToken: tokenOverride,
+      });
+
       if (res.ok) {
         const data = await res.json();
-        setTaskDetails(data);
+        setRepoMeta(data.meta || null);
       }
-    } catch {}
-  };
+    } catch (err) {
+      console.warn('Workspace inspection skipped:', err);
+    }
+  }, []);
 
-  const inspectRepo = async (workspacePath: string, overrideToken?: string) => {
-    try {
-      const res = await apiFetch(
-        '/api/repo/inspect',
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ workspacePath }),
-        },
-        overrideToken
-      );
-      if (res.ok) {
-        const data = await res.json();
-        setRepoMeta(data.meta);
-      }
-    } catch {}
-  };
-
-  // Authenticated WebSocket Connection
-  const connectWs = useCallback(
+  // WebSocket Connection Handler
+  const connectWebSocket = useCallback(
     async (tokenToUse?: string) => {
       if (wsRef.current) {
         wsRef.current.close();
         wsRef.current = null;
       }
 
-      const token = tokenToUse ?? (apiToken || localStorage.getItem('orchestrator_api_token') || '');
+      const activeTok = tokenToUse ?? apiToken;
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       let wsUrl = `${protocol}//${window.location.host}/ws`;
 
-      if (token) {
-        try {
-          const ticketRes = await fetch('/api/auth/ws-ticket', {
-            method: 'POST',
-            headers: {
-              'Authorization': `Bearer ${token}`,
-              'x-api-token': token,
-            },
-          });
-          if (ticketRes.ok) {
-            const { ticket } = await ticketRes.json();
-            if (ticket) {
-              wsUrl += `?ticket=${encodeURIComponent(ticket)}`;
-            }
-          }
-        } catch (err) {
-          console.warn('Could not acquire WS ticket pre-handshake:', err);
+      if (activeTok) {
+        const ticket = await requestWsTicket(activeTok);
+        if (ticket) {
+          wsUrl += `?ticket=${encodeURIComponent(ticket)}`;
         }
       }
 
@@ -225,20 +200,20 @@ export default function App() {
       wsRef.current = ws;
 
       ws.onopen = () => {
-        if (token) {
-          ws.send(JSON.stringify({ type: 'AUTH', token }));
+        if (activeTok) {
+          ws.send(JSON.stringify({ type: 'AUTH', token: activeTok }));
         }
       };
 
       ws.onmessage = (event) => {
         try {
           const parsed: WsEvent = JSON.parse(event.data);
-          setLogs((prev) => [...prev.slice(-300), parsed]);
+          setLogs((prev) => [...prev.slice(-400), parsed]);
 
           if (parsed.taskId) {
-            fetchTasks(token);
+            fetchTasks(activeTok);
             if (parsed.taskId === selectedTaskId) {
-              fetchTaskDetails(parsed.taskId, token);
+              fetchTaskDetails(parsed.taskId, activeTok);
             }
           }
         } catch {}
@@ -247,33 +222,34 @@ export default function App() {
       ws.onclose = (event) => {
         if (event.code === 1008) {
           setIsAuthenticated(false);
-          console.warn('WebSocket closed due to auth failure (1008)');
+          console.warn('WebSocket closed due to authentication failure (1008)');
         }
       };
     },
-    [apiToken, selectedTaskId, apiFetch]
+    [apiToken, selectedTaskId, fetchTasks, fetchTaskDetails]
   );
 
+  // Initialize on mount
   useEffect(() => {
     const urlParams = new URLSearchParams(window.location.search);
     const tokenFromUrl = urlParams.get('token');
-    let effectiveToken = localStorage.getItem('orchestrator_api_token') || '';
+    let effectiveToken = getStoredApiToken();
 
     if (tokenFromUrl) {
       effectiveToken = tokenFromUrl.trim();
-      localStorage.setItem('orchestrator_api_token', effectiveToken);
+      setStoredApiToken(effectiveToken);
       urlParams.delete('token');
-      const cleanUrl = window.location.pathname + (urlParams.toString() ? `?${urlParams.toString()}` : '');
+      const cleanUrl =
+        window.location.pathname + (urlParams.toString() ? `?${urlParams.toString()}` : '');
       window.history.replaceState({}, '', cleanUrl);
     }
 
     setApiToken(effectiveToken);
-    setTokenInput(effectiveToken);
+    fetchSystemStatus();
 
-    fetchStatus();
     if (effectiveToken) {
       fetchTasks(effectiveToken);
-      connectWs(effectiveToken);
+      connectWebSocket(effectiveToken);
     } else {
       setShowAuthModal(true);
     }
@@ -283,705 +259,298 @@ export default function App() {
     };
   }, []);
 
+  // When selected task changes
   useEffect(() => {
     if (selectedTaskId) {
       fetchTaskDetails(selectedTaskId);
     }
-  }, [selectedTaskId]);
+  }, [selectedTaskId, fetchTaskDetails]);
 
-  useEffect(() => {
-    if (newWorkspace) {
-      inspectRepo(newWorkspace);
-    }
-  }, [newWorkspace]);
+  // Handle task selection
+  const handleSelectTask = (id: string) => {
+    setSelectedTaskId(id);
+    setActiveView('workspace');
+    setMobileMenuOpen(false);
+  };
 
-  useEffect(() => {
-    terminalEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [logs]);
+  // Handle task launch
+  const handleCreateTask = async (taskData: {
+    prompt: string;
+    workspacePath: string;
+    agent: 'builtin' | 'aider' | 'claude';
+    autoMerge: boolean;
+    maxRetries: number;
+  }) => {
+    const res = await apiFetch('/api/tasks', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(taskData),
+      onUnauthorized: () => {
+        setIsAuthenticated(false);
+        setShowAuthModal(true);
+      },
+    });
 
-  const handleCreateTask = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newPrompt.trim()) return;
-
-    try {
-      const res = await apiFetch('/api/tasks', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          prompt: newPrompt,
-          workspacePath: newWorkspace,
-          maxRetries: newRetries,
-          agent: selectedAgent,
-          autoMerge,
-        }),
-      });
-
-      if (res.ok) {
-        const data = await res.json();
-        setShowNewTaskModal(false);
-        setNewPrompt('');
-        fetchTasks();
+    if (res.ok) {
+      const data = await res.json();
+      setShowNewTaskModal(false);
+      await fetchTasks();
+      if (data.task?.id) {
         setSelectedTaskId(data.task.id);
-      } else {
-        const errData = await res.json().catch(() => ({}));
-        let detailedMessage = errData.message || errData.error || '';
-        if (!detailedMessage || detailedMessage === 'Forbidden') {
-          if (res.status === 403) {
-            detailedMessage = 'Workspace forbidden: The specified directory is outside authorized roots or requires ALLOW_UNRESTRICTED_WORKSPACES=true in .env.';
-          } else if (res.status === 400) {
-            detailedMessage = 'Invalid request: Please ensure the workspace path points to an initialized Git repository (.git).';
-          } else {
-            detailedMessage = res.statusText || `Request failed with HTTP status ${res.status}`;
-          }
-        }
-        alert(`Failed to launch task:\n\n${detailedMessage}`);
+        setActiveView('workspace');
       }
-    } catch (err: any) {
-      alert(`Failed to launch task: ${err?.message || 'Network error'}`);
+    } else {
+      const err = await res.json().catch(() => ({}));
+      const msg = err.message || err.error || res.statusText || 'Failed to create task';
+      alert(`Could not launch autonomous mission:\n\n${msg}`);
+      throw new Error(msg);
     }
   };
 
-  const handleSaveSettings = async (e: React.FormEvent) => {
-    e.preventDefault();
+  // Handle task cancellation
+  const handleCancelTask = async (id: string) => {
     try {
-      if (apiKeyInput) {
-        const res = await apiFetch('/api/config/gemini', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ apiKey: apiKeyInput, model: modelInput }),
-        });
-        if (!res.ok) {
-          throw new Error('Failed to update Gemini config');
-        }
-      }
-
-      if (tokenInput.trim()) {
-        const trimmed = tokenInput.trim();
-        localStorage.setItem('orchestrator_api_token', trimmed);
-        setApiToken(trimmed);
-        fetchTasks(trimmed);
-        connectWs(trimmed);
-      }
-
-      setShowSettingsModal(false);
-      fetchStatus();
-      alert('Settings updated successfully!');
-    } catch {
-      alert('Failed to update settings');
-    }
-  };
-
-  const handleConnectAuth = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const candidate = tokenInput.trim();
-    if (!candidate) {
-      setAuthError('Please enter a valid API token');
-      return;
-    }
-
-    try {
-      const testRes = await fetch('/api/tasks', {
-        headers: {
-          'Authorization': `Bearer ${candidate}`,
-          'x-api-token': candidate,
-        },
+      const res = await apiFetch(`/api/tasks/${id}/cancel`, {
+        method: 'POST',
       });
-
-      if (testRes.ok) {
-        localStorage.setItem('orchestrator_api_token', candidate);
-        setApiToken(candidate);
-        setIsAuthenticated(true);
-        setShowAuthModal(false);
-        setAuthError('');
-        const data = await testRes.json();
-        setTasks(data.tasks || []);
-        if (data.tasks?.length > 0 && !selectedTaskId) {
-          setSelectedTaskId(data.tasks[0].id);
-        }
-        connectWs(candidate);
-      } else {
-        setAuthError('Authentication failed: Invalid API token.');
+      if (res.ok) {
+        await fetchTaskDetails(id);
+        await fetchTasks();
       }
     } catch (err: any) {
-      setAuthError(`Connection error: ${err.message || 'Cannot reach server'}`);
+      alert(`Failed to cancel task: ${err.message || 'Error'}`);
     }
   };
 
-  const handleApprove = async (approvalId: string, status: 'APPROVED' | 'REJECTED') => {
+  // Handle approval response
+  const handleApprovalResponse = async (approvalId: string, status: 'APPROVED' | 'REJECTED') => {
     try {
-      await apiFetch(`/api/approvals/${approvalId}/respond`, {
+      const res = await apiFetch(`/api/approvals/${approvalId}/respond`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status }),
       });
-      if (selectedTaskId) fetchTaskDetails(selectedTaskId);
-    } catch {}
+
+      if (res.ok) {
+        if (selectedTaskId) {
+          fetchTaskDetails(selectedTaskId);
+        }
+      } else if (res.status === 409) {
+        alert('This approval was already resolved or has expired.');
+        if (selectedTaskId) fetchTaskDetails(selectedTaskId);
+      }
+    } catch (err: any) {
+      alert(`Approval error: ${err.message || 'Network error'}`);
+    }
   };
 
-  const selectedTask = taskDetails?.task;
-  const plan = selectedTask?.planJson ? JSON.parse(selectedTask.planJson) : null;
+  // Handle settings update
+  const handleSaveSettings = async (data: {
+    token?: string;
+    apiKey?: string;
+    model?: string;
+  }) => {
+    if (data.apiKey || data.model) {
+      await apiFetch('/api/config/gemini', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          apiKey: data.apiKey,
+          model: data.model,
+        }),
+      });
+    }
+
+    if (data.token !== undefined) {
+      setStoredApiToken(data.token);
+      setApiToken(data.token);
+      fetchTasks(data.token);
+      connectWebSocket(data.token);
+    }
+
+    fetchSystemStatus();
+  };
+
+  // Handle explicit authentication
+  const handleAuthenticate = async (candidateToken: string): Promise<boolean> => {
+    try {
+      const res = await fetch('/api/tasks', {
+        headers: {
+          'Authorization': `Bearer ${candidateToken}`,
+          'x-api-token': candidateToken,
+        },
+      });
+
+      if (res.ok) {
+        setStoredApiToken(candidateToken);
+        setApiToken(candidateToken);
+        setIsAuthenticated(true);
+        setAuthError('');
+        const data = await res.json();
+        setTasks(data.tasks || []);
+        if (data.tasks?.length > 0 && !selectedTaskId) {
+          setSelectedTaskId(data.tasks[0].id);
+        }
+        connectWebSocket(candidateToken);
+        return true;
+      }
+    } catch {}
+    return false;
+  };
+
+  // Compute active diff summary across task steps
+  const activeDiff = taskDetails?.steps?.find((s) => s.diffSummary)?.diffSummary || '';
 
   return (
-    <div className="app-container">
-      {/* Top Navigation */}
-      <header className="top-navbar">
-        <div className="brand-section">
-          <div className="brand-logo">
-            <Cpu size={22} color="#fff" />
-          </div>
-          <div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-              <span className="brand-title">AUTONOMOUS ORCHESTRATOR</span>
-              <span className="brand-badge">Local-First</span>
-            </div>
-          </div>
-        </div>
+    <div className="orchestrator-app-shell">
+      {/* Top Application Header */}
+      <AppHeader
+        systemStatus={systemStatus}
+        isAuthenticated={isAuthenticated}
+        activeView={activeView}
+        onViewChange={setActiveView}
+        onOpenNewTask={() => setShowNewTaskModal(true)}
+        onOpenSettings={() => setShowSettingsModal(true)}
+        onOpenAuth={() => setShowAuthModal(true)}
+        mobileMenuOpen={mobileMenuOpen}
+        onToggleMobileMenu={() => setMobileMenuOpen(!mobileMenuOpen)}
+      />
 
-        <div className="nav-actions">
-          <div className="status-indicator">
-            <span className="pulse-dot" />
-            <span>Brain: <strong>{systemStatus?.geminiModel || 'Gemini 3.8 / 2.5 Flash'}</strong></span>
-          </div>
+      {/* Main View Router */}
+      {activeView === 'dashboard' ? (
+        <main className="dashboard-fullscreen-view">
+          <DashboardOverview
+            tasks={tasks}
+            systemStatus={systemStatus}
+            repoMeta={repoMeta}
+            onSelectTask={handleSelectTask}
+            onOpenNewTask={() => setShowNewTaskModal(true)}
+          />
+        </main>
+      ) : activeView === 'history' ? (
+        <main className="history-fullscreen-view">
+          <TaskHistoryView tasks={tasks} onSelectTask={handleSelectTask} />
+        </main>
+      ) : (
+        /* Mission Control Workspace (3-Column Layout) */
+        <main className="mission-control-grid">
+          {/* Left Column: Tasks & Repository Sidebar */}
+          <AppSidebar
+            tasks={tasks}
+            selectedTaskId={selectedTaskId}
+            onSelectTask={handleSelectTask}
+            onRefreshTasks={fetchTasks}
+            repoMeta={repoMeta}
+            className={mobileMenuOpen ? 'mobile-open' : ''}
+          />
 
-          <div className="status-indicator">
-            <ShieldCheck size={14} color="#10b981" />
-            <span>Independent Verifier: <strong>Enforcing</strong></span>
-          </div>
-
-          <button
-            className="status-indicator"
-            style={{
-              cursor: 'pointer',
-              background: isAuthenticated ? 'rgba(16, 185, 129, 0.1)' : 'rgba(245, 158, 11, 0.1)',
-              border: `1px solid ${isAuthenticated ? 'rgba(16, 185, 129, 0.3)' : 'rgba(245, 158, 11, 0.3)'}`,
-              borderRadius: 20,
-              padding: '0.35rem 0.75rem',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '0.4rem',
-            }}
-            onClick={() => {
-              setTokenInput(apiToken);
-              setShowAuthModal(true);
-            }}
-            title="Click to manage Orchestrator Server API Token"
-          >
-            {isAuthenticated ? (
-              <>
-                <Key size={14} color="#10b981" />
-                <span style={{ color: '#10b981' }}>API Connected</span>
-              </>
+          {/* Center Column: Execution Workspace */}
+          <section className="mission-workspace-column" role="main">
+            {taskDetails?.task ? (
+              <TaskDetailView
+                task={taskDetails.task}
+                steps={taskDetails.steps}
+                verifications={taskDetails.verifications}
+                pendingApprovals={taskDetails.pendingApprovals}
+                onApprove={(id) => handleApprovalResponse(id, 'APPROVED')}
+                onReject={(id) => handleApprovalResponse(id, 'REJECTED')}
+                onCancelTask={handleCancelTask}
+              />
             ) : (
-              <>
-                <ShieldAlert size={14} color="#f59e0b" />
-                <span style={{ color: '#f59e0b' }}>Auth Required</span>
-              </>
-            )}
-          </button>
-
-          <button className="new-task-btn" onClick={() => setShowNewTaskModal(true)}>
-            <PlusCircle size={15} />
-            <span>New Task</span>
-          </button>
-
-          <button className="btn-secondary" style={{ padding: '0.45rem 0.75rem' }} onClick={() => setShowSettingsModal(true)}>
-            <Settings size={15} />
-          </button>
-        </div>
-      </header>
-
-      {/* Main Grid */}
-      <main className="dashboard-grid">
-        {/* Left Sidebar */}
-        <section className="sidebar-panel">
-          <div className="panel-header">
-            <span className="panel-title">
-              <Layers size={14} />
-              Tasks & Missions
-            </span>
-            <button
-              onClick={() => fetchTasks()}
-              style={{ background: 'none', border: 'none', color: '#64748b', cursor: 'pointer' }}
-            >
-              <RefreshCw size={14} />
-            </button>
-          </div>
-
-          <div className="task-list">
-            {tasks.length === 0 ? (
-              <div style={{ padding: '2rem 1rem', textAlign: 'center', color: '#64748b', fontSize: '0.85rem' }}>
-                No active tasks found.<br />Click <strong>New Task</strong> to begin an autonomous run.
-              </div>
-            ) : (
-              tasks.map((t) => (
-                <div
-                  key={t.id}
-                  className={`task-card ${t.id === selectedTaskId ? 'active' : ''}`}
-                  onClick={() => setSelectedTaskId(t.id)}
+              <div className="empty-workspace-state">
+                <div className="empty-workspace-icon">
+                  <Cpu size={44} />
+                </div>
+                <h2 className="empty-state-heading">No Task Selected</h2>
+                <p className="empty-state-text">
+                  Select an existing mission from the sidebar or launch a new autonomous run.
+                </p>
+                <button
+                  className="empty-state-cta-btn"
+                  onClick={() => setShowNewTaskModal(true)}
                 >
-                  <div className="task-card-header">
-                    <span className={`task-badge badge-${t.status.toLowerCase()}`}>
-                      {t.status}
-                    </span>
-                    <span style={{ fontSize: '0.7rem', color: '#64748b' }}>
-                      {new Date(t.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                    </span>
-                  </div>
-                  <div className="task-card-title">{t.title}</div>
-                  <div className="task-card-meta">
-                    <span>Retries: {t.retryCount} / {t.maxRetries}</span>
-                  </div>
-                </div>
-              ))
-            )}
-          </div>
-
-          {/* Repo Quick Status Card */}
-          {repoMeta && (
-            <div style={{ padding: '1rem', borderTop: '1px solid var(--border-subtle)', background: 'rgba(0,0,0,0.2)' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.75rem', color: '#94a3b8', marginBottom: '0.4rem' }}>
-                <FolderGit2 size={13} color="#06b6d4" />
-                <span>Repo: <strong>{repoMeta.branch || 'detached'}</strong></span>
-              </div>
-              <div style={{ fontSize: '0.72rem', color: '#64748b' }}>
-                Ecosystem: {repoMeta.ecosystems?.join(', ') || 'general'} | Build: {repoMeta.buildCmd ? 'Detected' : 'None'}
-              </div>
-            </div>
-          )}
-        </section>
-
-        {/* Center Panel: Task Execution Workspace */}
-        <section className="center-panel">
-          {selectedTask ? (
-            <>
-              <div className="center-header">
-                <div className="task-headline">
-                  <h1>{selectedTask.title}</h1>
-                  <p>{selectedTask.prompt}</p>
-                </div>
-                <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
-                  <span className={`task-badge badge-${selectedTask.status.toLowerCase()}`} style={{ fontSize: '0.8rem', padding: '4px 10px' }}>
-                    {selectedTask.status}
-                  </span>
-                </div>
-              </div>
-
-              {/* State Transition Flow */}
-              <div className="state-stepper">
-                {['discovering', 'planning', 'ready', 'executing', 'verifying', 'completed'].map((st, i, arr) => {
-                  const currentNorm = selectedTask.status.toLowerCase();
-                  const isCurrent = currentNorm === st;
-                  const isDone = ['completed'].includes(currentNorm) || (currentNorm !== 'failed' && currentNorm !== 'blocked' && i < arr.indexOf(currentNorm));
-                  return (
-                    <React.Fragment key={st}>
-                      <div className={`step-node ${isCurrent ? 'active' : ''} ${isDone ? 'completed' : ''}`}>
-                        {isDone ? <CheckCircle2 size={13} /> : <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'currentColor' }} />}
-                        <span style={{ textTransform: 'uppercase' }}>{st}</span>
-                      </div>
-                      {i < arr.length - 1 && <div className="step-connector" />}
-                    </React.Fragment>
-                  );
-                })}
-              </div>
-
-              <div className="center-content">
-                {/* Pending Human Approval Gate */}
-                {taskDetails?.pendingApprovals && taskDetails.pendingApprovals.length > 0 && (
-                  <div className="approval-banner">
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                      <ShieldAlert size={24} color="#f59e0b" />
-                      <div>
-                        <div style={{ fontWeight: 700, fontSize: '0.9rem', color: '#fbbf24' }}>
-                          Human Approval Required
-                        </div>
-                        <div style={{ fontSize: '0.8rem', color: '#cbd5e1' }}>
-                          {taskDetails.pendingApprovals[0].details}
-                        </div>
-                      </div>
-                    </div>
-                    <div className="approval-actions">
-                      <button
-                        className="btn-approve"
-                        onClick={() => handleApprove(taskDetails.pendingApprovals[0].id, 'APPROVED')}
-                      >
-                        Approve Action
-                      </button>
-                      <button
-                        className="btn-reject"
-                        onClick={() => handleApprove(taskDetails.pendingApprovals[0].id, 'REJECTED')}
-                      >
-                        Reject
-                      </button>
-                    </div>
-                  </div>
-                )}
-
-                {/* Plan & Milestones */}
-                {plan && (
-                  <div className="card-section">
-                    <div className="section-title">
-                      <Layers size={16} color="#6366f1" />
-                      Implementation Plan & Milestones ({plan.steps?.length || 0})
-                    </div>
-                    <p style={{ fontSize: '0.825rem', color: '#94a3b8', marginBottom: '1rem' }}>
-                      {plan.analysis || plan.summary}
-                    </p>
-
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-                      {plan.steps?.map((step: any, idx: number) => {
-                        const stepRecord = taskDetails?.steps?.find((s) => s.stepIndex === step.index);
-                        const isDone = stepRecord?.status === 'COMPLETED';
-                        const isFailed = stepRecord?.status === 'FAILED';
-                        const isRunning = stepRecord?.status === 'RUNNING';
-
-                        return (
-                          <div key={idx} className="milestone-item">
-                            <div className="milestone-index">{step.index}</div>
-                            <div className="milestone-content">
-                              <div className="milestone-header">
-                                <span className="milestone-title">{step.title}</span>
-                                <span className={`task-badge ${isDone ? 'badge-completed' : isFailed ? 'badge-failed' : isRunning ? 'badge-executing' : 'badge-pending'}`}>
-                                  {stepRecord?.status || 'PENDING'}
-                                </span>
-                              </div>
-                              <div className="milestone-desc">{step.instruction}</div>
-                              {step.targetFiles?.length > 0 && (
-                                <div style={{ marginTop: '0.4rem', display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
-                                  {step.targetFiles.map((tf: string) => (
-                                    <span key={tf} style={{ fontSize: '0.7rem', padding: '2px 6px', background: 'rgba(255,255,255,0.05)', borderRadius: 4, color: '#38bdf8' }}>
-                                      {tf}
-                                    </span>
-                                  ))}
-                                </div>
-                              )}
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                )}
-
-                {/* Acceptance Criteria Checklist */}
-                {plan?.acceptanceCriteria && (
-                  <div className="card-section">
-                    <div className="section-title">
-                      <ShieldCheck size={16} color="#10b981" />
-                      Independent Acceptance Criteria
-                    </div>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-                      {plan.acceptanceCriteria.map((crit: string, i: number) => (
-                        <div key={i} style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', fontSize: '0.825rem', color: '#cbd5e1' }}>
-                          <CheckCircle2 size={15} color={selectedTask.status === 'COMPLETED' ? '#10b981' : '#64748b'} />
-                          <span>{crit}</span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {/* Task Outcome Summary if Completed */}
-                {selectedTask.summary && (
-                  <div className="card-section" style={{ borderColor: 'rgba(16, 185, 129, 0.3)', background: 'rgba(16, 185, 129, 0.05)' }}>
-                    <div className="section-title" style={{ color: '#34d399' }}>
-                      <CheckCircle2 size={16} />
-                      Verified Outcome Summary
-                    </div>
-                    <p style={{ fontSize: '0.875rem', color: '#e2e8f0', lineHeight: 1.6 }}>
-                      {selectedTask.summary}
-                    </p>
-                  </div>
-                )}
-              </div>
-            </>
-          ) : (
-            <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', color: '#64748b', gap: '0.75rem' }}>
-              <Cpu size={40} color="#334155" />
-              <p>Select a task from the sidebar or launch a new autonomous mission.</p>
-            </div>
-          )}
-        </section>
-
-        {/* Right Panel: Live Terminal Stream & Verification Reports */}
-        <section className="right-panel">
-          <div className="tabs-header">
-            <button
-              className={`tab-btn ${activeTab === 'stream' ? 'active' : ''}`}
-              onClick={() => setActiveTab('stream')}
-            >
-              <Terminal size={14} />
-              <span>Live Stream</span>
-            </button>
-            <button
-              className={`tab-btn ${activeTab === 'verifications' ? 'active' : ''}`}
-              onClick={() => setActiveTab('verifications')}
-            >
-              <ShieldCheck size={14} />
-              <span>Verifications ({taskDetails?.verifications?.length || 0})</span>
-            </button>
-            <button
-              className={`tab-btn ${activeTab === 'diff' ? 'active' : ''}`}
-              onClick={() => setActiveTab('diff')}
-            >
-              <FileCode size={14} />
-              <span>Git Diff</span>
-            </button>
-          </div>
-
-          {activeTab === 'stream' && (
-            <div className="terminal-container">
-              {logs.length === 0 ? (
-                <div style={{ color: '#475569', textAlign: 'center', marginTop: '2rem' }}>
-                  Waiting for orchestrator events...
-                </div>
-              ) : (
-                logs.map((log) => (
-                  <div key={log.id} className="log-entry">
-                    <span className="log-time">{new Date(log.timestamp).toLocaleTimeString()}</span>
-                    <span className={`log-badge ${log.type}`}>[{log.type}]</span>
-                    <span>{log.message}</span>
-                  </div>
-                ))
-              )}
-              <div ref={terminalEndRef} />
-            </div>
-          )}
-
-          {activeTab === 'verifications' && (
-            <div style={{ flex: 1, overflowY: 'auto', padding: '1rem', display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-              {taskDetails?.verifications?.length === 0 ? (
-                <div style={{ color: '#64748b', textAlign: 'center', marginTop: '2rem', fontSize: '0.85rem' }}>
-                  No verification reports filed yet.
-                </div>
-              ) : (
-                taskDetails?.verifications?.map((v) => (
-                  <div key={v.id} style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid var(--border-subtle)', borderRadius: 8, padding: '0.85rem' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.4rem' }}>
-                      <span className={`task-badge ${v.status === 'PASSED' ? 'badge-completed' : 'badge-failed'}`}>
-                        {v.status}
-                      </span>
-                      <span style={{ fontSize: '0.7rem', color: '#64748b' }}>
-                        {new Date(v.createdAt).toLocaleTimeString()}
-                      </span>
-                    </div>
-                    <div style={{ fontSize: '0.775rem', color: '#cbd5e1', display: 'flex', gap: '1rem', marginBottom: '0.4rem' }}>
-                      <span>Build: <strong>{v.buildStatus}</strong></span>
-                      <span>Tests: <strong>{v.testStatus}</strong></span>
-                      <span>Lint: <strong>{v.lintStatus}</strong></span>
-                    </div>
-                    <div style={{ fontSize: '0.725rem', color: '#94a3b8' }}>
-                      Diff: {v.diffInspection}
-                    </div>
-                    {v.diagnostics && (
-                      <pre style={{ marginTop: '0.5rem', padding: '0.5rem', background: '#000', borderRadius: 4, fontSize: '0.7rem', color: '#f87171', overflowX: 'auto' }}>
-                        {v.diagnostics}
-                      </pre>
-                    )}
-                  </div>
-                ))
-              )}
-            </div>
-          )}
-
-          {activeTab === 'diff' && (
-            <div style={{ flex: 1, overflowY: 'auto', padding: '1rem' }}>
-              <div className="diff-container">
-                {taskDetails?.steps?.find((s) => s.diffSummary)?.diffSummary ||
-                  'No active diff recorded for this task.'}
-              </div>
-            </div>
-          )}
-        </section>
-      </main>
-
-      {/* New Task Modal */}
-      {showNewTaskModal && (
-        <div className="modal-overlay" onClick={() => setShowNewTaskModal(false)}>
-          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
-            <h2 className="modal-title">Launch Autonomous Coding Task</h2>
-            <p style={{ fontSize: '0.825rem', color: '#94a3b8' }}>
-              Provide your objective once. The Orchestrator will plan, execute, verify, and repair autonomously.
-            </p>
-
-            <form onSubmit={handleCreateTask}>
-              <div className="form-group">
-                <label>Task Prompt / Objective *</label>
-                <textarea
-                  className="form-textarea"
-                  rows={4}
-                  required
-                  placeholder="e.g. Build an authentication middleware and write unit tests for token expiration..."
-                  value={newPrompt}
-                  onChange={(e) => setNewPrompt(e.target.value)}
-                />
-              </div>
-
-              <div className="form-group">
-                <label>Workspace Path</label>
-                <input
-                  type="text"
-                  className="form-input"
-                  placeholder="Leave blank for project workspace or enter Git repository path"
-                  value={newWorkspace}
-                  onChange={(e) => setNewWorkspace(e.target.value)}
-                />
-                <small style={{ color: '#64748b', fontSize: '0.75rem', marginTop: '0.25rem', display: 'block' }}>
-                  Must be an initialized Git repository within authorized workspace roots (ALLOWED_DIRECTORIES in .env).
-                </small>
-              </div>
-
-              <div className="form-group">
-                <label>Coding Agent Adapter</label>
-                <select
-                  className="form-input"
-                  value={selectedAgent}
-                  onChange={(e) => setSelectedAgent(e.target.value as any)}
-                  style={{ background: '#0f172a', color: '#f8fafc' }}
-                >
-                  <option value="builtin">Built-in Autonomous Agent (Gemini / Multi-Tool)</option>
-                  <option value="claude">Claude Code CLI Adapter</option>
-                  <option value="aider">Aider CLI Adapter</option>
-                </select>
-              </div>
-
-              <div className="form-group" style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginTop: '0.4rem' }}>
-                <input
-                  type="checkbox"
-                  id="autoMergeCheck"
-                  checked={autoMerge}
-                  onChange={(e) => setAutoMerge(e.target.checked)}
-                  style={{ width: '1.1rem', height: '1.1rem', cursor: 'pointer' }}
-                />
-                <label htmlFor="autoMergeCheck" style={{ cursor: 'pointer', marginBottom: 0 }}>
-                  Auto-merge verified task branch into base branch upon completion
-                </label>
-              </div>
-
-              <div className="form-group">
-                <label>Max Self-Repair Retry Budget</label>
-                <input
-                  type="number"
-                  min={1}
-                  max={10}
-                  className="form-input"
-                  value={newRetries}
-                  onChange={(e) => setNewRetries(parseInt(e.target.value, 10))}
-                />
-              </div>
-
-              <div className="modal-actions">
-                <button type="button" className="btn-secondary" onClick={() => setShowNewTaskModal(false)}>
-                  Cancel
+                  <Plus size={15} />
+                  <span>Launch Autonomous Mission</span>
                 </button>
-                <button type="submit" className="btn-primary">
-                  Start Autonomous Run
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* Auth Modal */}
-      {showAuthModal && (
-        <div className="modal-overlay" onClick={() => setShowAuthModal(false)}>
-          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginBottom: '0.5rem' }}>
-              <div style={{ padding: '0.5rem', background: 'rgba(99, 102, 241, 0.15)', borderRadius: 8 }}>
-                <Key size={20} color="#6366f1" />
-              </div>
-              <h2 className="modal-title" style={{ margin: 0 }}>API Authentication Required</h2>
-            </div>
-            <p style={{ fontSize: '0.825rem', color: '#94a3b8', marginBottom: '1rem' }}>
-              The Orchestrator protects execution endpoints with an API Token. Enter your server's token (found in your startup terminal or <code>API_TOKEN</code> in your environment) to connect.
-            </p>
-
-            {authError && (
-              <div style={{ background: 'rgba(239, 68, 68, 0.15)', border: '1px solid #ef4444', borderRadius: 8, padding: '0.6rem 0.8rem', fontSize: '0.8rem', color: '#fca5a5', marginBottom: '1rem' }}>
-                {authError}
               </div>
             )}
+          </section>
 
-            <form onSubmit={handleConnectAuth}>
-              <div className="form-group">
-                <label>Orchestrator Server API Token *</label>
-                <input
-                  type="password"
-                  className="form-input"
-                  required
-                  placeholder="Paste 48-char hex token or configured API token"
-                  value={tokenInput}
-                  onChange={(e) => setTokenInput(e.target.value)}
+          {/* Right Column: Terminal, Verifications & Diff */}
+          <aside className="mission-inspector-column" aria-label="Execution Telemetry">
+            {/* Inspector Navigation Tabs */}
+            <div className="inspector-tabs-header">
+              <button
+                className={`inspector-tab-btn ${rightPanelTab === 'stream' ? 'active' : ''}`}
+                onClick={() => setRightPanelTab('stream')}
+              >
+                <Terminal size={13} />
+                <span>Live Stream</span>
+                {logs.length > 0 && <span className="tab-pill">{logs.length}</span>}
+              </button>
+
+              <button
+                className={`inspector-tab-btn ${rightPanelTab === 'verifications' ? 'active' : ''}`}
+                onClick={() => setRightPanelTab('verifications')}
+              >
+                <ShieldCheck size={13} />
+                <span>Verifications</span>
+                {taskDetails?.verifications && taskDetails.verifications.length > 0 && (
+                  <span className="tab-pill">{taskDetails.verifications.length}</span>
+                )}
+              </button>
+
+              <button
+                className={`inspector-tab-btn ${rightPanelTab === 'diff' ? 'active' : ''}`}
+                onClick={() => setRightPanelTab('diff')}
+              >
+                <FileCode size={13} />
+                <span>Git Diff</span>
+                {activeDiff && <span className="diff-active-dot" />}
+              </button>
+            </div>
+
+            {/* Inspector Tab Content Panels */}
+            <div className="inspector-tab-content">
+              {rightPanelTab === 'stream' && (
+                <LiveTerminal logs={logs} selectedTaskId={selectedTaskId} />
+              )}
+
+              {rightPanelTab === 'verifications' && (
+                <VerificationReports
+                  verifications={taskDetails?.verifications || []}
                 />
-              </div>
+              )}
 
-              <div className="modal-actions">
-                <button type="button" className="btn-secondary" onClick={() => setShowAuthModal(false)}>
-                  Cancel
-                </button>
-                <button type="submit" className="btn-primary">
-                  Connect & Authenticate
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
+              {rightPanelTab === 'diff' && <DiffViewer diffText={activeDiff} />}
+            </div>
+          </aside>
+        </main>
       )}
 
-      {/* Settings Modal */}
-      {showSettingsModal && (
-        <div className="modal-overlay" onClick={() => setShowSettingsModal(false)}>
-          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
-            <h2 className="modal-title">Orchestrator & Brain Settings</h2>
-            <p style={{ fontSize: '0.825rem', color: '#94a3b8', marginBottom: '1rem' }}>
-              Configure your server API token, Gemini credentials, and model.
-            </p>
+      {/* Modals */}
+      <NewTaskModal
+        isOpen={showNewTaskModal}
+        onClose={() => setShowNewTaskModal(false)}
+        onSubmit={handleCreateTask}
+        defaultWorkspace={defaultWorkspace}
+      />
 
-            <form onSubmit={handleSaveSettings}>
-              <div className="form-group">
-                <label>Orchestrator Server API Token</label>
-                <input
-                  type="password"
-                  className="form-input"
-                  placeholder="Paste API token..."
-                  value={tokenInput}
-                  onChange={(e) => setTokenInput(e.target.value)}
-                />
-              </div>
+      <SettingsModal
+        isOpen={showSettingsModal}
+        onClose={() => setShowSettingsModal(false)}
+        systemStatus={systemStatus}
+        currentApiToken={apiToken}
+        onSave={handleSaveSettings}
+      />
 
-              <div className="form-group">
-                <label>Gemini API Key</label>
-                <input
-                  type="password"
-                  className="form-input"
-                  placeholder="AIzaSy..."
-                  value={apiKeyInput}
-                  onChange={(e) => setApiKeyInput(e.target.value)}
-                />
-              </div>
-
-              <div className="form-group">
-                <label>Gemini Model</label>
-                <input
-                  type="text"
-                  className="form-input"
-                  value={modelInput}
-                  onChange={(e) => setModelInput(e.target.value)}
-                />
-              </div>
-
-              <div className="modal-actions">
-                <button type="button" className="btn-secondary" onClick={() => setShowSettingsModal(false)}>
-                  Close
-                </button>
-                <button type="submit" className="btn-primary">
-                  Save Changes
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+      <AuthModal
+        isOpen={showAuthModal}
+        onClose={() => setShowAuthModal(false)}
+        onAuthenticate={handleAuthenticate}
+        currentError={authError}
+        initialToken={apiToken}
+      />
     </div>
   );
 }
