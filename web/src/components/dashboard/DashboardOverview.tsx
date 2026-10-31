@@ -8,15 +8,16 @@ import {
   Cpu,
   Layers,
   Box,
-  Terminal,
   FolderGit2,
   ArrowUpRight,
   Plus,
 } from 'lucide-react';
+import { motion } from 'motion/react';
 import type { Task, SystemStatus, RepoMeta } from '../../types/index.js';
 import { Badge } from '../ui/Badge.js';
 import { Button } from '../ui/Button.js';
-import { formatDateRel, formatDuration } from '../../lib/formatters.js';
+import { formatDateRel } from '../../lib/formatters.js';
+import { transitions } from '../../lib/motion.js';
 
 interface DashboardOverviewProps {
   tasks: Task[];
@@ -45,13 +46,16 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
 
   const verificationSuccessRate =
     totalTasks > 0 ? Math.round((completedTasks.length / totalTasks) * 100) : 100;
-  const repairRate =
-    completedTasks.length > 0 ? Math.round((repairedTasks.length / completedTasks.length) * 100) : 0;
 
   return (
     <div className="dashboard-overview-container">
       {/* Overview Banner */}
-      <div className="overview-hero-card">
+      <motion.div
+        initial={{ opacity: 0, y: 12 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={transitions.standard}
+        className="overview-hero-card"
+      >
         <div className="hero-content">
           <div className="hero-badge">
             <span className="hero-pulse-dot" />
@@ -73,51 +77,80 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
             Launch Autonomous Mission
           </Button>
         </div>
-      </div>
+      </motion.div>
 
       {/* Metric Cards Grid */}
       <div className="metrics-grid">
-        <div className="metric-card">
+        <motion.div
+          initial={{ opacity: 0, y: 14 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.04, ...transitions.standard }}
+          whileHover={{ y: -2, transition: { duration: 0.15 } }}
+          className="metric-card"
+        >
           <div className="metric-header">
             <span className="metric-title">Active Missions</span>
             <Activity size={16} className="text-sky" />
           </div>
           <div className="metric-value">{activeTasks.length}</div>
           <div className="metric-subtext">Currently executing in isolated worktrees</div>
-        </div>
+        </motion.div>
 
-        <div className="metric-card">
+        <motion.div
+          initial={{ opacity: 0, y: 14 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.08, ...transitions.standard }}
+          whileHover={{ y: -2, transition: { duration: 0.15 } }}
+          className="metric-card"
+        >
           <div className="metric-header">
             <span className="metric-title">Verified Passed</span>
             <CheckCircle2 size={16} className="text-emerald" />
           </div>
           <div className="metric-value text-emerald">{completedTasks.length}</div>
           <div className="metric-subtext">{verificationSuccessRate}% verified completion rate</div>
-        </div>
+        </motion.div>
 
-        <div className="metric-card">
+        <motion.div
+          initial={{ opacity: 0, y: 14 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.12, ...transitions.standard }}
+          whileHover={{ y: -2, transition: { duration: 0.15 } }}
+          className="metric-card"
+        >
           <div className="metric-header">
             <span className="metric-title">Self-Repair Recoveries</span>
             <RotateCcw size={16} className="text-pink" />
           </div>
           <div className="metric-value text-pink">{repairedTasks.length}</div>
           <div className="metric-subtext">Autonomously resolved compilation/test regressions</div>
-        </div>
+        </motion.div>
 
-        <div className="metric-card">
+        <motion.div
+          initial={{ opacity: 0, y: 14 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.16, ...transitions.standard }}
+          whileHover={{ y: -2, transition: { duration: 0.15 } }}
+          className="metric-card"
+        >
           <div className="metric-header">
             <span className="metric-title">Failed / Blocked</span>
             <XCircle size={16} className="text-rose" />
           </div>
           <div className="metric-value text-rose">{failedTasks.length}</div>
           <div className="metric-subtext">Failed closed with truthful reporting</div>
-        </div>
+        </motion.div>
       </div>
 
       {/* Two-Column Detail Grid */}
       <div className="overview-details-grid">
         {/* Recent Execution Activity Table */}
-        <div className="overview-panel">
+        <motion.div
+          initial={{ opacity: 0, y: 14 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.2, ...transitions.standard }}
+          className="overview-panel"
+        >
           <div className="panel-title-bar">
             <div className="panel-title-text">
               <Layers size={15} className="text-indigo" />
@@ -176,10 +209,15 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
               </table>
             )}
           </div>
-        </div>
+        </motion.div>
 
         {/* System Architecture & Health Card */}
-        <div className="overview-panel">
+        <motion.div
+          initial={{ opacity: 0, y: 14 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.24, ...transitions.standard }}
+          className="overview-panel"
+        >
           <div className="panel-title-bar">
             <div className="panel-title-text">
               <Cpu size={15} className="text-sky" />
@@ -248,9 +286,8 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
               </div>
             )}
           </div>
-        </div>
+        </motion.div>
       </div>
     </div>
   );
 };
-

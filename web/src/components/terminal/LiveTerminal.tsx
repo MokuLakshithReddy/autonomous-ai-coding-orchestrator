@@ -5,9 +5,9 @@ import {
   Copy,
   Check,
   ArrowDown,
-  Trash2,
-  Filter,
+  Sparkles,
 } from 'lucide-react';
+import { motion, AnimatePresence } from 'motion/react';
 import type { WsEvent } from '../../types/index.js';
 import { formatTimestamp } from '../../lib/formatters.js';
 
@@ -25,7 +25,6 @@ export const LiveTerminal: React.FC<LiveTerminalProps> = ({ logs, selectedTaskId
 
   const filteredLogs = useMemo(() => {
     return logs.filter((log) => {
-      // If task is selected, optionally show task logs or all system logs
       const matchesSearch =
         searchQuery === '' ||
         log.message.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -102,21 +101,23 @@ export const LiveTerminal: React.FC<LiveTerminalProps> = ({ logs, selectedTaskId
           </div>
 
           <div className="terminal-btn-group">
-            <button
+            <motion.button
+              whileTap={{ scale: 0.9 }}
               className={`terminal-tool-btn ${autoScroll ? 'active' : ''}`}
               onClick={() => setAutoScroll(!autoScroll)}
               title={autoScroll ? 'Auto-scroll enabled' : 'Auto-scroll paused'}
             >
               <ArrowDown size={12} />
-            </button>
+            </motion.button>
 
-            <button
+            <motion.button
+              whileTap={{ scale: 0.9 }}
               className="terminal-tool-btn"
               onClick={handleCopyLogs}
               title="Copy visible logs"
             >
               {copied ? <Check size={12} className="text-emerald" /> : <Copy size={12} />}
-            </button>
+            </motion.button>
           </div>
         </div>
       </div>
@@ -125,23 +126,32 @@ export const LiveTerminal: React.FC<LiveTerminalProps> = ({ logs, selectedTaskId
       <div className="terminal-feed" role="region" aria-label="Live logs terminal">
         {filteredLogs.length === 0 ? (
           <div className="terminal-empty-state">
-            <Terminal size={24} className="text-muted" />
-            <p>Waiting for orchestrator events...</p>
+            <div className="terminal-waiting-pulse">
+              <span className="waiting-dot dot-1" />
+              <span className="waiting-dot dot-2" />
+              <span className="waiting-dot dot-3" />
+            </div>
+            <p>Listening for orchestrator events & telemetry...</p>
           </div>
         ) : (
-          filteredLogs.map((log, index) => (
-            <div key={log.id || index} className="log-line">
-              <span className="log-timestamp">{formatTimestamp(log.timestamp)}</span>
-              <span className={`log-event-tag ${getBadgeClass(log.type)}`}>
-                {log.type}
-              </span>
-              <span className="log-message-text">{log.message}</span>
-            </div>
-          ))
+          filteredLogs.map((log, index) => {
+            const isRecent = index >= filteredLogs.length - 3;
+            return (
+              <div
+                key={log.id || `${log.timestamp}-${index}`}
+                className={`log-line ${isRecent ? 'log-line-fresh' : ''}`}
+              >
+                <span className="log-timestamp">{formatTimestamp(log.timestamp)}</span>
+                <span className={`log-event-tag ${getBadgeClass(log.type)}`}>
+                  {log.type}
+                </span>
+                <span className="log-message-text">{log.message}</span>
+              </div>
+            );
+          })
         )}
         <div ref={terminalEndRef} />
       </div>
     </div>
   );
 };
-

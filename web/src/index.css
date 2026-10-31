@@ -69,6 +69,9 @@
 html, body {
   height: 100%;
   background-color: var(--bg-canvas);
+  background-image: 
+    radial-gradient(circle at 15% 15%, rgba(99, 102, 241, 0.07) 0%, transparent 45%),
+    radial-gradient(circle at 85% 85%, rgba(14, 165, 233, 0.05) 0%, transparent 50%);
   color: var(--text-primary);
   font-family: var(--font-sans);
   font-size: 14px;
@@ -2362,6 +2365,99 @@ html, body {
 @keyframes pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.6; }
+}
+
+/* Dynamic Active & Flow Animation Utilities */
+.active-task-pulse-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent-sky);
+  box-shadow: 0 0 8px var(--accent-sky);
+  animation: pulseDot 2s infinite ease-in-out;
+}
+
+@keyframes pulseDot {
+  0% { transform: scale(0.9); opacity: 0.7; }
+  50% { transform: scale(1.25); opacity: 1; box-shadow: 0 0 12px var(--accent-sky); }
+  100% { transform: scale(0.9); opacity: 0.7; }
+}
+
+.stepper-line-wrapper {
+  position: relative;
+  width: 22px;
+  height: 2px;
+  display: flex;
+  align-items: center;
+}
+
+.stepper-line-bg {
+  position: absolute;
+  inset: 0;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 1px;
+}
+
+.stepper-line-fill {
+  position: absolute;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  background: var(--accent-emerald);
+  border-radius: 1px;
+  box-shadow: 0 0 8px rgba(16, 185, 129, 0.4);
+}
+
+.flowing-line {
+  animation: dashFlow 1.2s linear infinite;
+}
+
+@keyframes dashFlow {
+  from { stroke-dashoffset: 7; }
+  to { stroke-dashoffset: 0; }
+}
+
+.terminal-waiting-pulse {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-bottom: 0.5rem;
+}
+
+.waiting-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent-indigo-subtle);
+  border: 1px solid rgba(99, 102, 241, 0.4);
+  animation: waitingWave 1.4s ease-in-out infinite;
+}
+
+.waiting-dot.dot-1 { animation-delay: 0s; }
+.waiting-dot.dot-2 { animation-delay: 0.2s; }
+.waiting-dot.dot-3 { animation-delay: 0.4s; }
+
+@keyframes waitingWave {
+  0%, 100% { transform: scale(0.8); opacity: 0.4; }
+  50% { transform: scale(1.25); opacity: 1; background: var(--accent-primary); box-shadow: 0 0 8px rgba(99, 102, 241, 0.5); }
+}
+
+.log-line-fresh {
+  animation: freshHighlight 1.5s ease-out;
+}
+
+@keyframes freshHighlight {
+  0% { background: rgba(14, 165, 233, 0.12); }
+  100% { background: transparent; }
+}
+
+/* Accessibility: Reduced Motion Support */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
 }
 
 /* ==========================================================================

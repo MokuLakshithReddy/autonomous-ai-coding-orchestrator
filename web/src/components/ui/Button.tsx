@@ -1,6 +1,7 @@
 import React from 'react';
+import { motion, type HTMLMotionProps } from 'motion/react';
 
-interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
+interface ButtonProps extends Omit<React.ButtonHTMLAttributes<HTMLButtonElement>, 'onAnimationStart' | 'onDragStart' | 'onDragEnd' | 'onDrag'> {
   variant?: 'primary' | 'secondary' | 'danger' | 'ghost' | 'outline';
   size?: 'sm' | 'md' | 'lg';
   icon?: React.ReactNode;
@@ -29,7 +30,7 @@ export const Button: React.FC<ButtonProps> = ({
       background: 'linear-gradient(180deg, #6366f1 0%, #4f46e5 100%)',
       color: '#ffffff',
       border: '1px solid rgba(255, 255, 255, 0.15)',
-      boxShadow: '0 1px 2px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.2)',
+      boxShadow: '0 1px 3px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.2)',
     },
     secondary: {
       background: 'rgba(255, 255, 255, 0.05)',
@@ -64,7 +65,6 @@ export const Button: React.FC<ButtonProps> = ({
     fontWeight: 600,
     cursor: disabled || loading ? 'not-allowed' : 'pointer',
     opacity: disabled || loading ? 0.5 : 1,
-    transition: 'all 0.15s ease',
     whiteSpace: 'nowrap',
     outline: 'none',
     userSelect: 'none',
@@ -74,11 +74,13 @@ export const Button: React.FC<ButtonProps> = ({
   };
 
   return (
-    <button
+    <motion.button
+      whileHover={disabled || loading ? {} : { y: -1, transition: { duration: 0.15, ease: 'easeOut' } }}
+      whileTap={disabled || loading ? {} : { scale: 0.98, y: 0, transition: { duration: 0.1 } }}
       style={combinedStyle}
       disabled={disabled || loading}
       className={`btn-interactive ${className}`}
-      {...props}
+      {...(props as any)}
     >
       {loading ? (
         <span
@@ -96,7 +98,6 @@ export const Button: React.FC<ButtonProps> = ({
         icon && <span style={{ display: 'inline-flex', flexShrink: 0 }}>{icon}</span>
       )}
       {children}
-    </button>
+    </motion.button>
   );
 };
-

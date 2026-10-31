@@ -5,12 +5,9 @@ import {
   RefreshCw,
   GitBranch,
   FolderGit2,
-  CheckCircle2,
-  AlertCircle,
-  Clock,
   RotateCcw,
-  SlidersHorizontal,
 } from 'lucide-react';
+import { motion, AnimatePresence } from 'motion/react';
 import type { Task, RepoMeta } from '../../types/index.js';
 import { Badge } from '../ui/Badge.js';
 import { formatDateRel } from '../../lib/formatters.js';
@@ -73,13 +70,14 @@ export const AppSidebar: React.FC<AppSidebarProps> = ({
             <span>TASKS & RUNS</span>
             <span className="task-count-badge">{tasks.length}</span>
           </div>
-          <button
+          <motion.button
+            whileTap={{ scale: 0.9 }}
             className={`refresh-btn ${isRefreshing ? 'spin' : ''}`}
             onClick={handleRefresh}
             title="Refresh task list"
           >
             <RefreshCw size={13} />
-          </button>
+          </motion.button>
         </div>
 
         {/* Search Bar */}
@@ -129,47 +127,67 @@ export const AppSidebar: React.FC<AppSidebarProps> = ({
             </p>
           </div>
         ) : (
-          filteredTasks.map((task) => {
-            const isSelected = task.id === selectedTaskId;
-            const isRetrying = task.retryCount > 0;
+          <AnimatePresence initial={false}>
+            {filteredTasks.map((task) => {
+              const isSelected = task.id === selectedTaskId;
+              const isRetrying = task.retryCount > 0;
+              const isActive = [
+                'planning',
+                'ready',
+                'executing',
+                'verifying',
+                'diagnosing',
+                'repairing',
+                'awaiting_approval',
+              ].includes(task.status.toLowerCase());
 
-            return (
-              <div
-                key={task.id}
-                className={`task-item-card ${isSelected ? 'selected' : ''}`}
-                onClick={() => onSelectTask(task.id)}
-                role="button"
-                tabIndex={0}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    onSelectTask(task.id);
-                  }
-                }}
-              >
-                <div className="task-item-header">
-                  <Badge status={task.status} size="sm" />
-                  <span className="task-item-time">{formatDateRel(task.createdAt)}</span>
-                </div>
+              return (
+                <motion.div
+                  key={task.id}
+                  layout="position"
+                  initial={{ opacity: 0, y: 8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, scale: 0.98 }}
+                  transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
+                  whileHover={{ y: -1, transition: { duration: 0.12 } }}
+                  className={`task-item-card ${isSelected ? 'selected' : ''}`}
+                  onClick={() => onSelectTask(task.id)}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      onSelectTask(task.id);
+                    }
+                  }}
+                >
+                  <div className="task-item-header">
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                      {isActive && <span className="active-task-pulse-dot" />}
+                      <Badge status={task.status} size="sm" showDot={!isActive} />
+                    </div>
+                    <span className="task-item-time">{formatDateRel(task.createdAt)}</span>
+                  </div>
 
-                <div className="task-item-title" title={task.title}>
-                  {task.title}
-                </div>
+                  <div className="task-item-title" title={task.title}>
+                    {task.title}
+                  </div>
 
-                <div className="task-item-footer">
-                  <span className="task-item-id">
-                    <code>#{task.id.slice(0, 8)}</code>
-                  </span>
-
-                  {isRetrying && (
-                    <span className="retry-pill" title={`Self-repair retry ${task.retryCount} of ${task.maxRetries}`}>
-                      <RotateCcw size={10} />
-                      <span>{task.retryCount}/{task.maxRetries}</span>
+                  <div className="task-item-footer">
+                    <span className="task-item-id">
+                      <code>#{task.id.slice(0, 8)}</code>
                     </span>
-                  )}
-                </div>
-              </div>
-            );
-          })
+
+                    {isRetrying && (
+                      <span className="retry-pill" title={`Self-repair retry ${task.retryCount} of ${task.maxRetries}`}>
+                        <RotateCcw size={10} />
+                        <span>{task.retryCount}/{task.maxRetries}</span>
+                      </span>
+                    )}
+                  </div>
+                </motion.div>
+              );
+            })}
+          </AnimatePresence>
         )}
       </div>
 
@@ -211,4 +229,3 @@ export const AppSidebar: React.FC<AppSidebarProps> = ({
     </aside>
   );
 };
-

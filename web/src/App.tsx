@@ -11,6 +11,7 @@ import {
   FolderGit2,
   AlertCircle,
 } from 'lucide-react';
+import { motion, AnimatePresence } from 'motion/react';
 import type {
   Task,
   Step,
@@ -27,6 +28,7 @@ import {
   getStoredApiToken,
   setStoredApiToken,
 } from './lib/api.js';
+import { pageVariants } from './lib/motion.js';
 
 // Layout & Views
 import { AppHeader } from './components/layout/AppHeader.js';
@@ -416,117 +418,140 @@ export default function App() {
         onToggleMobileMenu={() => setMobileMenuOpen(!mobileMenuOpen)}
       />
 
-      {/* Main View Router */}
-      {activeView === 'dashboard' ? (
-        <main className="dashboard-fullscreen-view">
-          <DashboardOverview
-            tasks={tasks}
-            systemStatus={systemStatus}
-            repoMeta={repoMeta}
-            onSelectTask={handleSelectTask}
-            onOpenNewTask={() => setShowNewTaskModal(true)}
-          />
-        </main>
-      ) : activeView === 'history' ? (
-        <main className="history-fullscreen-view">
-          <TaskHistoryView tasks={tasks} onSelectTask={handleSelectTask} />
-        </main>
-      ) : (
-        /* Mission Control Workspace (3-Column Layout) */
-        <main className="mission-control-grid">
-          {/* Left Column: Tasks & Repository Sidebar */}
-          <AppSidebar
-            tasks={tasks}
-            selectedTaskId={selectedTaskId}
-            onSelectTask={handleSelectTask}
-            onRefreshTasks={fetchTasks}
-            repoMeta={repoMeta}
-            className={mobileMenuOpen ? 'mobile-open' : ''}
-          />
+      {/* Main View Router with Smooth Motion Transitions */}
+      <AnimatePresence mode="wait">
+        {activeView === 'dashboard' ? (
+          <motion.main
+            key="dashboard"
+            variants={pageVariants}
+            initial="initial"
+            animate="animate"
+            exit="exit"
+            className="dashboard-fullscreen-view"
+          >
+            <DashboardOverview
+              tasks={tasks}
+              systemStatus={systemStatus}
+              repoMeta={repoMeta}
+              onSelectTask={handleSelectTask}
+              onOpenNewTask={() => setShowNewTaskModal(true)}
+            />
+          </motion.main>
+        ) : activeView === 'history' ? (
+          <motion.main
+            key="history"
+            variants={pageVariants}
+            initial="initial"
+            animate="animate"
+            exit="exit"
+            className="history-fullscreen-view"
+          >
+            <TaskHistoryView tasks={tasks} onSelectTask={handleSelectTask} />
+          </motion.main>
+        ) : (
+          /* Mission Control Workspace (3-Column Layout) */
+          <motion.main
+            key="workspace"
+            variants={pageVariants}
+            initial="initial"
+            animate="animate"
+            exit="exit"
+            className="mission-control-grid"
+          >
+            {/* Left Column: Tasks & Repository Sidebar */}
+            <AppSidebar
+              tasks={tasks}
+              selectedTaskId={selectedTaskId}
+              onSelectTask={handleSelectTask}
+              onRefreshTasks={fetchTasks}
+              repoMeta={repoMeta}
+              className={mobileMenuOpen ? 'mobile-open' : ''}
+            />
 
-          {/* Center Column: Execution Workspace */}
-          <section className="mission-workspace-column" role="main">
-            {taskDetails?.task ? (
-              <TaskDetailView
-                task={taskDetails.task}
-                steps={taskDetails.steps}
-                verifications={taskDetails.verifications}
-                pendingApprovals={taskDetails.pendingApprovals}
-                onApprove={(id) => handleApprovalResponse(id, 'APPROVED')}
-                onReject={(id) => handleApprovalResponse(id, 'REJECTED')}
-                onCancelTask={handleCancelTask}
-              />
-            ) : (
-              <div className="empty-workspace-state">
-                <div className="empty-workspace-icon">
-                  <Cpu size={44} />
+            {/* Center Column: Execution Workspace */}
+            <section className="mission-workspace-column" role="main">
+              {taskDetails?.task ? (
+                <TaskDetailView
+                  task={taskDetails.task}
+                  steps={taskDetails.steps}
+                  verifications={taskDetails.verifications}
+                  pendingApprovals={taskDetails.pendingApprovals}
+                  onApprove={(id) => handleApprovalResponse(id, 'APPROVED')}
+                  onReject={(id) => handleApprovalResponse(id, 'REJECTED')}
+                  onCancelTask={handleCancelTask}
+                />
+              ) : (
+                <div className="empty-workspace-state">
+                  <div className="empty-workspace-icon">
+                    <Cpu size={44} />
+                  </div>
+                  <h2 className="empty-state-heading">No Task Selected</h2>
+                  <p className="empty-state-text">
+                    Select an existing mission from the sidebar or launch a new autonomous run.
+                  </p>
+                  <button
+                    className="empty-state-cta-btn"
+                    onClick={() => setShowNewTaskModal(true)}
+                  >
+                    <Plus size={15} />
+                    <span>Launch Autonomous Mission</span>
+                  </button>
                 </div>
-                <h2 className="empty-state-heading">No Task Selected</h2>
-                <p className="empty-state-text">
-                  Select an existing mission from the sidebar or launch a new autonomous run.
-                </p>
+              )}
+            </section>
+
+            {/* Right Column: Terminal, Verifications & Diff */}
+            <aside className="mission-inspector-column" aria-label="Execution Telemetry">
+              {/* Inspector Navigation Tabs */}
+              <div className="inspector-tabs-header">
                 <button
-                  className="empty-state-cta-btn"
-                  onClick={() => setShowNewTaskModal(true)}
+                  className={`inspector-tab-btn ${rightPanelTab === 'stream' ? 'active' : ''}`}
+                  onClick={() => setRightPanelTab('stream')}
                 >
-                  <Plus size={15} />
-                  <span>Launch Autonomous Mission</span>
+                  <Terminal size={13} />
+                  <span>Live Stream</span>
+                  {logs.length > 0 && <span className="tab-pill">{logs.length}</span>}
+                </button>
+
+                <button
+                  className={`inspector-tab-btn ${rightPanelTab === 'verifications' ? 'active' : ''}`}
+                  onClick={() => setRightPanelTab('verifications')}
+                >
+                  <ShieldCheck size={13} />
+                  <span>Verifications</span>
+                  {taskDetails?.verifications && taskDetails.verifications.length > 0 && (
+                    <span className="tab-pill">{taskDetails.verifications.length}</span>
+                  )}
+                </button>
+
+                <button
+                  className={`inspector-tab-btn ${rightPanelTab === 'diff' ? 'active' : ''}`}
+                  onClick={() => setRightPanelTab('diff')}
+                >
+                  <FileCode size={13} />
+                  <span>Git Diff</span>
+                  {activeDiff && <span className="diff-active-dot" />}
                 </button>
               </div>
-            )}
-          </section>
 
-          {/* Right Column: Terminal, Verifications & Diff */}
-          <aside className="mission-inspector-column" aria-label="Execution Telemetry">
-            {/* Inspector Navigation Tabs */}
-            <div className="inspector-tabs-header">
-              <button
-                className={`inspector-tab-btn ${rightPanelTab === 'stream' ? 'active' : ''}`}
-                onClick={() => setRightPanelTab('stream')}
-              >
-                <Terminal size={13} />
-                <span>Live Stream</span>
-                {logs.length > 0 && <span className="tab-pill">{logs.length}</span>}
-              </button>
-
-              <button
-                className={`inspector-tab-btn ${rightPanelTab === 'verifications' ? 'active' : ''}`}
-                onClick={() => setRightPanelTab('verifications')}
-              >
-                <ShieldCheck size={13} />
-                <span>Verifications</span>
-                {taskDetails?.verifications && taskDetails.verifications.length > 0 && (
-                  <span className="tab-pill">{taskDetails.verifications.length}</span>
+              {/* Inspector Tab Content Panels */}
+              <div className="inspector-tab-content">
+                {rightPanelTab === 'stream' && (
+                  <LiveTerminal logs={logs} selectedTaskId={selectedTaskId} />
                 )}
-              </button>
 
-              <button
-                className={`inspector-tab-btn ${rightPanelTab === 'diff' ? 'active' : ''}`}
-                onClick={() => setRightPanelTab('diff')}
-              >
-                <FileCode size={13} />
-                <span>Git Diff</span>
-                {activeDiff && <span className="diff-active-dot" />}
-              </button>
-            </div>
+                {rightPanelTab === 'verifications' && (
+                  <VerificationReports
+                    verifications={taskDetails?.verifications || []}
+                  />
+                )}
 
-            {/* Inspector Tab Content Panels */}
-            <div className="inspector-tab-content">
-              {rightPanelTab === 'stream' && (
-                <LiveTerminal logs={logs} selectedTaskId={selectedTaskId} />
-              )}
-
-              {rightPanelTab === 'verifications' && (
-                <VerificationReports
-                  verifications={taskDetails?.verifications || []}
-                />
-              )}
-
-              {rightPanelTab === 'diff' && <DiffViewer diffText={activeDiff} />}
-            </div>
-          </aside>
-        </main>
-      )}
+                {rightPanelTab === 'diff' && <DiffViewer diffText={activeDiff} />}
+              </div>
+            </aside>
+          </motion.main>
+        )}
+      </AnimatePresence>
 
       {/* Modals */}
       <NewTaskModal
