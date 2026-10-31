@@ -11,9 +11,11 @@ import {
   ShieldAlert,
   XCircle,
   HelpCircle,
+  Sparkles,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import type { Step } from '../../types/index.js';
+import { springs } from '../../lib/motion.js';
 
 interface StateStepperProps {
   currentStatus: string;
@@ -32,7 +34,7 @@ export const StateStepper: React.FC<StateStepperProps> = ({ currentStatus, steps
     { key: 'verifying', label: 'Verify', icon: <ShieldCheck size={12} /> },
   ];
 
-  // Evaluate state conditions
+  // Evaluate state conditions truthfully
   const isCompleted = norm === 'completed';
   const isFailed = norm === 'failed' || norm === 'blocked';
   const isCancelled = ['cancelling', 'cancelled'].includes(norm);
@@ -40,7 +42,7 @@ export const StateStepper: React.FC<StateStepperProps> = ({ currentStatus, steps
   const isAwaitingApproval = norm === 'awaiting_approval';
   const isNeedsReview = norm === 'needs_human_review';
 
-  // Helper to determine stage status truthfully based on task status & steps evidence
+  // Helper to determine stage status truthfully based on task status & step records
   const getStageState = (stageKey: string): 'completed' | 'active' | 'pending' => {
     if (isCompleted) return 'completed';
 
@@ -66,14 +68,12 @@ export const StateStepper: React.FC<StateStepperProps> = ({ currentStatus, steps
     // For branch states (repairing, awaiting_approval, needs_review, failed, cancelled),
     // retain known completed progress rather than wiping it!
     if (isRepairing) {
-      // In repair/diagnosis: Discover, Plan, Ready, Execute have completed at least one cycle
       if (['discovering', 'planning', 'ready', 'executing'].includes(stageKey)) {
         return 'completed';
       }
     }
 
     if (isAwaitingApproval || isNeedsReview) {
-      // Approval happens during execution: Discover, Plan, Ready are completed
       if (['discovering', 'planning', 'ready'].includes(stageKey)) {
         return 'completed';
       }
@@ -81,7 +81,6 @@ export const StateStepper: React.FC<StateStepperProps> = ({ currentStatus, steps
     }
 
     if (isFailed || isCancelled) {
-      // If we have completed steps in the records, preserve them!
       const hasCompletedSteps = steps.some((s) => s.status === 'COMPLETED');
       if (['discovering', 'planning'].includes(stageKey)) return 'completed';
       if (stageKey === 'ready') return 'completed';
@@ -92,9 +91,13 @@ export const StateStepper: React.FC<StateStepperProps> = ({ currentStatus, steps
   };
 
   return (
-    <div className="state-stepper-container" role="region" aria-label="Orchestration Execution Pipeline">
+    <div
+      className="state-stepper-container"
+      role="region"
+      aria-label="Orchestration Execution Pipeline"
+    >
       <div className="stepper-track">
-        {pipeline.map((stage, idx) => {
+        {pipeline.map((stage) => {
           const state = getStageState(stage.key);
           const isActive = state === 'active';
           const isDone = state === 'completed';
@@ -103,31 +106,41 @@ export const StateStepper: React.FC<StateStepperProps> = ({ currentStatus, steps
             <React.Fragment key={stage.key}>
               <motion.div
                 layout="position"
-                animate={
+                className={`stepper-node ${state} ${
                   isActive
-                    ? {
-                        scale: [1, 1.025, 1],
-                        boxShadow: [
-                          '0 0 0 rgba(139, 124, 255, 0)',
-                          '0 0 14px rgba(139, 124, 255, 0.35)',
-                          '0 0 0 rgba(139, 124, 255, 0)',
-                        ],
-                      }
-                    : {}
-                }
-                transition={
-                  isActive
-                    ? { repeat: Infinity, duration: 2.4, ease: 'easeInOut' }
-                    : { duration: 0.2 }
-                }
-                className={`stepper-node ${state}`}
+                    ? stage.key === 'executing'
+                      ? 'active-cyan'
+                      : stage.key === 'verifying'
+                      ? 'active-sky'
+                      : 'active-violet'
+                    : ''
+                }`}
+                style={{ position: 'relative' }}
               >
+                {/* Active Execution Breathing Halo */}
+                {isActive && (
+                  <motion.span
+                    className={`active-pulse-halo ${
+                      stage.key === 'executing'
+                        ? 'halo-cyan'
+                        : stage.key === 'verifying'
+                        ? 'halo-sky'
+                        : 'halo-violet'
+                    }`}
+                    animate={{
+                      scale: [1, 1.25, 1],
+                      opacity: [0.75, 0.2, 0.75],
+                    }}
+                    transition={{ repeat: Infinity, duration: 2.2, ease: 'easeInOut' }}
+                  />
+                )}
+
                 <span className="node-icon">
                   {isDone ? (
                     <motion.span
-                      initial={{ scale: 0.5, opacity: 0 }}
+                      initial={{ scale: 0.3, opacity: 0 }}
                       animate={{ scale: 1, opacity: 1 }}
-                      transition={{ type: 'spring', stiffness: 400, damping: 20 }}
+                      transition={springs.pop}
                       style={{ display: 'inline-flex' }}
                     >
                       <CheckCircle2 size={12} style={{ color: 'var(--status-success)' }} />
@@ -139,17 +152,18 @@ export const StateStepper: React.FC<StateStepperProps> = ({ currentStatus, steps
                 <span className="node-label">{stage.label}</span>
               </motion.div>
 
-              {/* Progress Connector Line */}
+              {/* Progress Connector Line with Flowing Beam Light */}
               <div className="stepper-line-wrapper">
                 <div className="stepper-line-bg" />
                 <motion.div
-                  className="stepper-line-fill"
+                  className={`stepper-line-fill ${isDone ? 'done' : isActive ? 'active' : ''}`}
                   initial={false}
                   animate={{
-                    width: isDone ? '100%' : isActive ? '50%' : '0%',
+                    width: isDone ? '100%' : isActive ? '60%' : '0%',
                   }}
                   transition={{ duration: 0.35, ease: 'easeInOut' }}
                 />
+                {isActive && <div className="connector-traveling-beam" />}
               </div>
             </React.Fragment>
           );
@@ -167,7 +181,7 @@ export const StateStepper: React.FC<StateStepperProps> = ({ currentStatus, steps
                 x: 0,
                 boxShadow: [
                   '0 0 0 rgba(251, 191, 36, 0)',
-                  '0 0 15px rgba(251, 191, 36, 0.4)',
+                  '0 0 16px rgba(251, 191, 36, 0.45)',
                   '0 0 0 rgba(251, 191, 36, 0)',
                 ],
               }}
@@ -178,7 +192,9 @@ export const StateStepper: React.FC<StateStepperProps> = ({ currentStatus, steps
               }}
               className="stepper-node active-amber"
             >
-              <span className="node-icon"><ShieldAlert size={12} /></span>
+              <span className="node-icon">
+                <ShieldAlert size={12} />
+              </span>
               <span className="node-label">Approval Gate</span>
             </motion.div>
           )}
@@ -204,7 +220,13 @@ export const StateStepper: React.FC<StateStepperProps> = ({ currentStatus, steps
               }}
               className="stepper-node active-repair"
             >
-              <span className="node-icon"><Wrench size={12} /></span>
+              <motion.span
+                className="node-icon"
+                animate={{ rotate: [-8, 8, -8] }}
+                transition={{ repeat: Infinity, duration: 2.4, ease: 'easeInOut' }}
+              >
+                <Wrench size={12} />
+              </motion.span>
               <span className="node-label">
                 {norm === 'diagnosing' ? 'Diagnosing' : 'Self-Repair'}
               </span>
@@ -219,7 +241,9 @@ export const StateStepper: React.FC<StateStepperProps> = ({ currentStatus, steps
               exit={{ opacity: 0, scale: 0.85 }}
               className="stepper-node active-purple"
             >
-              <span className="node-icon"><HelpCircle size={12} /></span>
+              <span className="node-icon">
+                <HelpCircle size={12} />
+              </span>
               <span className="node-label">Review Required</span>
             </motion.div>
           )}
@@ -228,11 +252,18 @@ export const StateStepper: React.FC<StateStepperProps> = ({ currentStatus, steps
             <motion.div
               key="failed"
               initial={{ opacity: 0, scale: 0.85 }}
-              animate={{ opacity: 1, scale: 1 }}
+              animate={{
+                opacity: 1,
+                scale: 1,
+                x: [0, -3, 3, -2, 2, 0],
+              }}
               exit={{ opacity: 0, scale: 0.85 }}
+              transition={{ duration: 0.35 }}
               className="stepper-node failed"
             >
-              <span className="node-icon"><AlertOctagon size={12} /></span>
+              <span className="node-icon">
+                <AlertOctagon size={12} />
+              </span>
               <span className="node-label">Failed Closed</span>
             </motion.div>
           )}
@@ -245,7 +276,9 @@ export const StateStepper: React.FC<StateStepperProps> = ({ currentStatus, steps
               exit={{ opacity: 0, scale: 0.85 }}
               className="stepper-node cancelled"
             >
-              <span className="node-icon"><XCircle size={12} /></span>
+              <span className="node-icon">
+                <XCircle size={12} />
+              </span>
               <span className="node-label">Cancelled</span>
             </motion.div>
           )}
@@ -255,14 +288,14 @@ export const StateStepper: React.FC<StateStepperProps> = ({ currentStatus, steps
             <motion.div
               key="final-node"
               layout="position"
-              className={`stepper-node ${isCompleted ? 'completed' : 'pending'}`}
+              className={`stepper-node ${isCompleted ? 'completed verified-success' : 'pending'}`}
             >
               <span className="node-icon">
                 {isCompleted ? (
                   <motion.span
                     initial={{ scale: 0 }}
                     animate={{ scale: 1 }}
-                    transition={{ type: 'spring', stiffness: 500, damping: 22 }}
+                    transition={springs.pop}
                     style={{ display: 'inline-flex' }}
                   >
                     <CheckCircle2 size={12} style={{ color: 'var(--status-success)' }} />

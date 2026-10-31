@@ -29,9 +29,10 @@ import {
   getStoredApiToken,
   setStoredApiToken,
 } from './lib/api.js';
-import { pageVariants } from './lib/motion.js';
+import { pageVariants, panelVariants, springs } from './lib/motion.js';
 
 // Layout & Views
+import { AmbientBackground } from './components/layout/AmbientBackground.js';
 import { AppHeader } from './components/layout/AppHeader.js';
 import { AppSidebar } from './components/layout/AppSidebar.js';
 import { DashboardOverview } from './components/dashboard/DashboardOverview.js';
@@ -407,6 +408,9 @@ export default function App() {
 
   return (
     <div className="orchestrator-app-shell">
+      {/* Ambient Moving Lighting & Space Dust */}
+      <AmbientBackground />
+
       {/* Top Application Header */}
       <AppHeader
         systemStatus={systemStatus}
@@ -513,49 +517,104 @@ export default function App() {
             <aside className="mission-inspector-column" aria-label="Execution Telemetry">
               {/* Inspector Navigation Tabs */}
               <div className="inspector-tabs-header">
-                <button
-                  className={`inspector-tab-btn ${rightPanelTab === 'stream' ? 'active' : ''}`}
-                  onClick={() => setRightPanelTab('stream')}
-                >
-                  <Terminal size={13} />
-                  <span>Live Stream</span>
-                  {logs.length > 0 && <span className="tab-pill">{logs.length}</span>}
-                </button>
-
-                <button
-                  className={`inspector-tab-btn ${rightPanelTab === 'verifications' ? 'active' : ''}`}
-                  onClick={() => setRightPanelTab('verifications')}
-                >
-                  <ShieldCheck size={13} />
-                  <span>Verifications</span>
-                  {taskDetails?.verifications && taskDetails.verifications.length > 0 && (
-                    <span className="tab-pill">{taskDetails.verifications.length}</span>
-                  )}
-                </button>
-
-                <button
-                  className={`inspector-tab-btn ${rightPanelTab === 'diff' ? 'active' : ''}`}
-                  onClick={() => setRightPanelTab('diff')}
-                >
-                  <FileCode size={13} />
-                  <span>Git Diff</span>
-                  {activeDiff && <span className="diff-active-dot" />}
-                </button>
+                {[
+                  {
+                    key: 'stream',
+                    label: 'Live Stream',
+                    icon: <Terminal size={13} />,
+                    pill: logs.length > 0 ? logs.length : undefined,
+                  },
+                  {
+                    key: 'verifications',
+                    label: 'Verifications',
+                    icon: <ShieldCheck size={13} />,
+                    pill: taskDetails?.verifications?.length || undefined,
+                  },
+                  {
+                    key: 'diff',
+                    label: 'Git Diff',
+                    icon: <FileCode size={13} />,
+                    hasDot: !!activeDiff,
+                  },
+                ].map((tab) => {
+                  const isTabActive = rightPanelTab === tab.key;
+                  return (
+                    <button
+                      key={tab.key}
+                      className={`inspector-tab-btn ${isTabActive ? 'active' : ''}`}
+                      onClick={() => setRightPanelTab(tab.key as any)}
+                      style={{ position: 'relative' }}
+                    >
+                      {isTabActive && (
+                        <motion.span
+                          layoutId="activeInspectorTab"
+                          className="active-tab-indicator"
+                          transition={springs.snappy}
+                        />
+                      )}
+                      <span
+                        style={{
+                          position: 'relative',
+                          zIndex: 1,
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '0.35rem',
+                        }}
+                      >
+                        {tab.icon}
+                        <span>{tab.label}</span>
+                        {tab.pill !== undefined && <span className="tab-pill">{tab.pill}</span>}
+                        {tab.hasDot && <span className="diff-active-dot" />}
+                      </span>
+                    </button>
+                  );
+                })}
               </div>
 
               {/* Inspector Tab Content Panels */}
               <div className="inspector-tab-content">
-                {rightPanelTab === 'stream' && (
-                  <LiveTerminal logs={logs} selectedTaskId={selectedTaskId} />
-                )}
+                <AnimatePresence mode="wait">
+                  {rightPanelTab === 'stream' && (
+                    <motion.div
+                      key="stream"
+                      variants={panelVariants}
+                      initial="initial"
+                      animate="animate"
+                      exit="exit"
+                      style={{ height: '100%', display: 'flex', flexDirection: 'column' }}
+                    >
+                      <LiveTerminal logs={logs} selectedTaskId={selectedTaskId} />
+                    </motion.div>
+                  )}
 
-                {rightPanelTab === 'verifications' && (
-                  <VerificationReports
-                    verifications={taskDetails?.verifications || []}
-                  />
-                )}
+                  {rightPanelTab === 'verifications' && (
+                    <motion.div
+                      key="verifications"
+                      variants={panelVariants}
+                      initial="initial"
+                      animate="animate"
+                      exit="exit"
+                      style={{ height: '100%', overflowY: 'auto' }}
+                    >
+                      <VerificationReports
+                        verifications={taskDetails?.verifications || []}
+                      />
+                    </motion.div>
+                  )}
 
-                {rightPanelTab === 'diff' && <DiffViewer diffText={activeDiff} />}
+                  {rightPanelTab === 'diff' && (
+                    <motion.div
+                      key="diff"
+                      variants={panelVariants}
+                      initial="initial"
+                      animate="animate"
+                      exit="exit"
+                      style={{ height: '100%', display: 'flex', flexDirection: 'column' }}
+                    >
+                      <DiffViewer diffText={activeDiff} />
+                    </motion.div>
+                  )}
+                </AnimatePresence>
               </div>
             </aside>
           </motion.main>
@@ -595,57 +654,113 @@ export default function App() {
             >
               <div className="inspector-drawer-header">
                 <div className="inspector-tabs-header" style={{ borderBottom: 'none', padding: 0 }}>
-                  <button
-                    className={`inspector-tab-btn ${rightPanelTab === 'stream' ? 'active' : ''}`}
-                    onClick={() => setRightPanelTab('stream')}
-                  >
-                    <Terminal size={13} />
-                    <span>Live Stream</span>
-                    {logs.length > 0 && <span className="tab-pill">{logs.length}</span>}
-                  </button>
-
-                  <button
-                    className={`inspector-tab-btn ${rightPanelTab === 'verifications' ? 'active' : ''}`}
-                    onClick={() => setRightPanelTab('verifications')}
-                  >
-                    <ShieldCheck size={13} />
-                    <span>Verifications</span>
-                    {taskDetails?.verifications && taskDetails.verifications.length > 0 && (
-                      <span className="tab-pill">{taskDetails.verifications.length}</span>
-                    )}
-                  </button>
-
-                  <button
-                    className={`inspector-tab-btn ${rightPanelTab === 'diff' ? 'active' : ''}`}
-                    onClick={() => setRightPanelTab('diff')}
-                  >
-                    <FileCode size={13} />
-                    <span>Git Diff</span>
-                    {activeDiff && <span className="diff-active-dot" />}
-                  </button>
+                  {[
+                    {
+                      key: 'stream',
+                      label: 'Live Stream',
+                      icon: <Terminal size={13} />,
+                      pill: logs.length > 0 ? logs.length : undefined,
+                    },
+                    {
+                      key: 'verifications',
+                      label: 'Verifications',
+                      icon: <ShieldCheck size={13} />,
+                      pill: taskDetails?.verifications?.length || undefined,
+                    },
+                    {
+                      key: 'diff',
+                      label: 'Git Diff',
+                      icon: <FileCode size={13} />,
+                      hasDot: !!activeDiff,
+                    },
+                  ].map((tab) => {
+                    const isTabActive = rightPanelTab === tab.key;
+                    return (
+                      <button
+                        key={tab.key}
+                        className={`inspector-tab-btn ${isTabActive ? 'active' : ''}`}
+                        onClick={() => setRightPanelTab(tab.key as any)}
+                        style={{ position: 'relative' }}
+                      >
+                        {isTabActive && (
+                          <motion.span
+                            layoutId="activeDrawerInspectorTab"
+                            className="active-tab-indicator"
+                            transition={springs.snappy}
+                          />
+                        )}
+                        <span
+                          style={{
+                            position: 'relative',
+                            zIndex: 1,
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '0.35rem',
+                          }}
+                        >
+                          {tab.icon}
+                          <span>{tab.label}</span>
+                          {tab.pill !== undefined && <span className="tab-pill">{tab.pill}</span>}
+                          {tab.hasDot && <span className="diff-active-dot" />}
+                        </span>
+                      </button>
+                    );
+                  })}
                 </div>
 
-                <button
+                <motion.button
+                  whileTap={{ scale: 0.9 }}
                   className="header-icon-btn"
                   onClick={() => setInspectorDrawerOpen(false)}
                   aria-label="Close inspector drawer"
                 >
                   <X size={16} />
-                </button>
+                </motion.button>
               </div>
 
               <div className="inspector-tab-content">
-                {rightPanelTab === 'stream' && (
-                  <LiveTerminal logs={logs} selectedTaskId={selectedTaskId} />
-                )}
+                <AnimatePresence mode="wait">
+                  {rightPanelTab === 'stream' && (
+                    <motion.div
+                      key="drawer-stream"
+                      variants={panelVariants}
+                      initial="initial"
+                      animate="animate"
+                      exit="exit"
+                      style={{ height: '100%', display: 'flex', flexDirection: 'column' }}
+                    >
+                      <LiveTerminal logs={logs} selectedTaskId={selectedTaskId} />
+                    </motion.div>
+                  )}
 
-                {rightPanelTab === 'verifications' && (
-                  <VerificationReports
-                    verifications={taskDetails?.verifications || []}
-                  />
-                )}
+                  {rightPanelTab === 'verifications' && (
+                    <motion.div
+                      key="drawer-verifications"
+                      variants={panelVariants}
+                      initial="initial"
+                      animate="animate"
+                      exit="exit"
+                      style={{ height: '100%', overflowY: 'auto' }}
+                    >
+                      <VerificationReports
+                        verifications={taskDetails?.verifications || []}
+                      />
+                    </motion.div>
+                  )}
 
-                {rightPanelTab === 'diff' && <DiffViewer diffText={activeDiff} />}
+                  {rightPanelTab === 'diff' && (
+                    <motion.div
+                      key="drawer-diff"
+                      variants={panelVariants}
+                      initial="initial"
+                      animate="animate"
+                      exit="exit"
+                      style={{ height: '100%', display: 'flex', flexDirection: 'column' }}
+                    >
+                      <DiffViewer diffText={activeDiff} />
+                    </motion.div>
+                  )}
+                </AnimatePresence>
               </div>
             </motion.div>
           </div>

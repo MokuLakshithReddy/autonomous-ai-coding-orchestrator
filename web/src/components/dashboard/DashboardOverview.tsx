@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Activity,
   CheckCircle2,
@@ -11,13 +11,14 @@ import {
   FolderGit2,
   ArrowUpRight,
   Plus,
+  Sparkles,
 } from 'lucide-react';
 import { motion } from 'motion/react';
 import type { Task, SystemStatus, RepoMeta } from '../../types/index.js';
 import { Badge } from '../ui/Badge.js';
 import { Button } from '../ui/Button.js';
 import { formatDateRel } from '../../lib/formatters.js';
-import { transitions } from '../../lib/motion.js';
+import { transitions, springs } from '../../lib/motion.js';
 
 interface DashboardOverviewProps {
   tasks: Task[];
@@ -26,6 +27,44 @@ interface DashboardOverviewProps {
   onSelectTask: (id: string) => void;
   onOpenNewTask: () => void;
 }
+
+/**
+ * AnimatedNumber
+ * Smooth count-up integer transition when metric value genuinely changes.
+ * Avoids animating if value did not change.
+ */
+const AnimatedNumber: React.FC<{ value: number }> = ({ value }) => {
+  const [displayValue, setDisplayValue] = useState(value);
+  const prevValueRef = useRef(value);
+
+  useEffect(() => {
+    const prev = prevValueRef.current;
+    if (prev === value) return;
+    prevValueRef.current = value;
+
+    const start = performance.now();
+    const duration = 550; // ms
+
+    let animId: number;
+    const step = (timestamp: number) => {
+      const elapsed = timestamp - start;
+      const progress = Math.min(elapsed / duration, 1);
+      // easeOutExpo for crisp developer feeling
+      const ease = progress === 1 ? 1 : 1 - Math.pow(2, -10 * progress);
+      const current = Math.round(prev + (value - prev) * ease);
+      setDisplayValue(current);
+
+      if (progress < 1) {
+        animId = requestAnimationFrame(step);
+      }
+    };
+
+    animId = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(animId);
+  }, [value]);
+
+  return <span>{displayValue}</span>;
+};
 
 export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
   tasks,
@@ -38,11 +77,20 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
   const completedTasks = tasks.filter((t) => t.status.toLowerCase() === 'completed');
   const failedTasks = tasks.filter((t) => ['failed', 'blocked'].includes(t.status.toLowerCase()));
   const activeTasks = tasks.filter((t) =>
-    ['discovering', 'planning', 'ready', 'executing', 'verifying', 'diagnosing', 'repairing', 'awaiting_approval'].includes(
-      t.status.toLowerCase()
-    )
+    [
+      'discovering',
+      'planning',
+      'ready',
+      'executing',
+      'verifying',
+      'diagnosing',
+      'repairing',
+      'awaiting_approval',
+    ].includes(t.status.toLowerCase())
   );
-  const repairedTasks = tasks.filter((t) => t.status.toLowerCase() === 'completed' && t.retryCount > 0);
+  const repairedTasks = tasks.filter(
+    (t) => t.status.toLowerCase() === 'completed' && t.retryCount > 0
+  );
 
   // Truthful calculation: if no tasks exist, show '--' rather than 100% or 0%
   const verificationSuccessRate =
@@ -50,13 +98,17 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
 
   return (
     <div className="dashboard-overview-container">
-      {/* Overview Banner */}
+      {/* Overview Banner with Ambient Gradient Flow */}
       <motion.div
-        initial={{ opacity: 0, y: 12 }}
+        initial={{ opacity: 0, y: 14 }}
         animate={{ opacity: 1, y: 0 }}
         transition={transitions.standard}
         className="overview-hero-card"
+        style={{ position: 'relative', overflow: 'hidden' }}
       >
+        {/* Subtle Decorative Light Beam Accent */}
+        <div className="hero-light-beam" />
+
         <div className="hero-content">
           <div className="hero-badge">
             <span className="hero-pulse-dot" />
@@ -80,20 +132,22 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
         </div>
       </motion.div>
 
-      {/* Metric Cards Grid */}
+      {/* Metric Cards Grid with Count-Up & Soft Elevation */}
       <div className="metrics-grid">
         <motion.div
           initial={{ opacity: 0, y: 14 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 0.04, ...transitions.standard }}
-          whileHover={{ y: -2, transition: { duration: 0.15 } }}
+          whileHover={{ y: -3, transition: { duration: 0.16 } }}
           className="metric-card"
         >
           <div className="metric-header">
             <span className="metric-title">Active Missions</span>
             <Activity size={16} style={{ color: 'var(--accent-secondary)' }} />
           </div>
-          <div className="metric-value">{activeTasks.length}</div>
+          <div className="metric-value">
+            <AnimatedNumber value={activeTasks.length} />
+          </div>
           <div className="metric-subtext">Currently executing in isolated worktrees</div>
         </motion.div>
 
@@ -101,7 +155,7 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
           initial={{ opacity: 0, y: 14 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 0.08, ...transitions.standard }}
-          whileHover={{ y: -2, transition: { duration: 0.15 } }}
+          whileHover={{ y: -3, transition: { duration: 0.16 } }}
           className="metric-card"
         >
           <div className="metric-header">
@@ -109,7 +163,7 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
             <CheckCircle2 size={16} style={{ color: 'var(--status-success)' }} />
           </div>
           <div className="metric-value" style={{ color: 'var(--status-success)' }}>
-            {completedTasks.length}
+            <AnimatedNumber value={completedTasks.length} />
           </div>
           <div className="metric-subtext">
             {verificationSuccessRate !== '--'
@@ -122,7 +176,7 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
           initial={{ opacity: 0, y: 14 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 0.12, ...transitions.standard }}
-          whileHover={{ y: -2, transition: { duration: 0.15 } }}
+          whileHover={{ y: -3, transition: { duration: 0.16 } }}
           className="metric-card"
         >
           <div className="metric-header">
@@ -130,7 +184,7 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
             <RotateCcw size={16} style={{ color: 'var(--status-repair)' }} />
           </div>
           <div className="metric-value" style={{ color: 'var(--status-repair)' }}>
-            {repairedTasks.length}
+            <AnimatedNumber value={repairedTasks.length} />
           </div>
           <div className="metric-subtext">Autonomously resolved compilation/test regressions</div>
         </motion.div>
@@ -139,7 +193,7 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
           initial={{ opacity: 0, y: 14 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 0.16, ...transitions.standard }}
-          whileHover={{ y: -2, transition: { duration: 0.15 } }}
+          whileHover={{ y: -3, transition: { duration: 0.16 } }}
           className="metric-card"
         >
           <div className="metric-header">
@@ -147,7 +201,7 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
             <XCircle size={16} style={{ color: 'var(--status-danger)' }} />
           </div>
           <div className="metric-value" style={{ color: 'var(--status-danger)' }}>
-            {failedTasks.length}
+            <AnimatedNumber value={failedTasks.length} />
           </div>
           <div className="metric-subtext">Failed closed with truthful reporting</div>
         </motion.div>
@@ -188,7 +242,12 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
                 </thead>
                 <tbody>
                   {tasks.slice(0, 8).map((task) => (
-                    <tr key={task.id} onClick={() => onSelectTask(task.id)}>
+                    <motion.tr
+                      key={task.id}
+                      onClick={() => onSelectTask(task.id)}
+                      whileHover={{ backgroundColor: 'rgba(255, 255, 255, 0.035)' }}
+                      transition={{ duration: 0.12 }}
+                    >
                       <td className="cell-mission">
                         <div className="mission-name">{task.title}</div>
                         <div className="mission-id">#{task.id.slice(0, 8)}</div>
@@ -205,7 +264,9 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
                       </td>
                       <td className="cell-time">{formatDateRel(task.createdAt)}</td>
                       <td>
-                        <button
+                        <motion.button
+                          whileHover={{ scale: 1.05, x: 2 }}
+                          whileTap={{ scale: 0.95 }}
                           className="view-run-btn"
                           onClick={(e) => {
                             e.stopPropagation();
@@ -214,9 +275,9 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
                         >
                           <span>Open</span>
                           <ArrowUpRight size={12} />
-                        </button>
+                        </motion.button>
                       </td>
-                    </tr>
+                    </motion.tr>
                   ))}
                 </tbody>
               </table>

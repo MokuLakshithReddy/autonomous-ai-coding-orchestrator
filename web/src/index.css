@@ -2521,6 +2521,223 @@ html, body {
    ANIMATIONS & MEDIA QUERIES
    ========================================================================== */
 
+/* Ambient Atmospheric Background System */
+.ambient-background {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  user-select: none;
+  z-index: 0;
+}
+
+.ambient-orb {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(85px);
+  will-change: transform, opacity;
+}
+
+.ambient-orb-violet {
+  width: 580px;
+  height: 580px;
+  top: -140px;
+  left: -80px;
+  background: radial-gradient(circle, rgba(139, 124, 255, 0.18) 0%, rgba(139, 124, 255, 0.05) 50%, transparent 75%);
+  animation: floatViolet 28s infinite ease-in-out alternate;
+}
+
+.ambient-orb-cyan {
+  width: 620px;
+  height: 620px;
+  bottom: -150px;
+  right: -100px;
+  background: radial-gradient(circle, rgba(56, 189, 248, 0.16) 0%, rgba(56, 189, 248, 0.04) 50%, transparent 75%);
+  animation: floatCyan 34s infinite ease-in-out alternate;
+}
+
+.ambient-orb-center {
+  width: 460px;
+  height: 460px;
+  top: 35%;
+  left: 50%;
+  background: radial-gradient(circle, rgba(167, 139, 250, 0.1) 0%, rgba(56, 189, 248, 0.03) 50%, transparent 75%);
+  animation: floatCenter 24s infinite ease-in-out alternate;
+}
+
+.ambient-mesh-grid {
+  position: absolute;
+  inset: 0;
+  background-image: 
+    linear-gradient(rgba(148, 163, 184, 0.025) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(148, 163, 184, 0.025) 1px, transparent 1px);
+  background-size: 40px 40px;
+  mask-image: radial-gradient(circle at 50% 50%, black 40%, transparent 85%);
+}
+
+@keyframes floatViolet {
+  0% { transform: translate(0, 0) scale(1); opacity: 0.8; }
+  50% { transform: translate(65px, 50px) scale(1.1); opacity: 1; }
+  100% { transform: translate(-30px, 80px) scale(0.94); opacity: 0.75; }
+}
+
+@keyframes floatCyan {
+  0% { transform: translate(0, 0) scale(1); opacity: 0.75; }
+  50% { transform: translate(-70px, -55px) scale(1.12); opacity: 0.95; }
+  100% { transform: translate(45px, -75px) scale(0.92); opacity: 0.7; }
+}
+
+@keyframes floatCenter {
+  0% { transform: translate(0, 0) scale(0.95); opacity: 0.6; }
+  50% { transform: translate(50px, -35px) scale(1.08); opacity: 0.88; }
+  100% { transform: translate(-40px, 35px) scale(0.98); opacity: 0.6; }
+}
+
+/* Sliding Navigation, Filter & Drawer Indicators */
+.active-nav-indicator {
+  position: absolute;
+  inset: 0;
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface-hover);
+  border: 1px solid var(--border-active);
+  box-shadow: 0 0 12px rgba(139, 124, 255, 0.25);
+  z-index: 0;
+}
+
+.active-tab-indicator {
+  position: absolute;
+  inset: 0;
+  background: var(--bg-surface-elevated);
+  border-bottom: 2px solid var(--accent-primary);
+  z-index: 0;
+}
+
+.active-filter-indicator {
+  position: absolute;
+  inset: 0;
+  background: var(--accent-primary-subtle);
+  border: 1px solid rgba(139, 124, 255, 0.35);
+  border-radius: 12px;
+  z-index: 0;
+}
+
+.selected-task-accent-bar {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--accent-primary);
+  border-top-left-radius: var(--radius-sm);
+  border-bottom-left-radius: var(--radius-sm);
+  box-shadow: 0 0 8px var(--accent-primary);
+}
+
+/* Status Dot Radar Ping */
+.status-dot-wrapper {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 8px;
+  height: 8px;
+}
+
+.status-dot-ping {
+  position: absolute;
+  inset: -2px;
+  border-radius: 50%;
+  border: 1.5px solid var(--status-success);
+  opacity: 0.7;
+  animation: radarPing 2.2s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+
+@keyframes radarPing {
+  0% { transform: scale(0.8); opacity: 0.8; }
+  75%, 100% { transform: scale(2.2); opacity: 0; }
+}
+
+/* Signature Orchestration Pipeline Beam & Halos */
+.connector-traveling-beam {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 24px;
+  background: linear-gradient(90deg, transparent, var(--accent-secondary), #ffffff, transparent);
+  border-radius: 2px;
+  filter: blur(1px);
+  animation: travelBeam 1.8s infinite ease-in-out;
+  pointer-events: none;
+}
+
+@keyframes travelBeam {
+  0% { left: -10%; opacity: 0; }
+  25% { opacity: 1; }
+  75% { opacity: 1; }
+  100% { left: 100%; opacity: 0; }
+}
+
+.active-pulse-halo {
+  position: absolute;
+  inset: -3px;
+  border-radius: var(--radius-sm);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.halo-cyan {
+  border: 1px solid var(--accent-secondary);
+  box-shadow: 0 0 14px rgba(56, 189, 248, 0.45);
+}
+
+.halo-violet {
+  border: 1px solid var(--accent-primary);
+  box-shadow: 0 0 14px rgba(139, 124, 255, 0.45);
+}
+
+.halo-sky {
+  border: 1px solid var(--status-info);
+  box-shadow: 0 0 14px rgba(56, 189, 248, 0.45);
+}
+
+/* Hero Decorative Light Beam */
+.hero-light-beam {
+  position: absolute;
+  top: -40%;
+  right: -10%;
+  width: 260px;
+  height: 260px;
+  background: radial-gradient(circle, rgba(139, 124, 255, 0.18) 0%, transparent 70%);
+  filter: blur(40px);
+  pointer-events: none;
+  animation: heroBeamPulse 5s infinite ease-in-out alternate;
+}
+
+@keyframes heroBeamPulse {
+  0% { transform: scale(0.9); opacity: 0.6; }
+  100% { transform: scale(1.2); opacity: 1; }
+}
+
+/* Terminal Log Line Treatments */
+.log-line-error {
+  border-left: 2px solid var(--status-danger) !important;
+  background: rgba(251, 113, 133, 0.06);
+}
+
+.log-line-verified {
+  border-left: 2px solid var(--status-success) !important;
+  background: rgba(52, 211, 153, 0.06);
+}
+
+.flowing-line {
+  animation: flowDash 1s linear infinite;
+}
+
+@keyframes flowDash {
+  from { stroke-dashoffset: 14; }
+  to { stroke-dashoffset: 0; }
+}
+
 .active-task-pulse-dot {
   width: 6px;
   height: 6px;

@@ -17,6 +17,7 @@ import {
 import { motion } from 'motion/react';
 import type { SystemStatus } from '../../types/index.js';
 import { Button } from '../ui/Button.js';
+import { springs } from '../../lib/motion.js';
 
 interface AppHeaderProps {
   systemStatus: SystemStatus | null;
@@ -47,61 +48,90 @@ export const AppHeader: React.FC<AppHeaderProps> = ({
 }) => {
   const isOnline = systemStatus?.status === 'online';
 
+  const navTabs = [
+    { key: 'workspace' as const, label: 'Mission Control', icon: <TerminalSquare size={14} /> },
+    { key: 'dashboard' as const, label: 'Observability', icon: <LayoutDashboard size={14} /> },
+    { key: 'history' as const, label: 'Task History', icon: <History size={14} /> },
+  ];
+
   return (
     <header className="app-header">
       <div className="header-left">
-        {/* Mobile menu toggle button */}
-        <button
+        {/* Mobile Menu Toggle Button */}
+        <motion.button
+          whileTap={{ scale: 0.9 }}
           className="mobile-toggle-btn"
           onClick={onToggleMobileMenu}
           aria-label="Toggle navigation menu"
         >
           {mobileMenuOpen ? <X size={18} /> : <Menu size={18} />}
-        </button>
+        </motion.button>
 
-        {/* Brand Identity */}
-        <div className="brand-group" onClick={() => onViewChange('workspace')}>
-          <div className="brand-icon">
+        {/* Brand Identity with Animated Glow & Micro-interaction */}
+        <motion.div
+          className="brand-group"
+          onClick={() => onViewChange('workspace')}
+          whileHover={{ scale: 1.02 }}
+          whileTap={{ scale: 0.98 }}
+        >
+          <motion.div
+            className="brand-icon"
+            whileHover={{ rotate: [0, -6, 6, 0], scale: 1.08 }}
+            transition={{ duration: 0.35, ease: 'easeOut' }}
+          >
             <Cpu size={18} />
-          </div>
+          </motion.div>
           <div className="brand-titles">
             <span className="brand-main">ORCHESTRATOR</span>
             <span className="brand-sub">AUTONOMOUS AGENT ENGINE</span>
           </div>
-        </div>
+        </motion.div>
 
-        {/* View Switcher Tabs (Midnight Slate + Electric Violet) */}
+        {/* View Switcher Tabs with Motion layoutId Sliding Indicator */}
         <nav className="header-nav">
-          <button
-            className={`nav-tab ${activeView === 'workspace' ? 'active' : ''}`}
-            onClick={() => onViewChange('workspace')}
-          >
-            <TerminalSquare size={14} />
-            <span>Mission Control</span>
-          </button>
-          <button
-            className={`nav-tab ${activeView === 'dashboard' ? 'active' : ''}`}
-            onClick={() => onViewChange('dashboard')}
-          >
-            <LayoutDashboard size={14} />
-            <span>Observability</span>
-          </button>
-          <button
-            className={`nav-tab ${activeView === 'history' ? 'active' : ''}`}
-            onClick={() => onViewChange('history')}
-          >
-            <History size={14} />
-            <span>Task History</span>
-          </button>
+          {navTabs.map((tab) => {
+            const isActive = activeView === tab.key;
+            return (
+              <button
+                key={tab.key}
+                className={`nav-tab ${isActive ? 'active' : ''}`}
+                onClick={() => onViewChange(tab.key)}
+                style={{ position: 'relative' }}
+              >
+                {isActive && (
+                  <motion.span
+                    layoutId="activeNavIndicator"
+                    className="active-nav-indicator"
+                    transition={springs.snappy}
+                  />
+                )}
+                <span
+                  style={{
+                    position: 'relative',
+                    zIndex: 1,
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '0.45rem',
+                  }}
+                >
+                  {tab.icon}
+                  <span>{tab.label}</span>
+                </span>
+              </button>
+            );
+          })}
         </nav>
       </div>
 
       <div className="header-right">
         {/* Status Pills */}
         <div className="status-pill-group">
-          {/* Brain Model Pill */}
+          {/* Brain Model Pill with Online Radar Ping */}
           <div className="system-pill" title="Active LLM Brain">
-            <span className={`status-dot ${isOnline ? 'online' : 'offline'}`} />
+            <span className="status-dot-wrapper">
+              <span className={`status-dot ${isOnline ? 'online' : 'offline'}`} />
+              {isOnline && <span className="status-dot-ping" />}
+            </span>
             <span className="pill-label">Brain:</span>
             <span className="pill-value">{systemStatus?.geminiModel || 'Gemini'}</span>
           </div>
@@ -110,7 +140,9 @@ export const AppHeader: React.FC<AppHeaderProps> = ({
           <div className="system-pill" title="Independent Verification Gate">
             <ShieldCheck size={13} style={{ color: 'var(--status-success)' }} />
             <span className="pill-label">Verifier:</span>
-            <span className="pill-value" style={{ color: 'var(--status-success)' }}>Strict</span>
+            <span className="pill-value" style={{ color: 'var(--status-success)' }}>
+              Strict
+            </span>
           </div>
 
           {/* Docker Sandbox Pill */}
@@ -132,18 +164,23 @@ export const AppHeader: React.FC<AppHeaderProps> = ({
 
         {/* Tablet Inspector Toggle Button */}
         {onToggleInspectorDrawer && (
-          <button
-            className={`header-icon-btn mobile-inspector-toggle-btn ${inspectorDrawerOpen ? 'active' : ''}`}
+          <motion.button
+            whileTap={{ scale: 0.92 }}
+            className={`header-icon-btn mobile-inspector-toggle-btn ${
+              inspectorDrawerOpen ? 'active' : ''
+            }`}
             onClick={onToggleInspectorDrawer}
             title="Toggle Telemetry Inspector"
             aria-label="Toggle Telemetry Inspector"
           >
             <SlidersHorizontal size={15} />
-          </button>
+          </motion.button>
         )}
 
         {/* Authentication Button */}
-        <button
+        <motion.button
+          whileHover={{ y: -1 }}
+          whileTap={{ scale: 0.96 }}
           className={`auth-status-btn ${isAuthenticated ? 'authenticated' : 'unauthenticated'}`}
           onClick={onOpenAuth}
           title="Click to configure API Token"
@@ -159,7 +196,7 @@ export const AppHeader: React.FC<AppHeaderProps> = ({
               <span>Auth Required</span>
             </>
           )}
-        </button>
+        </motion.button>
 
         {/* Primary Action Button */}
         <Button
@@ -171,14 +208,17 @@ export const AppHeader: React.FC<AppHeaderProps> = ({
           New Mission
         </Button>
 
-        {/* Settings Button */}
-        <button
+        {/* Settings Button with Gear Rotation Feedback */}
+        <motion.button
+          whileHover={{ rotate: 60 }}
+          whileTap={{ scale: 0.92 }}
+          transition={{ type: 'spring', damping: 14, stiffness: 260 }}
           className="header-icon-btn"
           onClick={onOpenSettings}
           title="System & API Settings"
         >
           <Settings size={15} />
-        </button>
+        </motion.button>
       </div>
     </header>
   );

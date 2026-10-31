@@ -1,7 +1,8 @@
 import React from 'react';
-import { GitCommit, ArrowRight, CheckCircle2, Clock } from 'lucide-react';
+import { GitCommit, CheckCircle2, Clock } from 'lucide-react';
 import { motion } from 'motion/react';
 import type { PlanStep, Step } from '../../types/index.js';
+import { springs } from '../../lib/motion.js';
 
 interface DependencyGraphProps {
   steps: PlanStep[];
@@ -15,7 +16,7 @@ export const DependencyGraph: React.FC<DependencyGraphProps> = ({ steps, stepRec
     <motion.div
       initial={{ opacity: 0, y: 10 }}
       animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.25, ease: 'easeOut' }}
+      transition={{ duration: 0.28, ease: 'easeOut' }}
       className="dependency-graph-card"
     >
       <div className="graph-title-row">
@@ -33,23 +34,27 @@ export const DependencyGraph: React.FC<DependencyGraphProps> = ({ steps, stepRec
           return (
             <div key={step.index} className="graph-node-wrapper">
               <motion.div
-                whileHover={{ y: -2, transition: { duration: 0.15 } }}
-                animate={
-                  isRunning
-                    ? {
-                        boxShadow: [
-                          '0 0 0 rgba(14, 165, 233, 0)',
-                          '0 0 12px rgba(14, 165, 233, 0.4)',
-                          '0 0 0 rgba(14, 165, 233, 0)',
-                        ],
-                      }
-                    : {}
-                }
-                transition={
-                  isRunning
+                initial={{ opacity: 0, scale: 0.92, y: 6 }}
+                animate={{
+                  opacity: 1,
+                  scale: 1,
+                  y: 0,
+                  boxShadow: isRunning
+                    ? [
+                        '0 0 0 rgba(56, 189, 248, 0)',
+                        '0 0 14px rgba(56, 189, 248, 0.45)',
+                        '0 0 0 rgba(56, 189, 248, 0)',
+                      ]
+                    : undefined,
+                }}
+                transition={{
+                  opacity: { delay: idx * 0.04, duration: 0.2 },
+                  scale: { delay: idx * 0.04, duration: 0.2 },
+                  boxShadow: isRunning
                     ? { repeat: Infinity, duration: 2, ease: 'easeInOut' }
-                    : { duration: 0.2 }
-                }
+                    : undefined,
+                }}
+                whileHover={{ y: -3, scale: 1.02, transition: { duration: 0.15 } }}
                 className={`graph-node ${isDone ? 'done' : ''} ${isRunning ? 'running' : ''}`}
                 title={`${step.title} (${status})`}
               >
@@ -59,9 +64,9 @@ export const DependencyGraph: React.FC<DependencyGraphProps> = ({ steps, stepRec
                     <motion.span
                       initial={{ scale: 0 }}
                       animate={{ scale: 1 }}
-                      transition={{ type: 'spring', stiffness: 500, damping: 25 }}
+                      transition={springs.pop}
                     >
-                      <CheckCircle2 size={11} className="text-emerald" />
+                      <CheckCircle2 size={11} style={{ color: 'var(--status-success)' }} />
                     </motion.span>
                   ) : isRunning ? (
                     <span className="mini-pulse-dot" />
@@ -74,21 +79,43 @@ export const DependencyGraph: React.FC<DependencyGraphProps> = ({ steps, stepRec
 
               {idx < steps.length - 1 && (
                 <div className="graph-arrow-connector">
-                  <svg width="28" height="12" viewBox="0 0 28 12" className="connector-svg">
+                  <svg width="32" height="14" viewBox="0 0 32 14" className="connector-svg">
                     <line
                       x1="0"
-                      y1="6"
-                      x2="22"
-                      y2="6"
-                      stroke={isDone ? 'var(--accent-emerald)' : 'rgba(255, 255, 255, 0.12)'}
+                      y1="7"
+                      x2="24"
+                      y2="7"
+                      stroke={
+                        isDone
+                          ? 'var(--status-success)'
+                          : isRunning
+                          ? 'var(--accent-secondary)'
+                          : 'rgba(255, 255, 255, 0.14)'
+                      }
                       strokeWidth="2"
                       strokeDasharray={isDone ? 'none' : '4 3'}
                       className={isRunning ? 'flowing-line' : ''}
                     />
                     <polygon
-                      points="22,3 27,6 22,9"
-                      fill={isDone ? 'var(--accent-emerald)' : 'rgba(255, 255, 255, 0.18)'}
+                      points="24,4 30,7 24,10"
+                      fill={
+                        isDone
+                          ? 'var(--status-success)'
+                          : isRunning
+                          ? 'var(--accent-secondary)'
+                          : 'rgba(255, 255, 255, 0.2)'
+                      }
                     />
+                    {/* Flowing photon particle along active running line */}
+                    {isRunning && (
+                      <circle r="2.5" fill="#38BDF8" className="flowing-photon">
+                        <animateMotion
+                          path="M 0 7 L 24 7"
+                          dur="1.4s"
+                          repeatCount="indefinite"
+                        />
+                      </circle>
+                    )}
                   </svg>
                 </div>
               )}

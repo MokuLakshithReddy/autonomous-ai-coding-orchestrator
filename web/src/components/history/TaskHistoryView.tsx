@@ -9,9 +9,11 @@ import {
   ArrowUpRight,
   GitBranch,
 } from 'lucide-react';
+import { motion, AnimatePresence } from 'motion/react';
 import type { Task } from '../../types/index.js';
 import { Badge } from '../ui/Badge.js';
 import { formatDateRel, formatDuration } from '../../lib/formatters.js';
+import { springs } from '../../lib/motion.js';
 
 interface TaskHistoryViewProps {
   tasks: Task[];
@@ -44,9 +46,13 @@ export const TaskHistoryView: React.FC<TaskHistoryViewProps> = ({ tasks, onSelec
     <div className="history-view-container">
       <div className="history-header">
         <div className="history-title-group">
-          <div className="history-icon-badge">
+          <motion.div
+            className="history-icon-badge"
+            whileHover={{ rotate: -15, scale: 1.08 }}
+            transition={{ duration: 0.25 }}
+          >
             <History size={18} />
-          </div>
+          </motion.div>
           <div>
             <h1 className="history-heading">Task Execution History & Audit Log</h1>
             <p className="history-subheading">
@@ -68,15 +74,28 @@ export const TaskHistoryView: React.FC<TaskHistoryViewProps> = ({ tasks, onSelec
           </div>
 
           <div className="history-filter-chips">
-            {(['ALL', 'COMPLETED', 'FAILED', 'REPAIRED'] as const).map((cat) => (
-              <button
-                key={cat}
-                className={`history-filter-chip ${filter === cat ? 'active' : ''}`}
-                onClick={() => setFilter(cat)}
-              >
-                {cat.charAt(0) + cat.slice(1).toLowerCase()}
-              </button>
-            ))}
+            {(['ALL', 'COMPLETED', 'FAILED', 'REPAIRED'] as const).map((cat) => {
+              const isChipActive = filter === cat;
+              return (
+                <button
+                  key={cat}
+                  className={`history-filter-chip ${isChipActive ? 'active' : ''}`}
+                  onClick={() => setFilter(cat)}
+                  style={{ position: 'relative' }}
+                >
+                  {isChipActive && (
+                    <motion.span
+                      layoutId="activeHistoryFilter"
+                      className="active-filter-indicator"
+                      transition={springs.snappy}
+                    />
+                  )}
+                  <span style={{ position: 'relative', zIndex: 1 }}>
+                    {cat.charAt(0) + cat.slice(1).toLowerCase()}
+                  </span>
+                </button>
+              );
+            })}
           </div>
         </div>
       </div>
@@ -84,9 +103,9 @@ export const TaskHistoryView: React.FC<TaskHistoryViewProps> = ({ tasks, onSelec
       {/* Desktop / Tablet Table View */}
       <div className="history-table-container">
         {filtered.length === 0 ? (
-          <div className="history-empty">
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="history-empty">
             <p>No historical runs match the current criteria.</p>
-          </div>
+          </motion.div>
         ) : (
           <table className="history-table">
             <thead>
@@ -102,7 +121,12 @@ export const TaskHistoryView: React.FC<TaskHistoryViewProps> = ({ tasks, onSelec
             </thead>
             <tbody>
               {filtered.map((task) => (
-                <tr key={task.id} onClick={() => onSelectTask(task.id)}>
+                <motion.tr
+                  key={task.id}
+                  onClick={() => onSelectTask(task.id)}
+                  whileHover={{ backgroundColor: 'rgba(255, 255, 255, 0.035)' }}
+                  transition={{ duration: 0.12 }}
+                >
                   <td className="cell-task-info">
                     <div className="task-row-title">{task.title}</div>
                     <div className="task-row-prompt">{task.prompt}</div>
@@ -128,7 +152,9 @@ export const TaskHistoryView: React.FC<TaskHistoryViewProps> = ({ tasks, onSelec
                   </td>
                   <td className="cell-date">{formatDateRel(task.createdAt)}</td>
                   <td>
-                    <button
+                    <motion.button
+                      whileHover={{ scale: 1.06, x: 2 }}
+                      whileTap={{ scale: 0.94 }}
                       className="open-task-btn"
                       onClick={(e) => {
                         e.stopPropagation();
@@ -137,9 +163,9 @@ export const TaskHistoryView: React.FC<TaskHistoryViewProps> = ({ tasks, onSelec
                     >
                       <span>Details</span>
                       <ArrowUpRight size={12} />
-                    </button>
+                    </motion.button>
                   </td>
-                </tr>
+                </motion.tr>
               ))}
             </tbody>
           </table>
@@ -154,8 +180,10 @@ export const TaskHistoryView: React.FC<TaskHistoryViewProps> = ({ tasks, onSelec
           </div>
         ) : (
           filtered.map((task) => (
-            <div
+            <motion.div
               key={task.id}
+              whileHover={{ y: -2, x: 2 }}
+              whileTap={{ scale: 0.985 }}
               className="history-mobile-card"
               onClick={() => onSelectTask(task.id)}
             >
@@ -172,7 +200,7 @@ export const TaskHistoryView: React.FC<TaskHistoryViewProps> = ({ tasks, onSelec
                 <span>{formatDuration(task.createdAt, task.updatedAt)}</span>
                 <span>{formatDateRel(task.createdAt)}</span>
               </div>
-            </div>
+            </motion.div>
           ))
         )}
       </div>

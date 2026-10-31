@@ -10,6 +10,7 @@ import {
   Cpu,
   StopCircle,
 } from 'lucide-react';
+import { motion, AnimatePresence } from 'motion/react';
 import type { Task, Step, Verification, Approval, ExecutionPlan } from '../../types/index.js';
 import { StateStepper } from './StateStepper.js';
 import { ApprovalBanner } from './ApprovalBanner.js';
@@ -19,6 +20,7 @@ import { AcceptanceCriteriaList } from './AcceptanceCriteriaList.js';
 import { Badge } from '../ui/Badge.js';
 import { Button } from '../ui/Button.js';
 import { formatDuration } from '../../lib/formatters.js';
+import { transitions, springs } from '../../lib/motion.js';
 
 interface TaskDetailViewProps {
   task: Task;
@@ -71,9 +73,21 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
   };
 
   return (
-    <div className="task-detail-container">
+    <motion.div
+      key={task.id}
+      initial={{ opacity: 0, y: 10 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: -8 }}
+      transition={{ duration: 0.24, ease: [0.16, 1, 0.3, 1] }}
+      className="task-detail-container"
+    >
       {/* Task Top Action Bar */}
-      <div className="task-detail-header">
+      <motion.div
+        initial={{ opacity: 0, y: -4 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.2 }}
+        className="task-detail-header"
+      >
         <div className="task-title-area">
           <div className="task-title-row">
             <h1 className="task-headline-text">{task.title}</h1>
@@ -89,7 +103,11 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
             </span>
 
             <span className="meta-item" title="Git Task Branch">
-              <GitBranch size={12} className="meta-icon" style={{ color: 'var(--accent-secondary)' }} />
+              <GitBranch
+                size={12}
+                className="meta-icon"
+                style={{ color: 'var(--accent-secondary)' }}
+              />
               <span>task/{task.id.slice(0, 8)}</span>
             </span>
 
@@ -99,7 +117,11 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
             </span>
 
             {task.retryCount > 0 && (
-              <span className="meta-item" style={{ color: 'var(--status-warning)' }} title="Self-Repair Retries">
+              <span
+                className="meta-item"
+                style={{ color: 'var(--status-warning)' }}
+                title="Self-Repair Retries"
+              >
                 <RotateCcw size={12} className="meta-icon" />
                 <span>
                   Retries: {task.retryCount} / {task.maxRetries}
@@ -123,7 +145,7 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
             </Button>
           )}
         </div>
-      </div>
+      </motion.div>
 
       {/* State Machine Transition Visualizer with Steps Evidence */}
       <StateStepper currentStatus={task.status} steps={steps} />
@@ -139,13 +161,18 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
 
         {/* Verified Outcome Summary (Highlighted on completion) */}
         {task.summary && (
-          <div className={`verified-summary-card ${isCompleted ? 'completed' : ''}`}>
+          <motion.div
+            initial={{ opacity: 0, scale: 0.98 }}
+            animate={{ opacity: 1, scale: 1 }}
+            transition={transitions.standard}
+            className={`verified-summary-card ${isCompleted ? 'completed' : ''}`}
+          >
             <div className="summary-header">
               <CheckCircle2 size={16} style={{ color: 'var(--status-success)' }} />
               <span className="summary-title">Verified Outcome & Repair Summary</span>
             </div>
             <p className="summary-body">{task.summary}</p>
-          </div>
+          </motion.div>
         )}
 
         {/* Dependency Flow Graph */}
@@ -171,6 +198,6 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
           />
         )}
       </div>
-    </div>
+    </motion.div>
   );
 };

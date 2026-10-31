@@ -1,17 +1,29 @@
-import React from 'react';
-import { ShieldCheck, CheckCircle2, XCircle, AlertTriangle, Terminal } from 'lucide-react';
+import React, { useState } from 'react';
+import { ShieldCheck, CheckCircle2, XCircle, AlertTriangle, Terminal, ChevronDown, ChevronRight } from 'lucide-react';
+import { motion, AnimatePresence } from 'motion/react';
 import type { Verification } from '../../types/index.js';
 import { Badge } from '../ui/Badge.js';
 import { formatTimestamp } from '../../lib/formatters.js';
+import { springs } from '../../lib/motion.js';
 
 interface VerificationReportsProps {
   verifications: Verification[];
 }
 
 export const VerificationReports: React.FC<VerificationReportsProps> = ({ verifications }) => {
+  const [expandedDiags, setExpandedDiags] = useState<Record<string, boolean>>({});
+
+  const toggleDiag = (key: string) => {
+    setExpandedDiags((prev) => ({ ...prev, [key]: !prev[key] }));
+  };
+
   if (!verifications || verifications.length === 0) {
     return (
-      <div className="verifications-empty-state">
+      <motion.div
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        className="verifications-empty-state"
+      >
         <ShieldCheck size={32} className="text-muted" />
         <p style={{ fontWeight: 600, fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
           No verification reports yet
@@ -19,7 +31,7 @@ export const VerificationReports: React.FC<VerificationReportsProps> = ({ verifi
         <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
           Independent verification runs after each agent step and upon final task completion.
         </p>
-      </div>
+      </motion.div>
     );
   }
 
@@ -28,15 +40,29 @@ export const VerificationReports: React.FC<VerificationReportsProps> = ({ verifi
       {verifications.map((v, index) => {
         const isPassed = v.status === 'PASSED';
         const isFailed = v.status === 'FAILED';
+        const itemKey = v.id || `verif-${index}`;
+        const isDiagOpen = expandedDiags[itemKey] !== false; // Default open for readability
 
         return (
-          <div
-            key={v.id || index}
-            className={`verification-card ${isPassed ? 'passed' : isFailed ? 'failed' : 'inconclusive'}`}
+          <motion.div
+            key={itemKey}
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{
+              delay: Math.min(index * 0.05, 0.25),
+              duration: 0.24,
+              ease: [0.16, 1, 0.3, 1],
+            }}
+            whileHover={{ y: -2, transition: { duration: 0.15 } }}
+            className={`verification-card ${
+              isPassed ? 'passed' : isFailed ? 'failed' : 'inconclusive'
+            }`}
           >
             <div className="verification-card-header">
               <div className="verif-title-row">
-                <span className="verif-run-num">Verification Run #{verifications.length - index}</span>
+                <span className="verif-run-num">
+                  Verification Run #{verifications.length - index}
+                </span>
                 <Badge status={v.status} size="sm" />
               </div>
               <span className="verif-time">{formatTimestamp(v.createdAt)}</span>
@@ -72,17 +98,37 @@ export const VerificationReports: React.FC<VerificationReportsProps> = ({ verifi
               </div>
             )}
 
-            {/* Compiler / Test Diagnostics */}
+            {/* Compiler / Test Diagnostics with Animated Collapse */}
             {v.diagnostics && (
               <div className="verif-diagnostics-box">
-                <div className="diag-header">
-                  <Terminal size={11} />
-                  <span>Compiler & Test Diagnostics</span>
+                <div
+                  className="diag-header"
+                  onClick={() => toggleDiag(itemKey)}
+                  style={{ cursor: 'pointer', userSelect: 'none' }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                    <Terminal size={11} />
+                    <span>Compiler & Test Diagnostics</span>
+                  </div>
+                  {isDiagOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
                 </div>
-                <pre className="diag-pre">{v.diagnostics}</pre>
+
+                <AnimatePresence initial={false}>
+                  {isDiagOpen && (
+                    <motion.div
+                      initial={{ height: 0, opacity: 0 }}
+                      animate={{ height: 'auto', opacity: 1 }}
+                      exit={{ height: 0, opacity: 0 }}
+                      transition={{ duration: 0.2, ease: 'easeInOut' }}
+                      style={{ overflow: 'hidden' }}
+                    >
+                      <pre className="diag-pre">{v.diagnostics}</pre>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
               </div>
             )}
-          </div>
+          </motion.div>
         );
       })}
     </div>

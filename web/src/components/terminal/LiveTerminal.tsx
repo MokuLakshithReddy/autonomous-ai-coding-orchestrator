@@ -8,7 +8,7 @@ import {
   Layers,
   Globe,
 } from 'lucide-react';
-import { motion } from 'motion/react';
+import { motion, AnimatePresence } from 'motion/react';
 import type { WsEvent } from '../../types/index.js';
 import { formatTimestamp } from '../../lib/formatters.js';
 
@@ -25,33 +25,60 @@ export const LiveTerminal: React.FC<LiveTerminalProps> = ({ logs, selectedTaskId
   const [copied, setCopied] = useState<boolean>(false);
   const terminalEndRef = useRef<HTMLDivElement>(null);
 
-  // Track initial events so historical logs don't flash as fresh on mount
+  // State-driven fresh event tracking (fixes ref re-render bug)
   const knownEventIdsRef = useRef<Set<string>>(new Set());
-  const freshEventIdsRef = useRef<Set<string>>(new Set());
+  const [freshEventIds, setFreshEventIds] = useState<Set<string>>(() => new Set());
   const isFirstRender = useRef(true);
+  const activeTimeoutsRef = useRef<number[]>([]);
 
   useEffect(() => {
+    // Initial mount: record all historical logs so they never flash as fresh
     if (isFirstRender.current) {
       logs.forEach((l, idx) => knownEventIdsRef.current.add(l.id || `${l.timestamp}-${idx}`));
       isFirstRender.current = false;
       return;
     }
 
+    // Identify genuinely new events received since last render
+    const brandNewKeys: string[] = [];
     logs.forEach((l, idx) => {
       const key = l.id || `${l.timestamp}-${idx}`;
       if (!knownEventIdsRef.current.has(key)) {
         knownEventIdsRef.current.add(key);
-        freshEventIdsRef.current.add(key);
-        setTimeout(() => {
-          freshEventIdsRef.current.delete(key);
-        }, 2000);
+        brandNewKeys.push(key);
       }
     });
+
+    if (brandNewKeys.length > 0) {
+      setFreshEventIds((prev) => {
+        const next = new Set(prev);
+        brandNewKeys.forEach((k) => next.add(k));
+        return next;
+      });
+
+      // Expire fresh highlight after 1.8s
+      const timerId = window.setTimeout(() => {
+        setFreshEventIds((prev) => {
+          const next = new Set(prev);
+          brandNewKeys.forEach((k) => next.delete(k));
+          return next;
+        });
+      }, 1800);
+
+      activeTimeoutsRef.current.push(timerId);
+    }
   }, [logs]);
+
+  // Clean up all pending highlight timeouts on unmount
+  useEffect(() => {
+    return () => {
+      activeTimeoutsRef.current.forEach((t) => clearTimeout(t));
+      activeTimeoutsRef.current = [];
+    };
+  }, []);
 
   const filteredLogs = useMemo(() => {
     return logs.filter((log) => {
-      // Meaningful task-level filtering vs system-wide
       if (scope === 'task' && selectedTaskId && log.taskId && log.taskId !== selectedTaskId) {
         return false;
       }
@@ -138,23 +165,26 @@ export const LiveTerminal: React.FC<LiveTerminalProps> = ({ logs, selectedTaskId
 
           {/* Filter Pills */}
           <div className="terminal-filters">
-            {(['ALL', 'STEPS', 'VERIFY', 'REPAIR', 'ERROR'] as const).map((cat) => (
-              <button
-                key={cat}
-                className={`terminal-filter-pill ${filterType === cat ? 'active' : ''}`}
-                onClick={() => setFilterType(cat)}
-              >
-                {cat}
-              </button>
-            ))}
+            {(['ALL', 'STEPS', 'VERIFY', 'REPAIR', 'APPROVAL', 'ERROR'] as const).map(
+              (f) => (
+                <button
+                  key={f}
+                  className={`term-filter-pill ${filterType === f ? 'active' : ''}`}
+                  onClick={() => setFilterType(f)}
+                >
+                  {f}
+                </button>
+              )
+            )}
           </div>
 
-          <div className="terminal-btn-group">
+          {/* Toolbar Utilities */}
+          <div className="terminal-utils">
             <motion.button
               whileTap={{ scale: 0.9 }}
               className={`terminal-tool-btn ${autoScroll ? 'active' : ''}`}
               onClick={() => setAutoScroll(!autoScroll)}
-              title={autoScroll ? 'Auto-scroll active' : 'Auto-scroll paused'}
+              title={autoScroll ? 'Auto-scroll ON' : 'Auto-scroll PAUSED'}
             >
               <ArrowDown size={12} />
             </motion.button>
@@ -193,19 +223,26 @@ export const LiveTerminal: React.FC<LiveTerminalProps> = ({ logs, selectedTaskId
         ) : (
           filteredLogs.map((log, index) => {
             const key = log.id || `${log.timestamp}-${index}`;
-            const isFresh = freshEventIdsRef.current.has(key);
+            const isFresh = freshEventIds.has(key);
+            const isError = log.type.includes('FAIL') || log.type.includes('ERROR');
+            const isPassed = log.type.includes('PASSED') || log.type.includes('VERIF_PASS');
 
             return (
-              <div
+              <motion.div
                 key={key}
-                className={`log-line ${isFresh ? 'log-line-fresh' : ''}`}
+                initial={isFresh ? { opacity: 0, x: -8 } : false}
+                animate={{ opacity: 1, x: 0 }}
+                transition={{ duration: 0.18, ease: 'easeOut' }}
+                className={`log-line ${isFresh ? 'log-line-fresh' : ''} ${
+                  isError ? 'log-line-error' : isPassed ? 'log-line-verified' : ''
+                }`}
               >
                 <span className="log-timestamp">{formatTimestamp(log.timestamp)}</span>
                 <span className={`log-event-tag ${getBadgeClass(log.type)}`}>
                   {log.type}
                 </span>
                 <span className="log-message-text">{log.message}</span>
-              </div>
+              </motion.div>
             );
           })
         )}
