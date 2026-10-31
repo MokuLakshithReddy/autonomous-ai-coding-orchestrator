@@ -9,7 +9,7 @@ import { SecurityPolicyEngine } from '../src/security/policy.js';
 import { ContainerSandbox } from '../src/security/sandbox.js';
 import { IndependentVerifier } from '../src/verifier/index.js';
 import { AgentToolbox } from '../src/agent/tools.js';
-import { BuiltInAutonomousAgent } from '../src/agent/index.js';
+import { BuiltInAutonomousAgent, createAgent } from '../src/agent/index.js';
 import { taskRepo, verificationRepo, eventRepo, initDatabase } from '../src/db/index.js';
 
 async function runTests() {
@@ -736,7 +736,7 @@ async function runTests() {
     let verifierMutated = false;
     const origVerifierVerify = IndependentVerifier.prototype.verify;
     (IndependentVerifier.prototype as any).verify = async function(...args: any[]) {
-      const res = await origVerifierVerify.apply(this, args);
+      const res = await (origVerifierVerify as any).apply(this, args);
       // Mutate workspace during verification
       if (!verifierMutated) {
         verifierMutated = true;
@@ -1160,11 +1160,11 @@ async function runTests() {
     return true;
   };
 
-  const aiderAgent = createAgent('aider', process.cwd(), mockApproval) as AiderAgentAdapter;
+  const aiderAgent = createAgent('aider', process.cwd(), mockApproval);
   assert.strictEqual(aiderAgent.name, 'AiderAgentAdapter');
   assert.strictEqual((aiderAgent as any).onRequestApproval, mockApproval);
 
-  const claudeAgent = createAgent('claude', process.cwd(), mockApproval) as ClaudeCodeAgentAdapter;
+  const claudeAgent = createAgent('claude', process.cwd(), mockApproval);
   assert.strictEqual(claudeAgent.name, 'ClaudeCodeAgentAdapter');
   assert.strictEqual((claudeAgent as any).onRequestApproval, mockApproval);
   console.log('   ✓ External agent adapters cleanly initialize with workspace paths and approval handlers.');

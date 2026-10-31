@@ -98,8 +98,7 @@ export async function runBenchmarkTask(
 
   if (options.isLive && config.geminiApiKey) {
     // Live Agent Baseline: run single-shot prompt without verifier loops or worktree protection
-    const rawAgent = new BuiltInAutonomousAgent({ apiKey: config.geminiApiKey, model: config.geminiModel });
-    rawAgent.setWorkspacePath(repoDir);
+    const rawAgent = new BuiltInAutonomousAgent(repoDir);
     try {
       const execRes = await rawAgent.executeStep(task.prompt, []);
       baselineClaimedSuccess = execRes.success;

@@ -130,15 +130,15 @@ import assert from 'node:assert';\nimport { calculateSum } from './math.js';\n\n
     latestTask = await taskRepo.getById(task.id);
   }
 
-  if (latestTask.status.toLowerCase() !== 'completed') {
+  if (!latestTask || latestTask.status.toLowerCase() !== 'completed') {
     const steps = await stepRepo.listForTask(task.id);
     const verifs = await verificationRepo.listForTask(task.id);
     console.error('Task failed! Steps:', JSON.stringify(steps, null, 2));
     console.error('Task failed! Verifications:', JSON.stringify(verifs, null, 2));
-    console.error('Task summary/status:', latestTask.summary, latestTask.status);
+    console.error('Task summary/status:', latestTask?.summary, latestTask?.status);
   }
   assert.ok(latestTask, 'Task record must exist in durable database');
-  assert.strictEqual(latestTask.status.toLowerCase(), 'completed', `Task should complete successfully; got ${latestTask.status}`);
+  assert.strictEqual(latestTask!.status.toLowerCase(), 'completed', `Task should complete successfully; got ${latestTask?.status}`);
   console.log('   ✓ Orchestrator successfully verified and completed task repair.');
 
   // Step 4 & 5: Verify user working tree isolation and preservation

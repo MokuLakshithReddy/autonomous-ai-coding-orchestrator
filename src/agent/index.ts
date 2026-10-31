@@ -1,4 +1,5 @@
 import { GoogleGenAI } from '@google/genai';
+import { z } from 'zod';
 import { AgentToolbox, type CommandResult, type ApprovalCallback } from './tools.js';
 import { config } from '../config/index.js';
 import { RepoInspector } from '../repo/inspector.js';
@@ -36,6 +37,41 @@ export interface GenAIClient {
     }): Promise<{ text?: string | null; usageMetadata?: any }>;
   };
 }
+
+export const AgentActionSchema = z.discriminatedUnion('action', [
+  z.object({
+    thought: z.string().optional(),
+    action: z.literal('complete'),
+    summary: z.string().optional(),
+  }),
+  z.object({
+    thought: z.string().optional(),
+    action: z.literal('writeFile'),
+    filePath: z.string().min(1),
+    fileContent: z.string(),
+  }),
+  z.object({
+    thought: z.string().optional(),
+    action: z.literal('readFile'),
+    filePath: z.string().min(1),
+  }),
+  z.object({
+    thought: z.string().optional(),
+    action: z.literal('replaceInFile'),
+    filePath: z.string().min(1),
+    target: z.string(),
+    replacement: z.string(),
+  }),
+  z.object({
+    thought: z.string().optional(),
+    action: z.literal('executeCommand'),
+    command: z.string().min(1),
+  }),
+  z.object({
+    thought: z.string().optional(),
+    action: z.literal('listFiles'),
+  }),
+]);
 
 export class BuiltInAutonomousAgent implements CodingAgent {
   name = 'BuiltInAutonomousAgent';
@@ -150,7 +186,7 @@ export class BuiltInAutonomousAgent implements CodingAgent {
       // P0 FIX: Strictly exclude sensitive secrets and credentials from automatic file context
       const fileContexts: Record<string, string> = {};
       const targetSet = new Set(
-        targetFiles.filter((f) => f && !SecurityPolicyEngine.isSensitiveSecret(f))
+        targetFiles.filter((f) => f && !SecurityPolicyEngine.isSensitiveSecret(f)).slice(0, 8)
       );
       if (targetSet.size === 0) {
         try {
@@ -181,8 +217,12 @@ export class BuiltInAutonomousAgent implements CodingAgent {
         }
         try {
           fileContexts[tf] = await this.toolbox.readFile(tf);
-        } catch {
-          fileContexts[tf] = '(File does not exist yet)';
+        } catch (err: any) {
+          if (err.message?.includes('Security Exception') || err.message?.includes('Denied') || err.message?.includes('Approval')) {
+            fileContexts[tf] = `(Access Denied: ${err.message})`;
+          } else {
+            fileContexts[tf] = '(File does not exist yet)';
+          }
         }
       }
 
@@ -302,6 +342,18 @@ Output your response ONLY in valid JSON matching this schema:
             continue;
           }
         }
+
+        const validatedAction = AgentActionSchema.safeParse(actionJson);
+        if (!validatedAction.success) {
+          logs.push(`[Iteration ${iteration} Warning] Action failed runtime schema validation: ${validatedAction.error.message}`);
+          recentActions.push({
+            iter: iteration,
+            action: 'error',
+            summary: `Invalid action schema: ${validatedAction.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join(', ')}. Format according to system prompt action schema.`,
+          });
+          continue;
+        }
+        actionJson = validatedAction.data;
 
         logs.push(`[Thought]: ${actionJson.thought || 'Executing next step'}`);
 

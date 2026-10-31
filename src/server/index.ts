@@ -12,7 +12,9 @@ import {
   stepRepo,
   verificationRepo,
   approvalRepo,
+  eventRepo,
 } from '../db/index.js';
+import { z } from 'zod';
 import { RepoInspector } from '../repo/inspector.js';
 import { orchestrator, type OrchestratorEvent } from '../orchestrator/engine.js';
 import { LLMBrain } from '../llm/index.js';
@@ -304,11 +306,17 @@ export async function createServer() {
     };
   });
 
-  fastify.post<{ Body: { apiKey: string; model?: string } }>('/api/config/gemini', async (req, reply) => {
-    const { apiKey, model } = req.body;
-    if (!apiKey) {
-      return reply.status(400).send({ error: 'API key is required' });
+  const GeminiConfigSchema = z.object({
+    apiKey: z.string().min(1).max(500),
+    model: z.string().max(100).optional(),
+  });
+
+  fastify.post('/api/config/gemini', async (req, reply) => {
+    const parseRes = GeminiConfigSchema.safeParse(req.body);
+    if (!parseRes.success) {
+      return reply.status(400).send({ error: parseRes.error.issues[0]?.message || 'Invalid Gemini configuration' });
     }
+    const { apiKey, model } = parseRes.data;
     config.geminiApiKey = apiKey;
     if (model) config.geminiModel = model;
     return { success: true, message: 'Gemini configuration updated.' };
@@ -357,20 +365,35 @@ export async function createServer() {
     };
   });
 
-  fastify.post<{
-    Body: {
-      prompt: string;
-      workspacePath?: string;
-      title?: string;
-      maxRetries?: number;
-      agent?: 'builtin' | 'aider' | 'claude';
-      autoMerge?: boolean;
-    };
-  }>('/api/tasks', async (req, reply) => {
-    const { prompt, workspacePath, title, maxRetries, agent, autoMerge } = req.body;
-    if (!prompt) {
-      return reply.status(400).send({ error: 'Prompt is required', message: 'Prompt is required' });
+  // P1 FIX: Expose persisted execution event stream for reloads and auditability
+  fastify.get<{ Params: { id: string }; Querystring: { limit?: string; offset?: string } }>(
+    '/api/tasks/:id/events',
+    async (req, reply) => {
+      const limit = Math.min(Math.max(parseInt(req.query.limit || '100', 10), 1), 500);
+      const offset = Math.max(parseInt(req.query.offset || '0', 10), 0);
+      const events = await eventRepo.listForTask(req.params.id, limit, offset);
+      return { events, limit, offset };
     }
+  );
+
+  const CreateTaskSchema = z.object({
+    prompt: z.string().min(1, 'Prompt is required').max(10000, 'Prompt exceeds maximum length of 10000 characters'),
+    workspacePath: z.string().max(1000).optional(),
+    title: z.string().max(200).optional(),
+    maxRetries: z.number().int().min(0).max(10).optional(),
+    agent: z.enum(['builtin', 'aider', 'claude']).optional(),
+    autoMerge: z.boolean().optional(),
+  });
+
+  fastify.post('/api/tasks', async (req, reply) => {
+    const parseRes = CreateTaskSchema.safeParse(req.body);
+    if (!parseRes.success) {
+      return reply.status(400).send({
+        error: parseRes.error.issues[0]?.message || 'Invalid task payload',
+        message: parseRes.error.issues[0]?.message || 'Invalid task payload',
+      });
+    }
+    const { prompt, workspacePath, title, maxRetries, agent, autoMerge } = parseRes.data;
 
     // P0 FIX: Verify workspace is within authorized boundaries
     let resolvedWorkspace: string;
@@ -407,14 +430,34 @@ export async function createServer() {
     return { cancelled };
   });
 
-  fastify.post<{ Params: { id: string }; Body: { status: 'APPROVED' | 'REJECTED' } }>(
+  // P1 FIX: Durable task resumption API endpoint
+  fastify.post<{ Params: { id: string }; Body?: { autoMerge?: boolean; agent?: 'builtin' | 'aider' | 'claude' } }>(
+    '/api/tasks/:id/resume',
+    async (req, reply) => {
+      try {
+        const task = await orchestrator.resumeTask(req.params.id, {
+          autoMerge: req.body?.autoMerge,
+          agentType: req.body?.agent,
+        });
+        return reply.status(200).send({ success: true, task });
+      } catch (err: any) {
+        return reply.status(400).send({ error: err.message, message: err.message });
+      }
+    }
+  );
+
+  const ApprovalRespondSchema = z.object({
+    status: z.enum(['APPROVED', 'REJECTED']),
+  });
+
+  fastify.post<{ Params: { id: string } }>(
     '/api/approvals/:id/respond',
     async (req, reply) => {
-      const { status } = req.body;
-      if (!status || !['APPROVED', 'REJECTED'].includes(status)) {
+      const parseRes = ApprovalRespondSchema.safeParse(req.body);
+      if (!parseRes.success) {
         return reply.status(400).send({ error: 'Status must be APPROVED or REJECTED' });
       }
-      const resolved = await approvalRepo.respond(req.params.id, status);
+      const resolved = await approvalRepo.respond(req.params.id, parseRes.data.status);
       if (!resolved) {
         return reply.status(409).send({ error: 'Approval was already resolved or has expired' });
       }

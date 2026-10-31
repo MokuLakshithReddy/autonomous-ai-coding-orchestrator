@@ -331,14 +331,16 @@ export class RepoInspector {
       if (!(await this.isGitRepository())) return false;
       if (!taskFiles || taskFiles.length === 0) return false;
 
+      let allSucceeded = true;
       for (const file of taskFiles) {
         try {
           await this.git.checkout([commitHash, '--', file]);
         } catch (err) {
+          allSucceeded = false;
           console.warn(`Could not checkout ${file} from ${commitHash}:`, err);
         }
       }
-      return true;
+      return allSucceeded;
     } catch (err) {
       console.error('Failed to restore task files safely:', err);
       return false;
@@ -459,15 +461,32 @@ export class RepoInspector {
       const pkgContent = await fs.readFile(packageJsonPath, 'utf8');
       const pkg = JSON.parse(pkgContent);
       ecosystems.push('nodejs');
-      packageManager = 'npm';
+
+      // P1 FIX: Accurate Node package manager detection (pnpm, yarn, npm)
+      const hasPnpmLock = await fs.access(path.join(this.workspacePath, 'pnpm-lock.yaml')).then(() => true).catch(() => false);
+      const hasYarnLock = await fs.access(path.join(this.workspacePath, 'yarn.lock')).then(() => true).catch(() => false);
+      const hasBunLock =
+        (await fs.access(path.join(this.workspacePath, 'bun.lockb')).then(() => true).catch(() => false)) ||
+        (await fs.access(path.join(this.workspacePath, 'bun.lock')).then(() => true).catch(() => false));
+
+      if (hasPnpmLock || (pkg.packageManager && String(pkg.packageManager).startsWith('pnpm'))) {
+        packageManager = 'pnpm';
+      } else if (hasYarnLock || (pkg.packageManager && String(pkg.packageManager).startsWith('yarn'))) {
+        packageManager = 'yarn';
+      } else if (hasBunLock || (pkg.packageManager && String(pkg.packageManager).startsWith('bun'))) {
+        packageManager = 'npm';
+      } else {
+        packageManager = 'npm';
+      }
 
       if (pkg.scripts) {
-        const npmBin = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-        if (pkg.scripts.build) buildCmd = `${npmBin} run build`;
+        const isWin = process.platform === 'win32';
+        const pmBin = isWin ? `${packageManager}.cmd` : packageManager;
+        if (pkg.scripts.build) buildCmd = `${pmBin} run build`;
         if (pkg.scripts.test && !pkg.scripts.test.includes('no test specified')) {
-          testCmd = `${npmBin} test`;
+          testCmd = `${pmBin} test`;
         }
-        if (pkg.scripts.lint) lintCmd = `${npmBin} run lint`;
+        if (pkg.scripts.lint) lintCmd = `${pmBin} run lint`;
       }
     } catch {}
 
@@ -477,13 +496,19 @@ export class RepoInspector {
       const hasRequirements = await fs.access(path.join(this.workspacePath, 'requirements.txt')).then(() => true).catch(() => false);
       const entries = await fs.readdir(this.workspacePath).catch(() => []);
       const hasPyFiles = entries.some((f) => f.endsWith('.py'));
-      if (hasPyproject || hasRequirements || hasPyFiles) {
+      const hasTestsDir =
+        (await fs.access(path.join(this.workspacePath, 'tests')).then(() => true).catch(() => false)) ||
+        (await fs.access(path.join(this.workspacePath, 'test')).then(() => true).catch(() => false));
+
+      if (hasPyproject || hasRequirements || hasPyFiles || hasTestsDir) {
         if (!ecosystems.includes('python')) ecosystems.push('python');
         const hasTestPy = entries.some((f) => /test_.*\.py$|.*_test\.py$/i.test(f));
-        if (!testCmd && hasTestPy) {
-          testCmd = 'python -m unittest';
-        } else if (!testCmd && (hasPyproject || hasRequirements)) {
-          testCmd = 'python -m pytest';
+        const hasPoetry = await fs.access(path.join(this.workspacePath, 'poetry.lock')).then(() => true).catch(() => false);
+        if (hasPoetry) packageManager = 'poetry';
+        else if (hasRequirements) packageManager = 'pip';
+
+        if (!testCmd && (hasTestPy || hasTestsDir || hasPyproject || hasRequirements)) {
+          testCmd = hasPoetry ? 'poetry run pytest' : 'python -m pytest';
         }
         const hasRuff =
           (await fs.access(path.join(this.workspacePath, 'ruff.toml')).then(() => true).catch(() => false)) ||

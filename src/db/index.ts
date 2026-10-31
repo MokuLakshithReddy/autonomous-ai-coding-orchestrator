@@ -590,9 +590,10 @@ export const approvalRepo = {
   async respond(id: string, status: 'APPROVED' | 'REJECTED' | 'EXPIRED' | 'CANCELLED', approver = 'operator'): Promise<boolean> {
     const db = getDb();
     const now = new Date().toISOString();
+    // P1 FIX: Atomically enforce expiry during approval resolution. Late approvals after expiresAt cannot be accepted!
     const res = await db.execute({
-      sql: `UPDATE approvals SET status = ?, approvedBy = ?, respondedAt = ? WHERE id = ? AND status = 'PENDING'`,
-      args: [status, approver, now, id],
+      sql: `UPDATE approvals SET status = ?, approvedBy = ?, respondedAt = ? WHERE id = ? AND status = 'PENDING' AND (expiresAt IS NULL OR expiresAt >= ?)`,
+      args: [status, approver, now, id, now],
     });
     return Number(res.rowsAffected || 0) > 0;
   },
@@ -640,11 +641,11 @@ export const eventRepo = {
     });
   },
 
-  async listForTask(taskId: string): Promise<TaskEventRecord[]> {
+  async listForTask(taskId: string, limit = 100, offset = 0): Promise<TaskEventRecord[]> {
     const db = getDb();
     const res = await db.execute({
-      sql: `SELECT * FROM task_events WHERE taskId = ? ORDER BY timestamp ASC`,
-      args: [taskId],
+      sql: `SELECT * FROM task_events WHERE taskId = ? ORDER BY timestamp ASC LIMIT ? OFFSET ?`,
+      args: [taskId, limit, offset],
     });
     return res.rows.map((row) => ({
       id: String(row.id),

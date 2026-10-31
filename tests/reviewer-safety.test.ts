@@ -1,6 +1,5 @@
 import assert from 'node:assert';
-import { LLMBrain } from '../src/llm/index.js';
-import type { ExecutionPlan } from '../src/core/types.js';
+import { LLMBrain, type ExecutionPlan } from '../src/llm/index.js';
 
 async function runReviewerSafetyTests() {
   console.log('\n========================================================================');

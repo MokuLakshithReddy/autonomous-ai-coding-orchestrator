@@ -15,7 +15,19 @@ export const PlanStepSchema = z.object({
 
 export function validatePlanDependencyGraph(plan: { steps: Array<{ index: number; dependencies?: number[] }> }): { valid: boolean; errors: string[] } {
   const errors: string[] = [];
-  const stepIndices = new Set(plan.steps.map((s) => s.index));
+  const seenIndices = new Set<number>();
+
+  for (const step of plan.steps) {
+    if (typeof step.index !== 'number' || !Number.isInteger(step.index) || step.index < 1) {
+      errors.push(`Step index ${step.index} must be a positive integer.`);
+    }
+    if (seenIndices.has(step.index)) {
+      errors.push(`Duplicate step index detected: ${step.index}. Each step must have a unique index.`);
+    }
+    seenIndices.add(step.index);
+  }
+
+  const stepIndices = seenIndices;
 
   for (const step of plan.steps) {
     for (const dep of step.dependencies || []) {
@@ -55,6 +67,57 @@ export function validatePlanDependencyGraph(plan: { steps: Array<{ index: number
   }
 
   return { valid: errors.length === 0, errors };
+}
+
+/**
+ * P1 FIX: Topological scheduling of execution plan milestones via Kahn's algorithm.
+ * Guarantees that prerequisite steps execute strictly prior to dependent downstream steps,
+ * regardless of the order in which the LLM emitted them.
+ */
+export function topologicallySortPlanSteps<T extends { index: number; dependencies?: number[] }>(steps: T[]): T[] {
+  const inDegree = new Map<number, number>();
+  const adj = new Map<number, number[]>(); // dependency -> dependent steps
+  const stepMap = new Map<number, T>();
+
+  for (const step of steps) {
+    stepMap.set(step.index, step);
+    inDegree.set(step.index, (step.dependencies || []).length);
+    for (const dep of step.dependencies || []) {
+      if (!adj.has(dep)) adj.set(dep, []);
+      adj.get(dep)!.push(step.index);
+    }
+  }
+
+  const queue: number[] = [];
+  for (const [index, deg] of inDegree.entries()) {
+    if (deg === 0) queue.push(index);
+  }
+
+  // Stable sort by index for independent steps
+  queue.sort((a, b) => a - b);
+
+  const sorted: T[] = [];
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    sorted.push(stepMap.get(current)!);
+
+    const dependents = adj.get(current) || [];
+    // Sort dependents by index for deterministic schedule
+    dependents.sort((a, b) => a - b);
+    for (const dep of dependents) {
+      const newDeg = (inDegree.get(dep) || 1) - 1;
+      inDegree.set(dep, newDeg);
+      if (newDeg === 0) {
+        queue.push(dep);
+      }
+    }
+  }
+
+  if (sorted.length < steps.length) {
+    throw new Error('Invalid plan: Circular dependency cycle prevented topological ordering.');
+  }
+
+  return sorted;
 }
 
 export const ExecutionPlanSchema = z.object({

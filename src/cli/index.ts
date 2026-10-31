@@ -191,4 +191,26 @@ program
     console.log(chalk.white(`Lint Command:       ${chalk.yellow(meta.lintCmd || 'None')}\n`));
   });
 
+program
+  .command('resume <taskId>')
+  .description('Resume a blocked, paused, or human-review task')
+  .option('-a, --agent <type>', 'Coding agent type (builtin, aider, claude)', 'builtin')
+  .option('--auto-merge', 'Automatically merge verified changes into target branch', false)
+  .action(async (taskId, opts) => {
+    await initDatabase();
+    console.log(chalk.bold.cyan(`\nResuming Task "${taskId}"...`));
+    try {
+      const task = await orchestrator.resumeTask(taskId, {
+        agentType: opts.agent,
+        autoMerge: opts.autoMerge,
+      });
+      console.log(chalk.green(`✓ Task "${task.id}" resumed. Waiting for completion...`));
+      await orchestrator.waitForTask(task.id);
+      console.log(chalk.green(`✓ Task "${task.id}" execution completed.`));
+    } catch (err: any) {
+      console.error(chalk.red('Failed to resume task:'), err.message);
+      process.exit(1);
+    }
+  });
+
 program.parse(process.argv);

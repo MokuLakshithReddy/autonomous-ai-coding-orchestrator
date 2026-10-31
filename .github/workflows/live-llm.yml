@@ -52,7 +52,7 @@ jobs:
         run: |
           npm run test:llm
           npm run test:benchmarks:live
-          npm run benchmark:live || npm run benchmark
+          npm run benchmark:live
 
       - name: Archive Benchmark Evaluation Report
         if: always()

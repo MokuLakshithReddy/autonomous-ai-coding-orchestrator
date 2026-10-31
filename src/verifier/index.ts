@@ -139,23 +139,28 @@ export class IndependentVerifier {
 
     // 4. Git Diff Audit (P1.1 FIX: Diff against baseline commit, including committed checkpoint changes)
     let diff = '';
-    if (baseCommit && baseCommit !== 'initial') {
-      try {
-        const git = (this.inspector as any).git;
-        diff = await git.diff([baseCommit]);
-      } catch {
-        diff = await this.inspector.getDiff();
+    let filesChanged: string[] = [];
+    if (meta.isGitRepo !== false) {
+      if (baseCommit && baseCommit !== 'initial') {
+        try {
+          const git = (this.inspector as any).git;
+          diff = await git.diff([baseCommit]);
+        } catch {
+          diff = await this.inspector.getDiff();
+        }
+      } else {
+        diff = await this.inspector.getDiffAgainstBase();
       }
-    } else {
-      diff = await this.inspector.getDiffAgainstBase();
-    }
 
-    const gitStatus = await this.inspector.getGitStatus();
-    const filesChanged = gitStatus ? gitStatus.files.map((f) => f.path) : [];
+      const gitStatus = await this.inspector.getGitStatus();
+      filesChanged = gitStatus ? gitStatus.files.map((f) => f.path) : [];
+    } else {
+      filesChanged = meta.uncommittedFiles || [];
+    }
 
     // P1 FIX: Inspect entire cumulative commit history from baseCommit, not just working tree
     const allFilesChangedSet = new Set<string>(filesChanged);
-    if (baseCommit && baseCommit !== 'initial') {
+    if (meta.isGitRepo !== false && baseCommit && baseCommit !== 'initial') {
       try {
         const git = (this.inspector as any).git;
         const nameOnly: string = await git.diff(['--name-only', baseCommit, 'HEAD']);
@@ -186,11 +191,8 @@ export class IndependentVerifier {
       }
     }
 
-    // Deep content scanning of non-test modified files on disk in the worktree
+    // P0 FIX: Deep content scanning of ALL modified files on disk (including test files and configs)
     for (const f of allCumulativeFiles) {
-      if (/(\.test\.|\.spec\.|(^|[\\/])tests?(\.|\/)|(^|[\\/])test_[a-z0-9_]+\.py)/i.test(f)) {
-        continue;
-      }
       try {
         const fullPath = path.resolve(this.workspacePath, f);
         const stat = await fs.stat(fullPath).catch(() => null);
@@ -245,9 +247,9 @@ export class IndependentVerifier {
       }
     }
 
-    // Secret scanning across non-test diff lines
-    const nonTestDiffContent = addedNonTestLines.join('\n');
-    const secretInDiff = SecurityPolicyEngine.containsSensitiveSecret(nonTestDiffContent);
+    // P0 FIX: Secret scanning across ALL added diff lines (including tests, markdown, and config files)
+    const allDiffContent = addedAllLines.join('\n');
+    const secretInDiff = SecurityPolicyEngine.containsSensitiveSecret(allDiffContent);
     if (secretInDiff.hasSecret) {
       hasForbiddenModifications = true;
       diffNotes.push(`Diff contains sensitive secrets: ${secretInDiff.reason}`);
@@ -416,6 +418,7 @@ export class IndependentVerifier {
               satisfied = true;
               evidence = `Explicit verification check "${targetCommand}" verified requirement (exit ${exitCode ?? 0}).`;
             } else {
+              // P0 FIX: Acceptance criteria must be backed by explicit test execution proof, NOT loose diff keyword matching.
               const keywords = criterion
                 .toLowerCase()
                 .replace(/[^a-z0-9_]/g, ' ')
@@ -426,36 +429,24 @@ export class IndependentVerifier {
                     !['test', 'pass', 'passes', 'should', 'must', 'with', 'when', 'from', 'that', 'this'].includes(w)
                 );
 
-              const hasDedicatedTestFile =
-                allCumulativeFiles.some((f) => /test|spec/i.test(f)) ||
-                Boolean(meta.testCmd && /test|spec/i.test(meta.testCmd)) ||
-                Boolean(testCheck.command && /test|spec/i.test(testCheck.command));
               const outputLower = (testCheck.output || '').toLowerCase();
-              const diffLower = (diff || '').toLowerCase();
+              const hasTestPassingIndicator =
+                /(\b[0-9]+\s+passed|\bpassed\b|✓|\bok\b|\bverified\b)/i.test(testCheck.output || '');
               const outputMatches = keywords.filter((kw) => outputLower.includes(kw));
-              const diffMatches = keywords.filter((kw) => diffLower.includes(kw));
-              const combinedMatches = Array.from(new Set([...outputMatches, ...diffMatches]));
 
-              const fileMentioned = allCumulativeFiles.some((f) => {
-                const base = path.basename(f).toLowerCase();
-                const stem = base.replace(/\.[^.]+$/, '');
-                return criterion.toLowerCase().includes(base) || criterion.toLowerCase().includes(stem);
-              });
+              const hasTargetedTestExecution =
+                hasTestPassingIndicator &&
+                (outputMatches.length >= Math.min(1, keywords.length) || keywords.length === 0);
 
-              if (
-                outputMatches.length >= Math.min(2, keywords.length) ||
-                (hasDedicatedTestFile && outputMatches.length >= 1) ||
-                (hasDedicatedTestFile && (diffMatches.length >= 1 || fileMentioned)) ||
-                combinedMatches.length >= Math.min(2, Math.max(1, keywords.length))
-              ) {
+              if (hasTargetedTestExecution) {
                 targetCommand = testCheck.command || meta.testCmd;
                 exitCode = testCheck.exitCode;
                 satisfied = true;
-                const matchSummary = combinedMatches.length > 0 ? ` matching [${combinedMatches.join(', ')}]` : '';
-                evidence = `Verified via targeted test execution: "${targetCommand}" (exit ${exitCode ?? 0})${matchSummary}.`;
+                const matchSummary = outputMatches.length > 0 ? ` [test output matched: ${outputMatches.join(', ')}]` : '';
+                evidence = `Verified via explicit passing test execution: "${targetCommand}" (exit ${exitCode ?? 0})${matchSummary}.`;
               } else {
                 satisfied = false;
-                evidence = `Unverified: General test suite passed, but no criterion-specific test assertion or modified code proved "${criterion}".`;
+                evidence = `Unverified: General test suite executed, but no criterion-specific test assertion or execution evidence confirmed "${criterion}".`;
               }
             }
           }

@@ -68,6 +68,15 @@ export class AgentToolbox {
         throw new Error(`Security Exception [Approval Denied]: Writing to sensitive destination "${filePath}" was rejected by the operator.`);
       }
     }
+
+    // P0 FIX: Pre-write secret scanning on file content
+    const secretCheck = SecurityPolicyEngine.containsSensitiveSecret(content);
+    if (secretCheck.hasSecret) {
+      throw new Error(
+        `Security Exception [Secret Protection]: Cannot write content containing sensitive credentials (${secretCheck.reason}) to "${filePath}".`
+      );
+    }
+
     const dir = path.dirname(fullPath);
     await fs.mkdir(dir, { recursive: true });
     // P2 FIX: Atomic file write via temporary file + atomic rename
@@ -93,11 +102,34 @@ export class AgentToolbox {
         throw new Error(`Security Exception [Approval Denied]: Modification of sensitive destination "${filePath}" was rejected by the operator.`);
       }
     }
+
+    const stat = await fs.stat(fullPath);
+    if (stat.size > 10 * 1024 * 1024) {
+      throw new Error(`File "${filePath}" is too large to modify safely (> 10MB)`);
+    }
+
+    // P0 FIX: Pre-write secret scanning on replacement content
+    const secretCheck = SecurityPolicyEngine.containsSensitiveSecret(replacement);
+    if (secretCheck.hasSecret) {
+      throw new Error(
+        `Security Exception [Secret Protection]: Replacement content contains sensitive credentials (${secretCheck.reason}) for "${filePath}".`
+      );
+    }
+
     const content = await fs.readFile(fullPath, 'utf8');
     if (!content.includes(target)) {
       return false;
     }
     const updated = content.replace(target, replacement);
+
+    // Verify resulting content also does not contain leaked credentials
+    const fullSecretCheck = SecurityPolicyEngine.containsSensitiveSecret(updated);
+    if (fullSecretCheck.hasSecret) {
+      throw new Error(
+        `Security Exception [Secret Protection]: Resulting content contains sensitive credentials (${fullSecretCheck.reason}) for "${filePath}".`
+      );
+    }
+
     const dir = path.dirname(fullPath);
     const tmpPath = path.join(dir, `.${path.basename(fullPath)}.${crypto.randomUUID()}.tmp`);
     try {
@@ -193,8 +225,13 @@ export class AgentToolbox {
     customEnv: Record<string, string> = {},
     abortSignal?: AbortSignal
   ): Promise<CommandResult> {
+    const isContainerMode =
+      process.env.USE_CONTAINER_SANDBOX !== undefined
+        ? process.env.USE_CONTAINER_SANDBOX === 'true'
+        : config.useContainerSandbox;
+
     // P0 FIX: High and critical operations must flow through consistent approve-or-reject action gate
-    const policy = SecurityPolicyEngine.evaluateCommandRisk(commandStrForAudit);
+    const policy = SecurityPolicyEngine.evaluateCommandRisk(commandStrForAudit, { inContainer: isContainerMode });
     if (policy.requiresApproval) {
       if (!this.onRequestApproval) {
         throw new Error(
@@ -221,10 +258,6 @@ export class AgentToolbox {
 
     const startTime = Date.now();
     const sanitizedEnv = SecurityPolicyEngine.getSanitizedProcessEnv(customEnv);
-    const isContainerMode =
-      process.env.USE_CONTAINER_SANDBOX !== undefined
-        ? process.env.USE_CONTAINER_SANDBOX === 'true'
-        : config.useContainerSandbox;
 
     let spawnExec: string;
     let spawnArgs: string[];
@@ -235,6 +268,15 @@ export class AgentToolbox {
         path.basename(target.executable).toLowerCase().replace(/\.(cmd|bat|exe|ps1)$/, '')
       );
 
+    // P0 FIX: Forward credentials for external agents if present in environment
+    if (isExternalAgent) {
+      for (const k of ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY']) {
+        if (process.env[k]) {
+          sanitizedEnv[k] = process.env[k]!;
+        }
+      }
+    }
+
     if (isContainerMode) {
       // P0 FIX: Mandatory fail closed if container isolation is enabled but Docker is unavailable
       await ContainerSandbox.assertSandboxAvailable();
@@ -242,6 +284,7 @@ export class AgentToolbox {
       const wrapped = ContainerSandbox.buildDockerRunArgs(this.workspacePath, target, {
         env: sanitizedEnv,
         forwardApiKeys: isExternalAgent,
+        networkMode: isExternalAgent ? (process.env.CONTAINER_SANDBOX_EXTERNAL_AGENT_NETWORK || 'bridge') : undefined,
       });
       spawnExec = wrapped.executable;
       spawnArgs = wrapped.args;
@@ -273,6 +316,17 @@ export class AgentToolbox {
       let stderr = '';
       let timedOut = false;
       let cancelled = false;
+
+      // P0 FIX: Synchronously verify abort status before initiating spawn to close cancellation race
+      if (abortSignal?.aborted) {
+        return resolve({
+          stdout: '',
+          stderr: 'Command execution aborted prior to spawn.',
+          exitCode: 130,
+          durationMs: 0,
+          cancelled: true,
+        });
+      }
 
       const terminateChild = (reason: 'timeout' | 'cancel') => {
         if (child?.pid) {

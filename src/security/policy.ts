@@ -453,7 +453,7 @@ export class SecurityPolicyEngine {
    * 2. Permits only an explicitly defined safe allowlist of build, test, and inspection tools.
    * 3. Defaults all unrecognized, alternative, or compound commands to requiring operator approval.
    */
-  static evaluateCommandRisk(command: string): ActionPolicy {
+  static evaluateCommandRisk(command: string, options?: { inContainer?: boolean }): ActionPolicy {
     const text = command.trim();
     const lower = text.toLowerCase();
 
@@ -509,11 +509,30 @@ export class SecurityPolicyEngine {
       };
     }
 
-    // 5. Narrow Safe Policy Allowlist: Only atomic, non-destructive tools
+    // 5. External Coding Agents (Aider, Claude CLI, etc.)
+    // P0 FIX: External agents execute arbitrary tools and subcommands.
+    // They are ONLY permitted without approval when running inside an enforced, isolated container sandbox.
+    // On the host OS, external agent launch MUST require explicit operator approval.
+    const isExternalAgent =
+      /^(aider|aider\.cmd|aider\.exe)\b/i.test(lower) ||
+      /^(claude|claude\.cmd|claude\.exe)\b/i.test(lower);
+
+    if (isExternalAgent) {
+      if (options?.inContainer) {
+        return {
+          riskLevel: 'LOW',
+          requiresApproval: false,
+        };
+      }
+      return {
+        riskLevel: 'HIGH',
+        requiresApproval: true,
+        reason: `External coding agent (${text.split(' ')[0]}) executes arbitrary tools and subcommands on the host OS; requires explicit operator approval when not isolated inside a container.`,
+      };
+    }
+
+    // 6. Narrow Safe Policy Allowlist: Only atomic, non-destructive tools
     const isSafeGit = /^git\s+(status|diff|log|show|branch|rev-parse)(\s+.*)?$/i.test(lower);
-    const isSafeExternalAgent =
-      /^(aider|aider\.cmd|aider\.exe)\s+--yes\b/i.test(lower) ||
-      /^(claude|claude\.cmd|claude\.exe)\s+-p\b/i.test(lower);
     const isSafeBuildTest =
       /^(npm|npm\.cmd|pnpm|yarn)\s+(run\s+)?(build|test|lint|ci|install)(\s+.*)?$/i.test(lower) ||
       /^(npx|npx\.cmd)\s+(tsc|jest|vitest|eslint|prettier)(\s+.*)?$/i.test(lower) ||
@@ -524,7 +543,7 @@ export class SecurityPolicyEngine {
       /^go\s+(test|build)(\s+.*)?$/i.test(lower) ||
       /^node(\.exe)?\s+[a-zA-Z0-9_\-\.\/\\]+\.(js|mjs|cjs)(\s+.*)?$/i.test(lower);
 
-    if (isSafeGit || isSafeExternalAgent) {
+    if (isSafeGit) {
       return {
         riskLevel: 'LOW',
         requiresApproval: false,

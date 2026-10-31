@@ -8,7 +8,7 @@ export type ContainerCommandTarget =
 export interface ContainerSandboxOptions {
   enabled?: boolean;
   image?: string;
-  networkMode?: 'none' | 'host' | 'bridge';
+  networkMode?: 'none' | 'host' | 'bridge' | (string & {});
   user?: string;
   env?: Record<string, string>;
   forwardApiKeys?: boolean;
@@ -101,17 +101,20 @@ export class ContainerSandbox {
       }
     }
     const image = options.image || process.env.CONTAINER_SANDBOX_IMAGE || defaultImage;
-    const network = options.networkMode || 'none';
+    const network = options.networkMode || process.env.CONTAINER_SANDBOX_NETWORK || 'none';
     const user = options.user || '1000:1000';
     const canonicalWorkspace = SecurityPolicyEngine.resolveCanonicalPath(workspacePath);
 
-    // Strict containment arguments: drop capabilities, no host credential mounts, isolated workspace
+    // Strict containment arguments: drop capabilities, resource limits, no host credential mounts, isolated workspace
     const dockerArgs = [
       'run',
       '--rm',
       '--network', network,
       '--cap-drop', 'ALL',
       '--security-opt', 'no-new-privileges',
+      '--memory', process.env.CONTAINER_SANDBOX_MEMORY || '2g',
+      '--cpus', process.env.CONTAINER_SANDBOX_CPUS || '2',
+      '--pids-limit', process.env.CONTAINER_SANDBOX_PIDS_LIMIT || '128',
       '-u', user,
       '-v', `${canonicalWorkspace}:/workspace:rw`,
       '-w', '/workspace',
@@ -141,11 +144,15 @@ export class ContainerSandbox {
 
     dockerArgs.push(image);
 
-    // P0 FIX: Preserve argument boundaries directly for exec targets without shell concatenation
+    // P0 FIX: Clean Windows binary extensions (.cmd, .exe) when dispatching into Linux container
     if (normalizedTarget.type === 'exec') {
-      dockerArgs.push(normalizedTarget.executable, ...normalizedTarget.args);
+      const cleanExec = normalizedTarget.executable.replace(/\.(cmd|exe|bat)$/i, '');
+      dockerArgs.push(cleanExec, ...normalizedTarget.args);
     } else {
-      dockerArgs.push('/bin/sh', '-c', normalizedTarget.commandStr);
+      const cleanCmd = normalizedTarget.commandStr
+        .replace(/\b(npm|pnpm|yarn|npx|tsc|aider|claude)\.cmd\b/gi, '$1')
+        .replace(/\b(aider|claude|node|python)\.exe\b/gi, '$1');
+      dockerArgs.push('/bin/sh', '-c', cleanCmd);
     }
 
     return { executable: 'docker', args: dockerArgs };

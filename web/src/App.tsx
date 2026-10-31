@@ -403,8 +403,16 @@ export default function App() {
     return false;
   };
 
-  // Compute active diff summary across task steps
-  const activeDiff = taskDetails?.steps?.find((s) => s.diffSummary)?.diffSummary || '';
+  // Compute active diff summary across task steps (combines all step diffs cleanly)
+  const activeDiff = React.useMemo(() => {
+    if (!taskDetails?.steps) return '';
+    const stepsWithDiff = taskDetails.steps.filter((s) => s.diffSummary && s.diffSummary.trim().length > 0);
+    if (stepsWithDiff.length === 0) return '';
+    if (stepsWithDiff.length === 1) return stepsWithDiff[0].diffSummary || '';
+    return stepsWithDiff
+      .map((s) => `# === Step ${s.stepIndex}: ${s.title} ===\n${s.diffSummary}`)
+      .join('\n\n');
+  }, [taskDetails?.steps]);
 
   return (
     <div className="orchestrator-app-shell">

@@ -9,7 +9,7 @@
 [![Google Gemini](https://img.shields.io/badge/Brain-Google%20Gemini-4285F4?logo=google&logoColor=white)](https://ai.google.dev/)
 [![CI Status](https://img.shields.io/github/actions/workflow/status/MokuLakshithReddy/autonomous-ai-coding-orchestrator/ci.yml?branch=main&label=CI)](https://github.com/MokuLakshithReddy/autonomous-ai-coding-orchestrator/actions/workflows/ci.yml)
 [![Live LLM Evaluation](https://img.shields.io/github/actions/workflow/status/MokuLakshithReddy/autonomous-ai-coding-orchestrator/live-llm.yml?branch=main&label=Live%20LLM%20Evaluation)](https://github.com/MokuLakshithReddy/autonomous-ai-coding-orchestrator/actions/workflows/live-llm.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: Source--Available](https://img.shields.io/badge/License-Source--Available-blue.svg)](LICENSE)
 
 An enterprise-grade, closed-loop engineering platform that connects an LLM (**The Brain**) with a coding agent (**The Engineer**) and an independent verification engine (**The Verifier**), coordinated by an authoritative deterministic state machine (**The Orchestrator**).
 

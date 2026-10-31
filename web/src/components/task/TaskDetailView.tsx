@@ -195,6 +195,7 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
           <AcceptanceCriteriaList
             criteria={plan.acceptanceCriteria}
             taskStatus={task.status}
+            verifications={verifications}
           />
         )}
       </div>

@@ -3,7 +3,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { RepoInspector, type ProjectMetadata } from '../repo/inspector.js';
-import { LLMBrain, type ExecutionPlan, type PlanStep } from '../llm/index.js';
+import { LLMBrain, type ExecutionPlan, type PlanStep, topologicallySortPlanSteps } from '../llm/index.js';
 import { BuiltInAutonomousAgent, createAgent, type CodingAgent } from '../agent/index.js';
 import { IndependentVerifier, type VerificationReport } from '../verifier/index.js';
 import {
@@ -128,7 +128,8 @@ export class OrchestrationEngine extends EventEmitter {
   }): Promise<TaskRecord> {
     await initDatabase();
 
-    // P2 FIX: Concurrency and Resource Limits
+    // P1 FIX: Atomic concurrency reservation.
+    // Register reservation immediately before any asynchronous dispatch to eliminate concurrent race conditions.
     const maxConcurrency = this.maxConcurrentTasks ?? config.maxConcurrentTasks ?? 5;
     if (this.activeTasks.size >= maxConcurrency) {
       throw new Error(
@@ -136,48 +137,9 @@ export class OrchestrationEngine extends EventEmitter {
       );
     }
 
-    const allowedRoots = params.allowedWorkspaces ?? this.allowedWorkspaces ?? config.allowedWorkspaces;
-    const allowUnrestricted =
-      params.allowUnrestricted ?? this.allowUnrestricted ?? config.allowUnrestrictedWorkspaces;
-    const authorizedWorkspace = SecurityPolicyEngine.validateWorkspaceAuthorization(
-      params.workspacePath,
-      allowedRoots,
-      { allowUnrestricted }
-    );
-    const resolvedWorkspace = SecurityPolicyEngine.assertPathContainment(authorizedWorkspace, authorizedWorkspace);
-
     const taskId = crypto.randomUUID();
-    const attemptId = crypto.randomUUID();
-    const now = new Date().toISOString();
-    const maxRetries = params.maxRetries ?? config.maxRetryBudget;
-    const title = params.title || params.prompt.slice(0, 60);
-
-    const stateMachine = new TaskStateMachine('queued');
-
-    const task: TaskRecord = {
-      id: taskId,
-      title,
-      prompt: params.prompt,
-      workspacePath: resolvedWorkspace,
-      status: stateMachine.getState(),
-      retryCount: 0,
-      maxRetries,
-      attemptId,
-      createdAt: now,
-      updatedAt: now,
-    };
-
-    await taskRepo.create(task);
-
-    await this.emitOrchestratorEvent({
-      taskId,
-      type: 'TASK_CREATED',
-      toState: 'queued',
-      message: `Task registered in durable ledger: "${title}"`,
-      data: task,
-    });
-
     const abortController = new AbortController();
+    const stateMachine = new TaskStateMachine('queued');
     const activeTaskEntry = {
       abortController,
       stateMachine,
@@ -186,38 +148,80 @@ export class OrchestrationEngine extends EventEmitter {
     };
     this.activeTasks.set(taskId, activeTaskEntry);
 
-    // Run execution lifecycle asynchronously
-    const lifecyclePromise = this.executeTaskLifecycle(taskId, attemptId, params).catch(async (err) => {
-      const isCancelled =
-        abortController.signal.aborted ||
-        stateMachine.getState() === 'cancelling' ||
-        stateMachine.getState() === 'cancelled';
-      if (isCancelled) {
+    try {
+      const allowedRoots = params.allowedWorkspaces ?? this.allowedWorkspaces ?? config.allowedWorkspaces;
+      const allowUnrestricted =
+        params.allowUnrestricted ?? this.allowUnrestricted ?? config.allowUnrestrictedWorkspaces;
+      const authorizedWorkspace = SecurityPolicyEngine.validateWorkspaceAuthorization(
+        params.workspacePath,
+        allowedRoots,
+        { allowUnrestricted }
+      );
+      const resolvedWorkspace = SecurityPolicyEngine.assertPathContainment(authorizedWorkspace, authorizedWorkspace);
+
+      const attemptId = crypto.randomUUID();
+      const now = new Date().toISOString();
+      const maxRetries = params.maxRetries ?? config.maxRetryBudget;
+      const title = params.title || params.prompt.slice(0, 60);
+
+      const task: TaskRecord = {
+        id: taskId,
+        title,
+        prompt: params.prompt,
+        workspacePath: resolvedWorkspace,
+        status: stateMachine.getState(),
+        retryCount: 0,
+        maxRetries,
+        attemptId,
+        createdAt: now,
+        updatedAt: now,
+      };
+
+      await taskRepo.create(task);
+
+      await this.emitOrchestratorEvent({
+        taskId,
+        type: 'TASK_CREATED',
+        toState: 'queued',
+        message: `Task registered in durable ledger: "${title}"`,
+        data: task,
+      });
+
+      // Run execution lifecycle asynchronously
+      const lifecyclePromise = this.executeTaskLifecycle(taskId, attemptId, params).catch(async (err) => {
+        const isCancelled =
+          abortController.signal.aborted ||
+          stateMachine.getState() === 'cancelling' ||
+          stateMachine.getState() === 'cancelled';
+        if (isCancelled) {
+          this.activeTasks.delete(taskId);
+          return;
+        }
+        console.error(`Unhandled error in task ${taskId}:`, err);
+        try {
+          await taskRepo.updateStatus(taskId, 'failed', `Internal failure: ${err.message}`);
+        } catch (dbErr: any) {
+          console.error(`[Fatal DB Error] Could not update task status for ${taskId}:`, dbErr);
+        }
+        try {
+          await this.emitOrchestratorEvent({
+            taskId,
+            type: 'TASK_FAILED',
+            toState: 'failed',
+            message: `Task failed with error: ${err.message}`,
+          });
+        } catch (eventErr: any) {
+          console.error(`[Event Ledger Fallback Error] Could not emit failure event for ${taskId}:`, eventErr);
+        }
         this.activeTasks.delete(taskId);
-        return;
-      }
-      console.error(`Unhandled error in task ${taskId}:`, err);
-      try {
-        await taskRepo.updateStatus(taskId, 'failed', `Internal failure: ${err.message}`);
-      } catch (dbErr: any) {
-        console.error(`[Fatal DB Error] Could not update task status for ${taskId}:`, dbErr);
-      }
-      try {
-        await this.emitOrchestratorEvent({
-          taskId,
-          type: 'TASK_FAILED',
-          toState: 'failed',
-          message: `Task failed with error: ${err.message}`,
-        });
-      } catch (eventErr: any) {
-        console.error(`[Event Ledger Fallback Error] Could not emit failure event for ${taskId}:`, eventErr);
-      }
+      });
+
+      activeTaskEntry.lifecyclePromise = lifecyclePromise;
+      return task;
+    } catch (err) {
       this.activeTasks.delete(taskId);
-    });
-
-    activeTaskEntry.lifecyclePromise = lifecyclePromise;
-
-    return task;
+      throw err;
+    }
   }
 
   /**
@@ -348,6 +352,8 @@ export class OrchestrationEngine extends EventEmitter {
     // 2. Planning Phase
     await this.transitionTaskState(taskId, stateMachine, 'planning', 'Formulating structured execution plan');
     const plan: ExecutionPlan = await brain.generatePlan(params.prompt, repoMeta, { abortSignal: abortController.signal });
+    // P1 FIX: Topologically sequence milestones so prerequisite dependencies execute strictly prior to dependent downstream steps
+    plan.steps = topologicallySortPlanSteps(plan.steps);
     await taskRepo.updatePlan(taskId, JSON.stringify(plan));
 
     await this.emitOrchestratorEvent({
@@ -1122,10 +1128,20 @@ export class OrchestrationEngine extends EventEmitter {
       }
       throw lifecycleErr;
     } finally {
-      // P1 FIX: Guaranteed resource cleanup in finally block
+      // P1 FIX: Non-destructive worktree preservation
       if (taskWorktreePath) {
         try {
           if (isWorktree) {
+            // Check for uncommitted work and commit snapshot to task branch before removing worktree directory
+            try {
+              const gitStatus = await (taskInspector as any).git.status();
+              if (!gitStatus.isClean()) {
+                await (taskInspector as any).git.add(['-A']);
+                await (taskInspector as any).git.commit(
+                  `Task ${taskId} recovery snapshot: uncommitted work preserved on branch ${taskBranchName || 'task'}`
+                );
+              }
+            } catch {}
             await inspector.removeIsolatedWorktree(taskWorktreePath);
           } else {
             await inspector.removeIsolatedSandbox(taskWorktreePath);
@@ -1283,6 +1299,10 @@ export class OrchestrationEngine extends EventEmitter {
     let recoveredCount = 0;
     for (const row of res.rows) {
       const taskId = String(row.id);
+      // P1 FIX: Never interfere with active tasks currently executing in the process
+      if (this.activeTasks.has(taskId)) {
+        continue;
+      }
       const prevStatus = String(row.status);
       const workspacePath = String(row.workspacePath);
 
@@ -1317,6 +1337,71 @@ export class OrchestrationEngine extends EventEmitter {
     }
 
     return recoveredCount;
+  }
+
+  /**
+   * P1 FIX: Durable task resumption.
+   * Rehydrates paused, blocked, human-review, or interrupted tasks from durable records
+   * and continues execution safely without stranding tasks.
+   */
+  async resumeTask(
+    taskId: string,
+    options: {
+      customAgent?: CodingAgent;
+      agentType?: 'builtin' | 'aider' | 'claude';
+      autoMerge?: boolean;
+    } = {}
+  ): Promise<TaskRecord> {
+    const existing = await taskRepo.getById(taskId);
+    if (!existing) {
+      throw new Error(`Task "${taskId}" not found.`);
+    }
+
+    if (this.activeTasks.has(taskId)) {
+      throw new Error(`Task "${taskId}" is already executing.`);
+    }
+
+    const resumableStates = ['blocked', 'needs_human_review', 'failed', 'queued', 'ready'];
+    if (!resumableStates.includes(existing.status)) {
+      throw new Error(
+        `Task "${taskId}" has status "${existing.status}" which cannot be resumed. Resumption is permitted only for blocked, needs_human_review, failed, or ready tasks.`
+      );
+    }
+
+    const attemptId = crypto.randomUUID();
+    const abortController = new AbortController();
+    const stateMachine = new TaskStateMachine(existing.status as any);
+
+    const activeTaskEntry = {
+      abortController,
+      stateMachine,
+      startedAt: Date.now(),
+      lifecyclePromise: undefined as Promise<void> | undefined,
+    };
+    this.activeTasks.set(taskId, activeTaskEntry);
+
+    await taskRepo.updateStatus(taskId, 'ready', 'Task resumed by operator');
+    await this.emitOrchestratorEvent({
+      taskId,
+      type: 'TASK_RESUMED',
+      toState: 'ready',
+      message: `Task ${taskId} resumed by operator from state "${existing.status}".`,
+    });
+
+    const lifecyclePromise = this.executeTaskLifecycle(taskId, attemptId, {
+      prompt: existing.prompt,
+      workspacePath: existing.workspacePath,
+      maxRetries: existing.maxRetries,
+      customAgent: options.customAgent,
+      agentType: options.agentType,
+      autoMerge: options.autoMerge,
+    }).catch(async (err) => {
+      this.activeTasks.delete(taskId);
+      console.error(`Unhandled error in resumed task ${taskId}:`, err);
+    });
+
+    activeTaskEntry.lifecyclePromise = lifecyclePromise;
+    return (await taskRepo.getById(taskId)) || existing;
   }
 
   /**
