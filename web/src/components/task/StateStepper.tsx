@@ -11,7 +11,6 @@ import {
   ShieldAlert,
   XCircle,
   HelpCircle,
-  Sparkles,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import type { Step } from '../../types/index.js';
@@ -41,6 +40,19 @@ export const StateStepper: React.FC<StateStepperProps> = ({ currentStatus, steps
   const isRepairing = ['diagnosing', 'repairing'].includes(norm);
   const isAwaitingApproval = norm === 'awaiting_approval';
   const isNeedsReview = norm === 'needs_human_review';
+
+  // Section 3: Respect Real Application States
+  // Execution animations only run when a task is genuinely in active operation!
+  const isTaskActivelyExecuting = [
+    'discovering',
+    'planning',
+    'ready',
+    'executing',
+    'verifying',
+    'diagnosing',
+    'repairing',
+    'awaiting_approval',
+  ].includes(norm);
 
   // Helper to determine stage status truthfully based on task status & step records
   const getStageState = (stageKey: string): 'completed' | 'active' | 'pending' => {
@@ -101,6 +113,8 @@ export const StateStepper: React.FC<StateStepperProps> = ({ currentStatus, steps
           const state = getStageState(stage.key);
           const isActive = state === 'active';
           const isDone = state === 'completed';
+          // Strictly gate animations by genuine task execution status
+          const isStageRunning = isActive && isTaskActivelyExecuting;
 
           return (
             <React.Fragment key={stage.key}>
@@ -117,8 +131,8 @@ export const StateStepper: React.FC<StateStepperProps> = ({ currentStatus, steps
                 }`}
                 style={{ position: 'relative' }}
               >
-                {/* Active Execution Breathing Halo */}
-                {isActive && (
+                {/* Active Execution Breathing Halo (GPU transform/opacity only) */}
+                {isStageRunning && (
                   <motion.span
                     className={`active-pulse-halo ${
                       stage.key === 'executing'
@@ -163,7 +177,8 @@ export const StateStepper: React.FC<StateStepperProps> = ({ currentStatus, steps
                   }}
                   transition={{ duration: 0.35, ease: 'easeInOut' }}
                 />
-                {isActive && <div className="connector-traveling-beam" />}
+                {/* Traveling beam only active when stage is genuinely running */}
+                {isStageRunning && <div className="connector-traveling-beam" />}
               </div>
             </React.Fragment>
           );
@@ -175,23 +190,19 @@ export const StateStepper: React.FC<StateStepperProps> = ({ currentStatus, steps
             <motion.div
               key="approval"
               initial={{ opacity: 0, scale: 0.85, x: -6 }}
-              animate={{
-                opacity: 1,
-                scale: 1,
-                x: 0,
-                boxShadow: [
-                  '0 0 0 rgba(251, 191, 36, 0)',
-                  '0 0 16px rgba(251, 191, 36, 0.45)',
-                  '0 0 0 rgba(251, 191, 36, 0)',
-                ],
-              }}
+              animate={{ opacity: 1, scale: 1, x: 0 }}
               exit={{ opacity: 0, scale: 0.85 }}
-              transition={{
-                boxShadow: { repeat: Infinity, duration: 1.8, ease: 'easeInOut' },
-                duration: 0.25,
-              }}
+              transition={{ duration: 0.25 }}
               className="stepper-node active-amber"
+              style={{ position: 'relative' }}
             >
+              {isTaskActivelyExecuting && (
+                <motion.span
+                  className="active-pulse-halo halo-amber"
+                  animate={{ scale: [1, 1.25, 1], opacity: [0.8, 0.2, 0.8] }}
+                  transition={{ repeat: Infinity, duration: 1.8, ease: 'easeInOut' }}
+                />
+              )}
               <span className="node-icon">
                 <ShieldAlert size={12} />
               </span>
@@ -203,26 +214,22 @@ export const StateStepper: React.FC<StateStepperProps> = ({ currentStatus, steps
             <motion.div
               key="repair"
               initial={{ opacity: 0, scale: 0.85, x: -6 }}
-              animate={{
-                opacity: 1,
-                scale: 1,
-                x: 0,
-                boxShadow: [
-                  '0 0 0 rgba(167, 139, 250, 0)',
-                  '0 0 16px rgba(167, 139, 250, 0.45)',
-                  '0 0 0 rgba(167, 139, 250, 0)',
-                ],
-              }}
+              animate={{ opacity: 1, scale: 1, x: 0 }}
               exit={{ opacity: 0, scale: 0.85 }}
-              transition={{
-                boxShadow: { repeat: Infinity, duration: 2, ease: 'easeInOut' },
-                duration: 0.25,
-              }}
+              transition={{ duration: 0.25 }}
               className="stepper-node active-repair"
+              style={{ position: 'relative' }}
             >
+              {isTaskActivelyExecuting && (
+                <motion.span
+                  className="active-pulse-halo halo-repair"
+                  animate={{ scale: [1, 1.25, 1], opacity: [0.8, 0.2, 0.8] }}
+                  transition={{ repeat: Infinity, duration: 2, ease: 'easeInOut' }}
+                />
+              )}
               <motion.span
                 className="node-icon"
-                animate={{ rotate: [-8, 8, -8] }}
+                animate={isTaskActivelyExecuting ? { rotate: [-8, 8, -8] } : undefined}
                 transition={{ repeat: Infinity, duration: 2.4, ease: 'easeInOut' }}
               >
                 <Wrench size={12} />
@@ -255,7 +262,7 @@ export const StateStepper: React.FC<StateStepperProps> = ({ currentStatus, steps
               animate={{
                 opacity: 1,
                 scale: 1,
-                x: [0, -3, 3, -2, 2, 0],
+                x: [0, -4, 4, -2, 2, 0],
               }}
               exit={{ opacity: 0, scale: 0.85 }}
               transition={{ duration: 0.35 }}

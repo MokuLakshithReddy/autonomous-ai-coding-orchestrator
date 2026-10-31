@@ -221,7 +221,7 @@ export default function App() {
               fetchTaskDetails(parsed.taskId, activeTok);
             }
           }
-        } catch {}
+        } catch { }
       };
 
       ws.onclose = (event) => {
@@ -399,7 +399,7 @@ export default function App() {
         connectWebSocket(candidateToken);
         return true;
       }
-    } catch {}
+    } catch { }
     return false;
   };
 
@@ -483,34 +483,47 @@ export default function App() {
 
             {/* Center Column: Execution Workspace */}
             <section className="mission-workspace-column" role="main">
-              {taskDetails?.task ? (
-                <TaskDetailView
-                  task={taskDetails.task}
-                  steps={taskDetails.steps}
-                  verifications={taskDetails.verifications}
-                  pendingApprovals={taskDetails.pendingApprovals}
-                  onApprove={(id) => handleApprovalResponse(id, 'APPROVED')}
-                  onReject={(id) => handleApprovalResponse(id, 'REJECTED')}
-                  onCancelTask={handleCancelTask}
-                />
-              ) : (
-                <div className="empty-workspace-state">
-                  <div className="empty-workspace-icon">
-                    <Cpu size={44} />
-                  </div>
-                  <h2 className="empty-state-heading">No Task Selected</h2>
-                  <p className="empty-state-text">
-                    Select an existing mission from the sidebar or launch a new autonomous run.
-                  </p>
-                  <button
-                    className="empty-state-cta-btn"
-                    onClick={() => setShowNewTaskModal(true)}
+              {/* Subtle Atmospheric Light Movement in Workspace */}
+              <div className="workspace-ambient-aurora" aria-hidden="true" />
+
+              <AnimatePresence mode="wait">
+                {taskDetails?.task ? (
+                  <TaskDetailView
+                    key={taskDetails.task.id}
+                    task={taskDetails.task}
+                    steps={taskDetails.steps}
+                    verifications={taskDetails.verifications}
+                    pendingApprovals={taskDetails.pendingApprovals}
+                    onApprove={(id) => handleApprovalResponse(id, 'APPROVED')}
+                    onReject={(id) => handleApprovalResponse(id, 'REJECTED')}
+                    onCancelTask={handleCancelTask}
+                  />
+                ) : (
+                  <motion.div
+                    key="empty-state"
+                    initial={{ opacity: 0, scale: 0.98 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    exit={{ opacity: 0, scale: 0.98 }}
+                    transition={{ duration: 0.2 }}
+                    className="empty-workspace-state"
                   >
-                    <Plus size={15} />
-                    <span>Launch Autonomous Mission</span>
-                  </button>
-                </div>
-              )}
+                    <div className="empty-workspace-icon">
+                      <Cpu size={44} />
+                    </div>
+                    <h2 className="empty-state-heading">No Task Selected</h2>
+                    <p className="empty-state-text">
+                      Select an existing mission from the sidebar or launch a new autonomous run.
+                    </p>
+                    <button
+                      className="empty-state-cta-btn"
+                      onClick={() => setShowNewTaskModal(true)}
+                    >
+                      <Plus size={15} />
+                      <span>Launch Autonomous Mission</span>
+                    </button>
+                  </motion.div>
+                )}
+              </AnimatePresence>
             </section>
 
             {/* Right Column: Terminal, Verifications & Diff */}

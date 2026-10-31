@@ -35,24 +35,10 @@ export const DependencyGraph: React.FC<DependencyGraphProps> = ({ steps, stepRec
             <div key={step.index} className="graph-node-wrapper">
               <motion.div
                 initial={{ opacity: 0, scale: 0.92, y: 6 }}
-                animate={{
-                  opacity: 1,
-                  scale: 1,
-                  y: 0,
-                  boxShadow: isRunning
-                    ? [
-                        '0 0 0 rgba(56, 189, 248, 0)',
-                        '0 0 14px rgba(56, 189, 248, 0.45)',
-                        '0 0 0 rgba(56, 189, 248, 0)',
-                      ]
-                    : undefined,
-                }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
                 transition={{
                   opacity: { delay: idx * 0.04, duration: 0.2 },
                   scale: { delay: idx * 0.04, duration: 0.2 },
-                  boxShadow: isRunning
-                    ? { repeat: Infinity, duration: 2, ease: 'easeInOut' }
-                    : undefined,
                 }}
                 whileHover={{ y: -3, scale: 1.02, transition: { duration: 0.15 } }}
                 className={`graph-node ${isDone ? 'done' : ''} ${isRunning ? 'running' : ''}`}
