@@ -27,6 +27,11 @@ jobs:
           node-version: ${{ matrix.node-version }}
           cache: 'npm'
 
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
       - name: Install Backend Dependencies
         run: npm ci
 
@@ -38,6 +43,9 @@ jobs:
 
       - name: Run Autonomous Repair Benchmarks
         run: npm run test:benchmarks
+
+      - name: Run 24-Task Deterministic Benchmark Suite
+        run: npm run benchmark
 
       - name: Install & Build Web Dashboard
         working-directory: ./web

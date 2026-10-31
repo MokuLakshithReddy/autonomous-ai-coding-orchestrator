@@ -1,3 +1,4 @@
+process.env.USE_CONTAINER_SANDBOX = 'false';
 import assert from 'node:assert';
 import path from 'node:path';
 import os from 'node:os';
@@ -41,7 +42,8 @@ async function runProductionReadinessScenario() {
   await fs.writeFile(path.join(repoDir, 'math.js'), seededBugContent);
 
   // test.js verifying the calculateSum function
-  const testFileContent = `import assert from 'node:assert';\nimport { calculateSum } from './math.js';\n\nconst result = calculateSum(5, 7);\nassert.strictEqual(result, 12, \`Expected 5 + 7 = 12, but received \${result}\`);\nconsole.log('Assertion PASSED: calculateSum(5, 7) === 12');\n`;
+  const testFileContent = `process.env.USE_CONTAINER_SANDBOX = 'false';
+import assert from 'node:assert';\nimport { calculateSum } from './math.js';\n\nconst result = calculateSum(5, 7);\nassert.strictEqual(result, 12, \`Expected 5 + 7 = 12, but received \${result}\`);\nconsole.log('Assertion PASSED: calculateSum(5, 7) === 12');\n`;
   await fs.writeFile(path.join(repoDir, 'test.js'), testFileContent);
 
   // Initial Git Commit

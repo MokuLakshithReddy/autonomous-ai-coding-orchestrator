@@ -587,13 +587,14 @@ export const approvalRepo = {
     };
   },
 
-  async respond(id: string, status: 'APPROVED' | 'REJECTED' | 'EXPIRED' | 'CANCELLED', approver = 'operator'): Promise<void> {
+  async respond(id: string, status: 'APPROVED' | 'REJECTED' | 'EXPIRED' | 'CANCELLED', approver = 'operator'): Promise<boolean> {
     const db = getDb();
     const now = new Date().toISOString();
-    await db.execute({
-      sql: `UPDATE approvals SET status = ?, approvedBy = ?, respondedAt = ? WHERE id = ?`,
+    const res = await db.execute({
+      sql: `UPDATE approvals SET status = ?, approvedBy = ?, respondedAt = ? WHERE id = ? AND status = 'PENDING'`,
       args: [status, approver, now, id],
     });
+    return Number(res.rowsAffected || 0) > 0;
   },
 
   async getPendingForTask(taskId: string): Promise<ApprovalRecord[]> {

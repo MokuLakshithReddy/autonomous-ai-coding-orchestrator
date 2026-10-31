@@ -13,11 +13,60 @@ export const PlanStepSchema = z.object({
   isSensitive: z.boolean().default(false),
 });
 
+export function validatePlanDependencyGraph(plan: { steps: Array<{ index: number; dependencies?: number[] }> }): { valid: boolean; errors: string[] } {
+  const errors: string[] = [];
+  const stepIndices = new Set(plan.steps.map((s) => s.index));
+
+  for (const step of plan.steps) {
+    for (const dep of step.dependencies || []) {
+      if (!stepIndices.has(dep)) {
+        errors.push(`Step ${step.index} references non-existent dependency index ${dep}.`);
+      }
+      if (dep === step.index) {
+        errors.push(`Step ${step.index} cannot depend on itself.`);
+      }
+    }
+  }
+
+  // Cycle detection via DFS
+  const visited = new Map<number, 'visiting' | 'visited'>();
+  const adj = new Map<number, number[]>();
+  for (const step of plan.steps) {
+    adj.set(step.index, step.dependencies || []);
+  }
+
+  const hasCycle = (node: number): boolean => {
+    visited.set(node, 'visiting');
+    for (const dep of adj.get(node) || []) {
+      if (visited.get(dep) === 'visiting') return true;
+      if (!visited.has(dep) && hasCycle(dep)) return true;
+    }
+    visited.set(node, 'visited');
+    return false;
+  };
+
+  for (const step of plan.steps) {
+    if (!visited.has(step.index)) {
+      if (hasCycle(step.index)) {
+        errors.push(`Circular dependency cycle detected involving step ${step.index}.`);
+        break;
+      }
+    }
+  }
+
+  return { valid: errors.length === 0, errors };
+}
+
 export const ExecutionPlanSchema = z.object({
   summary: z.string(),
   analysis: z.string(),
   acceptanceCriteria: z.array(z.string()).min(1),
   steps: z.array(PlanStepSchema).min(1),
+}).refine((plan) => {
+  const check = validatePlanDependencyGraph(plan);
+  return check.valid;
+}, {
+  message: 'Invalid plan: Dependency graph contains non-existent dependencies or circular dependency cycles.',
 });
 
 export const DiagnosticResultSchema = z.object({
@@ -109,7 +158,85 @@ export class LLMBrain {
     this.tokenUsage.isEstimate = true;
   }
 
-  async generatePlan(prompt: string, repoMeta: ProjectMetadata): Promise<ExecutionPlan> {
+  private async cancellableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) {
+      throw new Error('LLM operation cancelled during backoff.');
+    }
+    return new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        cleanup();
+        resolve();
+      }, ms);
+      const onAbort = () => {
+        cleanup();
+        reject(new Error('LLM operation cancelled during backoff.'));
+      };
+      const cleanup = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
+      };
+      signal?.addEventListener('abort', onAbort, { once: true });
+    });
+  }
+
+  private async callWithTimeout<T>(
+    fn: () => Promise<T>,
+    options?: { abortSignal?: AbortSignal; timeoutMs?: number }
+  ): Promise<T> {
+    if (options?.abortSignal?.aborted) {
+      throw new Error('LLM operation cancelled: Abort signal already triggered.');
+    }
+    const timeoutMs = options?.timeoutMs ?? (config.llmTimeoutSeconds * 1000);
+    return new Promise<T>((resolve, reject) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          cleanup();
+          reject(new Error(`LLM operation timed out after ${timeoutMs / 1000}s.`));
+        }
+      }, timeoutMs);
+
+      const onAbort = () => {
+        if (!settled) {
+          settled = true;
+          cleanup();
+          reject(new Error('LLM operation cancelled by caller.'));
+        }
+      };
+
+      const cleanup = () => {
+        clearTimeout(timer);
+        options?.abortSignal?.removeEventListener('abort', onAbort);
+      };
+
+      if (options?.abortSignal) {
+        options.abortSignal.addEventListener('abort', onAbort, { once: true });
+      }
+
+      fn()
+        .then((res) => {
+          if (!settled) {
+            settled = true;
+            cleanup();
+            resolve(res);
+          }
+        })
+        .catch((err) => {
+          if (!settled) {
+            settled = true;
+            cleanup();
+            reject(err);
+          }
+        });
+    });
+  }
+
+  async generatePlan(
+    prompt: string,
+    repoMeta: ProjectMetadata,
+    options?: { abortSignal?: AbortSignal; timeoutMs?: number }
+  ): Promise<ExecutionPlan> {
     if (!this.ai) {
       return this.generateFallbackPlan(prompt, repoMeta);
     }
@@ -161,43 +288,45 @@ ${repoMeta.fileTreeSummary.slice(0, 40).join('\n')}
 `;
 
     try {
-      let response: any;
-      let attempts = 0;
-      while (attempts < 3) {
-        try {
-          response = await this.ai.models.generateContent({
-            model: this.modelName,
-            contents: userContent,
-            config: {
-              systemInstruction,
-              responseMimeType: 'application/json',
-            },
-          });
-          break;
-        } catch (planErr: any) {
-          attempts++;
-          const errMsg = planErr?.message || '';
-          const isRateLimit = errMsg.includes('429') || errMsg.includes('RESOURCE_EXHAUSTED') || errMsg.includes('limit: 5');
-          const isUnavailable = errMsg.includes('503') || errMsg.includes('UNAVAILABLE') || errMsg.includes('high demand');
-          if ((isRateLimit || isUnavailable) && attempts < 3) {
-            let waitMs = 15000;
-            const match = errMsg.match(/retry in ([0-9.]+)s/i) || errMsg.match(/"retryDelay":\s*"([0-9]+)s"/i);
-            if (match) {
-              const parsedSec = parseFloat(match[1]);
-              waitMs = (parsedSec > 1000 ? Math.ceil(parsedSec) : Math.ceil(parsedSec * 1000)) + 1000;
+      return await this.callWithTimeout(async () => {
+        let response: any;
+        let attempts = 0;
+        while (attempts < 3) {
+          try {
+            response = await this.ai!.models.generateContent({
+              model: this.modelName,
+              contents: userContent,
+              config: {
+                systemInstruction,
+                responseMimeType: 'application/json',
+              },
+            });
+            break;
+          } catch (planErr: any) {
+            attempts++;
+            const errMsg = planErr?.message || '';
+            const isRateLimit = errMsg.includes('429') || errMsg.includes('RESOURCE_EXHAUSTED') || errMsg.includes('limit: 5');
+            const isUnavailable = errMsg.includes('503') || errMsg.includes('UNAVAILABLE') || errMsg.includes('high demand');
+            if ((isRateLimit || isUnavailable) && attempts < 3) {
+              let waitMs = 15000;
+              const match = errMsg.match(/retry in ([0-9.]+)s/i) || errMsg.match(/"retryDelay":\s*"([0-9]+)s"/i);
+              if (match) {
+                const parsedSec = parseFloat(match[1]);
+                waitMs = (parsedSec > 1000 ? Math.ceil(parsedSec) : Math.ceil(parsedSec * 1000)) + 1000;
+              }
+              waitMs = Math.min(Math.max(waitMs, 5000), 30000);
+              console.warn(`[Gemini Backoff] Planning received ${isRateLimit ? '429 Rate Limit' : '503 High Demand'}. Pausing ${Math.round(waitMs / 1000)}s...`);
+              await this.cancellableSleep(waitMs, options?.abortSignal);
+              continue;
             }
-            waitMs = Math.min(Math.max(waitMs, 5000), 30000);
-            console.warn(`[Gemini Backoff] Planning received ${isRateLimit ? '429 Rate Limit' : '503 High Demand'}. Pausing ${Math.round(waitMs / 1000)}s...`);
-            await new Promise((r) => setTimeout(r, waitMs));
-            continue;
+            throw planErr;
           }
-          throw planErr;
         }
-      }
 
-      this.recordUsage(response?.usageMetadata);
-      const parsed = JSON.parse(response?.text || '{}');
-      return ExecutionPlanSchema.parse(parsed);
+        this.recordUsage(response?.usageMetadata);
+        const parsed = JSON.parse(response?.text || '{}');
+        return ExecutionPlanSchema.parse(parsed);
+      }, options);
     } catch (err: any) {
       if (process.env.REQUIRE_LLM === 'true') {
         throw new Error(`Gemini Plan Generation failed and REQUIRE_LLM=true: ${err?.message}`);
@@ -211,7 +340,8 @@ ${repoMeta.fileTreeSummary.slice(0, 40).join('\n')}
     step: PlanStep,
     outputLogs: string,
     verificationDiagnostics: string,
-    gitDiff: string
+    gitDiff: string,
+    options?: { abortSignal?: AbortSignal; timeoutMs?: number }
   ): Promise<DiagnosticResult> {
     if (!this.ai) {
       return {
@@ -251,43 +381,45 @@ ${gitDiff.slice(-3000) || '(No diff)'}
 `;
 
     try {
-      let response: any;
-      let attempts = 0;
-      while (attempts < 3) {
-        try {
-          response = await this.ai.models.generateContent({
-            model: this.modelName,
-            contents: userContent,
-            config: {
-              systemInstruction,
-              responseMimeType: 'application/json',
-            },
-          });
-          break;
-        } catch (diagErr: any) {
-          attempts++;
-          const errMsg = diagErr?.message || '';
-          const isRateLimit = errMsg.includes('429') || errMsg.includes('RESOURCE_EXHAUSTED') || errMsg.includes('limit: 5');
-          const isUnavailable = errMsg.includes('503') || errMsg.includes('UNAVAILABLE') || errMsg.includes('high demand');
-          if ((isRateLimit || isUnavailable) && attempts < 3) {
-            let waitMs = 15000;
-            const match = errMsg.match(/retry in ([0-9.]+)s/i) || errMsg.match(/"retryDelay":\s*"([0-9]+)s"/i);
-            if (match) {
-              const parsedSec = parseFloat(match[1]);
-              waitMs = (parsedSec > 1000 ? Math.ceil(parsedSec) : Math.ceil(parsedSec * 1000)) + 1000;
+      return await this.callWithTimeout(async () => {
+        let response: any;
+        let attempts = 0;
+        while (attempts < 3) {
+          try {
+            response = await this.ai!.models.generateContent({
+              model: this.modelName,
+              contents: userContent,
+              config: {
+                systemInstruction,
+                responseMimeType: 'application/json',
+              },
+            });
+            break;
+          } catch (diagErr: any) {
+            attempts++;
+            const errMsg = diagErr?.message || '';
+            const isRateLimit = errMsg.includes('429') || errMsg.includes('RESOURCE_EXHAUSTED') || errMsg.includes('limit: 5');
+            const isUnavailable = errMsg.includes('503') || errMsg.includes('UNAVAILABLE') || errMsg.includes('high demand');
+            if ((isRateLimit || isUnavailable) && attempts < 3) {
+              let waitMs = 15000;
+              const match = errMsg.match(/retry in ([0-9.]+)s/i) || errMsg.match(/"retryDelay":\s*"([0-9]+)s"/i);
+              if (match) {
+                const parsedSec = parseFloat(match[1]);
+                waitMs = (parsedSec > 1000 ? Math.ceil(parsedSec) : Math.ceil(parsedSec * 1000)) + 1000;
+              }
+              waitMs = Math.min(Math.max(waitMs, 5000), 30000);
+              console.warn(`[Gemini Backoff] Diagnosis received ${isRateLimit ? '429 Rate Limit' : '503 High Demand'}. Pausing ${Math.round(waitMs / 1000)}s...`);
+              await this.cancellableSleep(waitMs, options?.abortSignal);
+              continue;
             }
-            waitMs = Math.min(Math.max(waitMs, 5000), 30000);
-            console.warn(`[Gemini Backoff] Diagnosis received ${isRateLimit ? '429 Rate Limit' : '503 High Demand'}. Pausing ${Math.round(waitMs / 1000)}s...`);
-            await new Promise((r) => setTimeout(r, waitMs));
-            continue;
+            throw diagErr;
           }
-          throw diagErr;
         }
-      }
 
-      this.recordUsage(response?.usageMetadata);
-      const parsed = JSON.parse(response?.text || '{}');
-      return DiagnosticResultSchema.parse(parsed);
+        this.recordUsage(response?.usageMetadata);
+        const parsed = JSON.parse(response?.text || '{}');
+        return DiagnosticResultSchema.parse(parsed);
+      }, options);
     } catch (err: any) {
       return {
         rootCause: `Diagnostic analysis error: ${err?.message}`,
@@ -353,7 +485,8 @@ ${gitDiff.slice(-3000) || '(No diff)'}
     plan: ExecutionPlan,
     verificationSummaries: string[],
     finalDiff: string,
-    hasUnresolvedVerificationErrors: boolean
+    hasUnresolvedVerificationErrors: boolean,
+    options?: { abortSignal?: AbortSignal; timeoutMs?: number }
   ): Promise<ReviewResult> {
     // Truthful Gate: If verifications failed, the task CANNOT be marked complete
     if (hasUnresolvedVerificationErrors) {
@@ -408,43 +541,45 @@ ${finalDiff.slice(-4000) || '(No diff)'}
 `;
 
     try {
-      let response: any;
-      let attempts = 0;
-      while (attempts < 3) {
-        try {
-          response = await this.ai.models.generateContent({
-            model: this.modelName,
-            contents: userContent,
-            config: {
-              systemInstruction,
-              responseMimeType: 'application/json',
-            },
-          });
-          break;
-        } catch (revErr: any) {
-          attempts++;
-          const errMsg = revErr?.message || '';
-          const isRateLimit = errMsg.includes('429') || errMsg.includes('RESOURCE_EXHAUSTED') || errMsg.includes('limit: 5');
-          const isUnavailable = errMsg.includes('503') || errMsg.includes('UNAVAILABLE') || errMsg.includes('high demand');
-          if ((isRateLimit || isUnavailable) && attempts < 3) {
-            let waitMs = 15000;
-            const match = errMsg.match(/retry in ([0-9.]+)s/i) || errMsg.match(/"retryDelay":\s*"([0-9]+)s"/i);
-            if (match) {
-              const parsedSec = parseFloat(match[1]);
-              waitMs = (parsedSec > 1000 ? Math.ceil(parsedSec) : Math.ceil(parsedSec * 1000)) + 1000;
+      return await this.callWithTimeout(async () => {
+        let response: any;
+        let attempts = 0;
+        while (attempts < 3) {
+          try {
+            response = await this.ai!.models.generateContent({
+              model: this.modelName,
+              contents: userContent,
+              config: {
+                systemInstruction,
+                responseMimeType: 'application/json',
+              },
+            });
+            break;
+          } catch (revErr: any) {
+            attempts++;
+            const errMsg = revErr?.message || '';
+            const isRateLimit = errMsg.includes('429') || errMsg.includes('RESOURCE_EXHAUSTED') || errMsg.includes('limit: 5');
+            const isUnavailable = errMsg.includes('503') || errMsg.includes('UNAVAILABLE') || errMsg.includes('high demand');
+            if ((isRateLimit || isUnavailable) && attempts < 3) {
+              let waitMs = 15000;
+              const match = errMsg.match(/retry in ([0-9.]+)s/i) || errMsg.match(/"retryDelay":\s*"([0-9]+)s"/i);
+              if (match) {
+                const parsedSec = parseFloat(match[1]);
+                waitMs = (parsedSec > 1000 ? Math.ceil(parsedSec) : Math.ceil(parsedSec * 1000)) + 1000;
+              }
+              waitMs = Math.min(Math.max(waitMs, 5000), 30000);
+              console.warn(`[Gemini Backoff] Review received ${isRateLimit ? '429 Rate Limit' : '503 High Demand'}. Pausing ${Math.round(waitMs / 1000)}s...`);
+              await this.cancellableSleep(waitMs, options?.abortSignal);
+              continue;
             }
-            waitMs = Math.min(Math.max(waitMs, 5000), 30000);
-            console.warn(`[Gemini Backoff] Review received ${isRateLimit ? '429 Rate Limit' : '503 High Demand'}. Pausing ${Math.round(waitMs / 1000)}s...`);
-            await new Promise((r) => setTimeout(r, waitMs));
-            continue;
+            throw revErr;
           }
-          throw revErr;
         }
-      }
 
-      this.recordUsage(response?.usageMetadata);
-      const parsed = JSON.parse(response.text || '{}');
-      return ReviewResultSchema.parse(parsed);
+        this.recordUsage(response?.usageMetadata);
+        const parsed = JSON.parse(response.text || '{}');
+        return ReviewResultSchema.parse(parsed);
+      }, options);
     } catch (err: any) {
       const verifCheck = this.hasTrustedVerificationEvidence(verificationSummaries, finalDiff, hasUnresolvedVerificationErrors);
       if (verifCheck.trusted) {

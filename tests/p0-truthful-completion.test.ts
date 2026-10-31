@@ -1,3 +1,4 @@
+process.env.USE_CONTAINER_SANDBOX = 'false';
 import assert from 'node:assert';
 import path from 'node:path';
 import os from 'node:os';

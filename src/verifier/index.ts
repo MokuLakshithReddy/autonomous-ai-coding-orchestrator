@@ -179,31 +179,36 @@ export class IndependentVerifier {
 
     // Security check for sensitive secret files across ALL cumulative changes
     for (const f of allCumulativeFiles) {
-      const lower = f.toLowerCase();
-      // Allow harmless example / template / distribution files
-      if (
-        lower.endsWith('.example') ||
-        lower.endsWith('.sample') ||
-        lower.endsWith('.template') ||
-        lower.endsWith('.dist')
-      ) {
-        continue;
-      }
-      if (
-        lower.includes('.env') ||
-        lower.includes('credentials') ||
-        lower.includes('id_rsa') ||
-        lower.includes('.pem') ||
-        lower.includes('.key')
-      ) {
+      if (SecurityPolicyEngine.isSensitiveSecret(f)) {
         hasForbiddenModifications = true;
         diffNotes.push(`Sensitive secret file modified in task history: ${f}`);
         blockingReasons.push(`Unauthorized modification of sensitive secret file: ${f}`);
       }
     }
 
+    // Deep content scanning of non-test modified files on disk in the worktree
+    for (const f of allCumulativeFiles) {
+      if (/(\.test\.|\.spec\.|(^|[\\/])tests?(\.|\/)|(^|[\\/])test_[a-z0-9_]+\.py)/i.test(f)) {
+        continue;
+      }
+      try {
+        const fullPath = path.resolve(this.workspacePath, f);
+        const stat = await fs.stat(fullPath).catch(() => null);
+        if (stat && stat.isFile()) {
+          const content = await fs.readFile(fullPath, 'utf8');
+          const fileSecret = SecurityPolicyEngine.containsSensitiveSecret(content);
+          if (fileSecret.hasSecret) {
+            hasForbiddenModifications = true;
+            diffNotes.push(`File "${f}" contains leaked sensitive credentials on disk: ${fileSecret.reason}`);
+            blockingReasons.push(`File "${f}" contains detected sensitive credentials (${fileSecret.reason}).`);
+          }
+        }
+      } catch {}
+    }
+
     // Anti-Tamper & Content Check: Inspect added and deleted lines across diff
     const addedTestLines: string[] = [];
+    const addedNonTestLines: string[] = [];
     const addedPackageJsonLines: string[] = [];
     const addedAllLines: string[] = [];
     const deletedTestLines: string[] = [];
@@ -223,6 +228,8 @@ export class IndependentVerifier {
           if (/\b(assert|expect|test|it)\s*[\.(]/i.test(added)) {
             addedAssertionCount++;
           }
+        } else {
+          addedNonTestLines.push(added);
         }
         if (currentDiffFile.endsWith('package.json')) {
           addedPackageJsonLines.push(added);
@@ -236,6 +243,15 @@ export class IndependentVerifier {
           }
         }
       }
+    }
+
+    // Secret scanning across non-test diff lines
+    const nonTestDiffContent = addedNonTestLines.join('\n');
+    const secretInDiff = SecurityPolicyEngine.containsSensitiveSecret(nonTestDiffContent);
+    if (secretInDiff.hasSecret) {
+      hasForbiddenModifications = true;
+      diffNotes.push(`Diff contains sensitive secrets: ${secretInDiff.reason}`);
+      blockingReasons.push(`Unauthorized sensitive credential pattern detected in diff: ${secretInDiff.reason}`);
     }
 
     // Anti-Tamper Check: Detect suspicious test bypassing / skipping inserted into test files
@@ -343,15 +359,18 @@ export class IndependentVerifier {
 
           if (targetFile) {
             let existsOnDisk = false;
+            let fileSize = 0;
             try {
-              await fs.stat(path.join(this.workspacePath, targetFile));
+              const st = await fs.stat(path.join(this.workspacePath, targetFile));
               existsOnDisk = true;
+              fileSize = st.size;
             } catch {
               for (const cumFile of allCumulativeFiles) {
                 if (cumFile.toLowerCase() === targetFile || cumFile.toLowerCase().endsWith('/' + targetFile)) {
                   try {
-                    await fs.stat(path.join(this.workspacePath, cumFile));
+                    const st = await fs.stat(path.join(this.workspacePath, cumFile));
                     existsOnDisk = true;
+                    fileSize = st.size;
                     break;
                   } catch {}
                 }
@@ -361,12 +380,14 @@ export class IndependentVerifier {
             const fileInDiff = allCumulativeFiles.some(
               (f) => f.toLowerCase() === targetFile || f.toLowerCase().endsWith('/' + targetFile)
             );
-            satisfied = fileInDiff && existsOnDisk;
+            satisfied = fileInDiff && existsOnDisk && fileSize > 0;
             evidence = satisfied
-              ? `Confirmed required file "${targetFile}" created/modified in repository and verified on disk.`
+              ? `Confirmed required file "${targetFile}" created/modified in repository and verified on disk (${fileSize} bytes).`
               : !existsOnDisk && fileInDiff
                 ? `Unverified: Required file "${targetFile}" was recorded in changes but does not exist on disk.`
-                : `Unverified: Required file "${targetFile}" was not found in modified files: ${allCumulativeFiles.join(', ') || 'none'}.`;
+                : fileSize === 0 && existsOnDisk
+                  ? `Unverified: Required file "${targetFile}" exists on disk but is empty (0 bytes).`
+                  : `Unverified: Required file "${targetFile}" was not found in modified files: ${allCumulativeFiles.join(', ') || 'none'}.`;
           } else {
             satisfied = allCumulativeFiles.length > 0;
             evidence = satisfied
@@ -410,24 +431,31 @@ export class IndependentVerifier {
                 Boolean(meta.testCmd && /test|spec/i.test(meta.testCmd)) ||
                 Boolean(testCheck.command && /test|spec/i.test(testCheck.command));
               const outputLower = (testCheck.output || '').toLowerCase();
-              const keywordMatches = keywords.filter((kw) => outputLower.includes(kw));
+              const diffLower = (diff || '').toLowerCase();
+              const outputMatches = keywords.filter((kw) => outputLower.includes(kw));
+              const diffMatches = keywords.filter((kw) => diffLower.includes(kw));
+              const combinedMatches = Array.from(new Set([...outputMatches, ...diffMatches]));
+
+              const fileMentioned = allCumulativeFiles.some((f) => {
+                const base = path.basename(f).toLowerCase();
+                const stem = base.replace(/\.[^.]+$/, '');
+                return criterion.toLowerCase().includes(base) || criterion.toLowerCase().includes(stem);
+              });
 
               if (
-                (keywords.length > 0 && keywordMatches.length >= Math.min(2, keywords.length)) ||
-                (hasDedicatedTestFile && keywordMatches.length >= 1)
+                outputMatches.length >= Math.min(2, keywords.length) ||
+                (hasDedicatedTestFile && outputMatches.length >= 1) ||
+                (hasDedicatedTestFile && (diffMatches.length >= 1 || fileMentioned)) ||
+                combinedMatches.length >= Math.min(2, Math.max(1, keywords.length))
               ) {
                 targetCommand = testCheck.command || meta.testCmd;
                 exitCode = testCheck.exitCode;
                 satisfied = true;
-                evidence = `Verified via targeted test execution: "${targetCommand}" (exit ${exitCode ?? 0}) with proof matching [${keywordMatches.join(', ')}].`;
-              } else if (hasDedicatedTestFile && (/passed\b|✓|ok\b/i.test(testCheck.output))) {
-                targetCommand = testCheck.command || meta.testCmd;
-                exitCode = testCheck.exitCode;
-                satisfied = true;
-                evidence = `Verified via test execution "${targetCommand}" confirming assertions in test suite.`;
+                const matchSummary = combinedMatches.length > 0 ? ` matching [${combinedMatches.join(', ')}]` : '';
+                evidence = `Verified via targeted test execution: "${targetCommand}" (exit ${exitCode ?? 0})${matchSummary}.`;
               } else {
                 satisfied = false;
-                evidence = `Unverified: General test suite passed, but no targeted test or assertion proved "${criterion}".`;
+                evidence = `Unverified: General test suite passed, but no criterion-specific test assertion or modified code proved "${criterion}".`;
               }
             }
           }

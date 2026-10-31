@@ -17,8 +17,11 @@ const ConfigSchema = z.object({
   protectedBranches: z.array(z.string()).default(['main', 'master', 'production']),
   allowedWorkspaces: z.array(z.string()).default([]),
   allowUnrestrictedWorkspaces: z.boolean().default(false),
-  useContainerSandbox: z.boolean().default(false),
+  useContainerSandbox: z.boolean().default(true),
   apiToken: z.string().optional(),
+  maxConcurrentTasks: z.coerce.number().default(5),
+  llmTimeoutSeconds: z.coerce.number().default(60),
+  approvalTimeoutSeconds: z.coerce.number().default(600),
 });
 
 export type AppConfig = z.infer<typeof ConfigSchema>;
@@ -42,8 +45,13 @@ export function loadConfig(): AppConfig {
       ? allowedWorkspacesRaw.split(';').map((s) => path.resolve(s.trim())).filter(Boolean)
       : [path.resolve(process.cwd())],
     allowUnrestrictedWorkspaces: process.env.ALLOW_UNRESTRICTED_WORKSPACES === 'true',
-    useContainerSandbox: process.env.USE_CONTAINER_SANDBOX === 'true',
+    useContainerSandbox: process.env.USE_CONTAINER_SANDBOX !== undefined
+      ? process.env.USE_CONTAINER_SANDBOX === 'true'
+      : (process.env.NODE_ENV === 'test' ? false : true),
     apiToken: process.env.ORCHESTRATOR_API_TOKEN || process.env.API_TOKEN,
+    maxConcurrentTasks: process.env.MAX_CONCURRENT_TASKS,
+    llmTimeoutSeconds: process.env.LLM_TIMEOUT_SECONDS,
+    approvalTimeoutSeconds: process.env.APPROVAL_TIMEOUT_SECONDS,
   });
 
   return parsed;

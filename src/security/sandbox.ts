@@ -26,7 +26,7 @@ export class ContainerSandbox {
   static async isDockerAvailable(): Promise<boolean> {
     if (this.dockerAvailable !== null) return this.dockerAvailable;
     return new Promise((resolve) => {
-      const child = spawn('docker', ['--version'], { shell: false, windowsHide: true });
+      const child = spawn('docker', ['info'], { shell: false, windowsHide: true });
       child.on('close', (code) => {
         this.dockerAvailable = code === 0;
         resolve(this.dockerAvailable);
@@ -68,9 +68,16 @@ export class ContainerSandbox {
 
     // Ecosystem-aware default image selection
     let defaultImage = 'node:22-bookworm-slim';
+    let isExternalAgent = false;
     if (normalizedTarget.type === 'exec') {
       const execName = normalizedTarget.executable.toLowerCase();
-      if (['aider', 'python', 'python3', 'pytest', 'pip'].some((p) => execName.includes(p))) {
+      if (execName.includes('aider')) {
+        isExternalAgent = true;
+        defaultImage = process.env.CONTAINER_SANDBOX_AIDER_IMAGE || process.env.CONTAINER_SANDBOX_PYTHON_IMAGE || 'python:3.11-slim';
+      } else if (execName.includes('claude')) {
+        isExternalAgent = true;
+        defaultImage = process.env.CONTAINER_SANDBOX_CLAUDE_IMAGE || 'node:22-bookworm-slim';
+      } else if (['python', 'python3', 'pytest', 'pip', 'unittest'].some((p) => execName.includes(p))) {
         defaultImage = process.env.CONTAINER_SANDBOX_PYTHON_IMAGE || 'python:3.11-slim';
       } else if (['cargo', 'rustc'].some((p) => execName.includes(p))) {
         defaultImage = process.env.CONTAINER_SANDBOX_RUST_IMAGE || 'rust:1.80-slim';
@@ -79,7 +86,13 @@ export class ContainerSandbox {
       }
     } else {
       const cmd = normalizedTarget.commandStr.toLowerCase();
-      if (cmd.includes('pytest') || cmd.includes('python ') || cmd.includes('pip ')) {
+      if (cmd.startsWith('aider ') || cmd.includes('/aider ')) {
+        isExternalAgent = true;
+        defaultImage = process.env.CONTAINER_SANDBOX_AIDER_IMAGE || process.env.CONTAINER_SANDBOX_PYTHON_IMAGE || 'python:3.11-slim';
+      } else if (cmd.startsWith('claude ') || cmd.includes('/claude ')) {
+        isExternalAgent = true;
+        defaultImage = process.env.CONTAINER_SANDBOX_CLAUDE_IMAGE || 'node:22-bookworm-slim';
+      } else if (cmd.includes('pytest') || cmd.includes('python ') || cmd.includes('pip ')) {
         defaultImage = process.env.CONTAINER_SANDBOX_PYTHON_IMAGE || 'python:3.11-slim';
       } else if (cmd.includes('cargo ')) {
         defaultImage = process.env.CONTAINER_SANDBOX_RUST_IMAGE || 'rust:1.80-slim';

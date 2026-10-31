@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import treeKill from 'tree-kill';
 import { SecurityPolicyEngine, type ActionPolicy } from '../security/policy.js';
@@ -38,6 +39,13 @@ export class AgentToolbox {
         `Security Exception [Access Denied]: Reading sensitive secret file "${filePath}" is strictly prohibited.`
       );
     }
+    // Resource hardening: Limit file reads to 10 MB to prevent process exhaustion
+    const stats = await fs.stat(fullPath);
+    if (stats.size > 10 * 1024 * 1024) {
+      throw new Error(
+        `Resource Exception [File Too Large]: File "${filePath}" (${Math.round(stats.size / (1024 * 1024))} MB) exceeds the 10 MB maximum read limit.`
+      );
+    }
     const content = await fs.readFile(fullPath, 'utf8');
     const secretScan = SecurityPolicyEngine.containsSensitiveSecret(content);
     if (secretScan.hasSecret) {
@@ -60,8 +68,17 @@ export class AgentToolbox {
         throw new Error(`Security Exception [Approval Denied]: Writing to sensitive destination "${filePath}" was rejected by the operator.`);
       }
     }
-    await fs.mkdir(path.dirname(fullPath), { recursive: true });
-    await fs.writeFile(fullPath, content, 'utf8');
+    const dir = path.dirname(fullPath);
+    await fs.mkdir(dir, { recursive: true });
+    // P2 FIX: Atomic file write via temporary file + atomic rename
+    const tmpPath = path.join(dir, `.${path.basename(fullPath)}.${crypto.randomUUID()}.tmp`);
+    try {
+      await fs.writeFile(tmpPath, content, 'utf8');
+      await fs.rename(tmpPath, fullPath);
+    } catch (err) {
+      await fs.unlink(tmpPath).catch(() => {});
+      throw err;
+    }
   }
 
   async replaceInFile(filePath: string, target: string, replacement: string): Promise<boolean> {
@@ -81,7 +98,15 @@ export class AgentToolbox {
       return false;
     }
     const updated = content.replace(target, replacement);
-    await fs.writeFile(fullPath, updated, 'utf8');
+    const dir = path.dirname(fullPath);
+    const tmpPath = path.join(dir, `.${path.basename(fullPath)}.${crypto.randomUUID()}.tmp`);
+    try {
+      await fs.writeFile(tmpPath, updated, 'utf8');
+      await fs.rename(tmpPath, fullPath);
+    } catch (err) {
+      await fs.unlink(tmpPath).catch(() => {});
+      throw err;
+    }
     return true;
   }
 
@@ -196,7 +221,10 @@ export class AgentToolbox {
 
     const startTime = Date.now();
     const sanitizedEnv = SecurityPolicyEngine.getSanitizedProcessEnv(customEnv);
-    const isContainerMode = process.env.USE_CONTAINER_SANDBOX === 'true' || config.useContainerSandbox;
+    const isContainerMode =
+      process.env.USE_CONTAINER_SANDBOX !== undefined
+        ? process.env.USE_CONTAINER_SANDBOX === 'true'
+        : config.useContainerSandbox;
 
     let spawnExec: string;
     let spawnArgs: string[];

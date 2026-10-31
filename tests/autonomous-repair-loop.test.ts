@@ -1,3 +1,4 @@
+process.env.USE_CONTAINER_SANDBOX = 'false';
 import assert from 'node:assert';
 import path from 'node:path';
 import os from 'node:os';
@@ -38,7 +39,8 @@ async function runAutonomousRepairLoopTest() {
   const buggyMath = `export function calculateSum(a, b) {\n  return a - b;\n}\n`;
   await fs.writeFile(path.join(repoDir, 'math.js'), buggyMath);
 
-  const testFile = `import assert from 'node:assert';
+  const testFile = `process.env.USE_CONTAINER_SANDBOX = 'false';
+import assert from 'node:assert';
 import { calculateSum } from './math.js';
 
 try {

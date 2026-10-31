@@ -313,7 +313,7 @@ export class SecurityPolicyEngine {
       normalized.includes('.ssh/') ||
       normalized.includes('.gcloud/') ||
       base.includes('credential') ||
-      base.includes('secret') ||
+      (base.includes('secret') && !/\.(js|ts|jsx|tsx|py|go|rs|java|c|cpp|cs|rb|php)$/i.test(base)) ||
       base.includes('password') ||
       (base.includes('token') && !/\.(js|ts|jsx|tsx|py|go|rs|java|c|cpp|cs|rb|php)$/i.test(base)) ||
       base.includes('private_key') ||

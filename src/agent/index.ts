@@ -488,14 +488,23 @@ export class AiderAgentAdapter implements CodingAgent {
     targetFiles: string[] = [],
     abortSignal?: AbortSignal
   ): Promise<StepExecutionResult> {
+    // P0 FIX: Prevent tracked credentials or sensitive files from being passed to external agent
+    const safeTargetFiles = targetFiles.filter((f) => !SecurityPolicyEngine.isSensitiveSecret(f));
+    if (targetFiles.length > 0 && safeTargetFiles.length < targetFiles.length) {
+      const blocked = targetFiles.filter((f) => SecurityPolicyEngine.isSensitiveSecret(f));
+      throw new Error(
+        `Security Exception [Credential Protection]: Cannot expose sensitive credential files to external coding agent: ${blocked.join(', ')}`
+      );
+    }
+
     const isWin = process.platform === 'win32';
     const bin = isWin ? 'aider.cmd' : 'aider';
-    const args = ['--yes', '--message', instruction, ...targetFiles];
+    const args = ['--yes', '--message', instruction, ...safeTargetFiles];
     let result = await this.toolbox.executeCommandWithArgs(bin, args, 180000, {}, abortSignal);
 
     // Fallback attempt to standard PATH command if .cmd is not directly invoked
     if (result.exitCode !== 0 && result.stderr.includes('Spawn invocation failed')) {
-      const filesArg = targetFiles.map((f) => `"${f.replace(/"/g, '\\"')}"`).join(' ');
+      const filesArg = safeTargetFiles.map((f) => `"${f.replace(/"/g, '\\"')}"`).join(' ');
       const escapedInstruction = instruction.replace(/"/g, '\\"');
       const cmd = `aider --yes --message "${escapedInstruction}" ${filesArg}`.trim();
       result = await this.toolbox.executeCommand(cmd, 180000, {}, abortSignal);
@@ -538,7 +547,16 @@ export class ClaudeCodeAgentAdapter implements CodingAgent {
     targetFiles: string[] = [],
     abortSignal?: AbortSignal
   ): Promise<StepExecutionResult> {
-    const filesHint = targetFiles.length > 0 ? ` Target files: ${targetFiles.join(', ')}.` : '';
+    // P0 FIX: Prevent tracked credentials or sensitive files from being passed to external agent
+    const safeTargetFiles = targetFiles.filter((f) => !SecurityPolicyEngine.isSensitiveSecret(f));
+    if (targetFiles.length > 0 && safeTargetFiles.length < targetFiles.length) {
+      const blocked = targetFiles.filter((f) => SecurityPolicyEngine.isSensitiveSecret(f));
+      throw new Error(
+        `Security Exception [Credential Protection]: Cannot expose sensitive credential files to external coding agent: ${blocked.join(', ')}`
+      );
+    }
+
+    const filesHint = safeTargetFiles.length > 0 ? ` Target files: ${safeTargetFiles.join(', ')}.` : '';
     const fullPrompt = `${instruction}${filesHint}`;
     const isWin = process.platform === 'win32';
     const bin = isWin ? 'claude.cmd' : 'claude';

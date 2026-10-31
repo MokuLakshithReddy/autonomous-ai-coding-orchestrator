@@ -1,3 +1,4 @@
+process.env.USE_CONTAINER_SANDBOX = 'false';
 import assert from 'node:assert';
 import { EventEmitter } from 'node:events';
 import { validateSecretName, setGitHubSecret, HttpTransport } from '../scripts/set-secret.js';

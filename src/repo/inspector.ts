@@ -93,8 +93,8 @@ export class RepoInspector {
    * Policy for allowable ephemeral verification side-effects (build outputs, coverage, test caches)
    */
   private static readonly EPHEMERAL_IGNORED_PATTERNS = [
-    /^(dist|build|coverage|\.nyc_output|\.turbo|\.next|\.cache|\.temp|\.tmp)([\\/]|$)/i,
-    /\.(log|tmp|tsbuildinfo|cache)$/i,
+    /^(dist|build|coverage|\.nyc_output|\.turbo|\.next|\.cache|\.temp|\.tmp|__pycache__|\.pytest_cache)([\\/]|$)/i,
+    /\.(log|tmp|tsbuildinfo|cache|pyc|pyo|pyd)$/i,
   ];
 
   /**
@@ -131,7 +131,11 @@ export class RepoInspector {
         for (const record of records) {
           if (record.startsWith('?? ')) {
             const rawPath = record.slice(3).replace(/\/+$/, '');
-            if (rawPath) untrackedPaths.push(rawPath);
+            const norm = rawPath.replace(/\\/g, '/');
+            const isEphemeral = RepoInspector.EPHEMERAL_IGNORED_PATTERNS.some(
+              (pat) => pat.test(norm) || pat.test(path.basename(norm))
+            );
+            if (!isEphemeral && rawPath) untrackedPaths.push(rawPath);
           } else if (record.startsWith('!! ')) {
             const rawPath = record.slice(3).replace(/\/+$/, '');
             const norm = rawPath.replace(/\\/g, '/');
@@ -212,7 +216,12 @@ export class RepoInspector {
       entries.sort((a, b) => a.name.localeCompare(b.name));
 
       for (const entry of entries) {
-        if (ignoreDirs.has(entry.name)) continue;
+        if (
+          ignoreDirs.has(entry.name) ||
+          RepoInspector.EPHEMERAL_IGNORED_PATTERNS.some((pat) => pat.test(entry.name))
+        ) {
+          continue;
+        }
         const full = path.join(currentDir, entry.name);
         const rel = path.relative(dir, full).replace(/\\/g, '/');
         if (entry.isDirectory()) {

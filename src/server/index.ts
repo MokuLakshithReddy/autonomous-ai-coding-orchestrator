@@ -81,6 +81,7 @@ export function validateWorkspacePath(
 
 export async function createServer() {
   await initDatabase();
+  await orchestrator.recoverIncompleteTasks();
 
   const fastify = Fastify({
     logger: false,
@@ -413,7 +414,10 @@ export async function createServer() {
       if (!status || !['APPROVED', 'REJECTED'].includes(status)) {
         return reply.status(400).send({ error: 'Status must be APPROVED or REJECTED' });
       }
-      await approvalRepo.respond(req.params.id, status);
+      const resolved = await approvalRepo.respond(req.params.id, status);
+      if (!resolved) {
+        return reply.status(409).send({ error: 'Approval was already resolved or has expired' });
+      }
       return { success: true };
     }
   );

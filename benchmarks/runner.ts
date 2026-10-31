@@ -1,3 +1,6 @@
+if (!process.env.USE_CONTAINER_SANDBOX && !process.argv.includes('--container')) {
+  process.env.USE_CONTAINER_SANDBOX = 'false';
+}
 import path from 'node:path';
 import os from 'node:os';
 import fs from 'node:fs/promises';
@@ -225,10 +228,18 @@ export async function runBenchmarkTask(
   let diffOutput = '';
   try {
     const git = simpleGit(orchRepoDir);
-    diffOutput = await git.diff([initialCommit]);
+    const taskBranch = `task/${orchTask.id.slice(0, 8)}`;
+    const branches = await git.branchLocal();
+    if (branches.all.includes(taskBranch)) {
+      diffOutput = await git.diff([initialCommit, taskBranch]);
+    } else {
+      diffOutput = await git.diff([initialCommit]);
+    }
   } catch {}
 
-  const orchTokens = options.isLive ? 2400 : 0;
+  const orchTokens = options.isLive
+    ? (engine.lastBrain?.getTokenUsage().totalTokens ?? 2400)
+    : 0;
   const orchCost = `$${((orchTokens * 0.1) / 1e6).toFixed(5)}`;
 
   // Determine orchestrator advantage

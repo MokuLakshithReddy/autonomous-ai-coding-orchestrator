@@ -1,11 +1,14 @@
 import { EventEmitter } from 'node:events';
 import crypto from 'node:crypto';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import { RepoInspector, type ProjectMetadata } from '../repo/inspector.js';
 import { LLMBrain, type ExecutionPlan, type PlanStep } from '../llm/index.js';
 import { BuiltInAutonomousAgent, createAgent, type CodingAgent } from '../agent/index.js';
 import { IndependentVerifier, type VerificationReport } from '../verifier/index.js';
 import {
   initDatabase,
+  getDb,
   taskRepo,
   stepRepo,
   verificationRepo,
@@ -34,6 +37,7 @@ export interface OrchestratorEvent {
 export class OrchestrationEngine extends EventEmitter {
   private allowedWorkspaces?: string[];
   private allowUnrestricted?: boolean;
+  private maxConcurrentTasks?: number;
   private activeTasks = new Map<
     string,
     {
@@ -46,10 +50,11 @@ export class OrchestrationEngine extends EventEmitter {
 
   public lastBrain?: LLMBrain;
 
-  constructor(options?: { allowedWorkspaces?: string[]; allowUnrestricted?: boolean }) {
+  constructor(options?: { allowedWorkspaces?: string[]; allowUnrestricted?: boolean; maxConcurrentTasks?: number }) {
     super();
     this.allowedWorkspaces = options?.allowedWorkspaces;
     this.allowUnrestricted = options?.allowUnrestricted;
+    this.maxConcurrentTasks = options?.maxConcurrentTasks;
   }
 
   /**
@@ -122,6 +127,15 @@ export class OrchestrationEngine extends EventEmitter {
     allowUnrestricted?: boolean;
   }): Promise<TaskRecord> {
     await initDatabase();
+
+    // P2 FIX: Concurrency and Resource Limits
+    const maxConcurrency = this.maxConcurrentTasks ?? config.maxConcurrentTasks ?? 5;
+    if (this.activeTasks.size >= maxConcurrency) {
+      throw new Error(
+        `Resource Exception [Concurrency Limit]: Orchestrator is executing ${this.activeTasks.size} concurrent tasks (limit: ${maxConcurrency}). Please wait for active tasks to complete before launching new work.`
+      );
+    }
+
     const allowedRoots = params.allowedWorkspaces ?? this.allowedWorkspaces ?? config.allowedWorkspaces;
     const allowUnrestricted =
       params.allowUnrestricted ?? this.allowUnrestricted ?? config.allowUnrestrictedWorkspaces;
@@ -333,7 +347,7 @@ export class OrchestrationEngine extends EventEmitter {
 
     // 2. Planning Phase
     await this.transitionTaskState(taskId, stateMachine, 'planning', 'Formulating structured execution plan');
-    const plan: ExecutionPlan = await brain.generatePlan(params.prompt, repoMeta);
+    const plan: ExecutionPlan = await brain.generatePlan(params.prompt, repoMeta, { abortSignal: abortController.signal });
     await taskRepo.updatePlan(taskId, JSON.stringify(plan));
 
     await this.emitOrchestratorEvent({
@@ -370,6 +384,39 @@ export class OrchestrationEngine extends EventEmitter {
       const step = plan.steps[i];
       const stepRec = stepRecords[i];
       const targetFiles = step.targetFiles || [];
+
+      // P2 FIX: Enforce Plan Step Dependencies
+      const unsatisfiedDeps = (step.dependencies || []).filter((depIndex) => {
+        const depRecord = stepRecords.find((r) => r.stepIndex === depIndex);
+        return !depRecord || depRecord.status !== 'COMPLETED';
+      });
+
+      if (unsatisfiedDeps.length > 0) {
+        await stepRepo.update(stepRec.id, { status: 'SKIPPED' });
+        await this.emitOrchestratorEvent({
+          taskId,
+          stepId: stepRec.id,
+          type: 'STEP_SKIPPED',
+          message: `Step ${step.index} ("${step.title}") skipped because required dependencies [${unsatisfiedDeps.join(', ')}] were not completed.`,
+        });
+        continue;
+      }
+
+      // P2 FIX: Validate Model-Generated Actions
+      for (const targetFile of targetFiles) {
+        if (SecurityPolicyEngine.isSensitiveSecret(targetFile)) {
+          throw new Error(
+            `Security Exception [Dangerous Plan Action]: Step ${step.index} references sensitive secret file "${targetFile}". Aborting task to prevent credential exposure.`
+          );
+        }
+        try {
+          SecurityPolicyEngine.assertPathContainment(targetFile, executionPath);
+        } catch (containmentErr: any) {
+          throw new Error(
+            `Security Exception [Path Traversal in Plan]: Step ${step.index} targets path outside workspace: ${containmentErr.message}`
+          );
+        }
+      }
 
       // P0.3 & P0.4: Handle Approval Gate at Action Boundary
       const policy = SecurityPolicyEngine.evaluateActionRisk(step.title, step.instruction);
@@ -549,7 +596,8 @@ export class OrchestrationEngine extends EventEmitter {
           step,
           executionResult.logs,
           `${executionResult.failureReason || ''}\n${verification.diagnostics}`,
-          recentDiff
+          recentDiff,
+          { abortSignal: abortController.signal }
         );
 
         if (!diagnostic.shouldRetry) {
@@ -772,7 +820,8 @@ export class OrchestrationEngine extends EventEmitter {
       plan,
       verifSummaries,
       finalDiff,
-      !finalVerification.isVerified
+      !finalVerification.isVerified,
+      { abortSignal: active?.abortController.signal }
     );
 
     // P0 FIX: Model-generated claim of success can NEVER override unverified criteria or test failure
@@ -950,6 +999,39 @@ export class OrchestrationEngine extends EventEmitter {
           },
         });
       } else {
+        // P0 FIX: Require all verified changes to be cleanly committed to task branch before reporting completion
+        let uncommittedFiles: string[] = [];
+        try {
+          if (isWorktree) {
+            const statusCheck = await (taskInspector as any).git.status();
+            if (statusCheck.files.length > 0) {
+              await taskInspector.createTaskCheckpoint([], `Task ${taskId} final changes before completion`);
+              const postStatus = await (taskInspector as any).git.status();
+              uncommittedFiles = postStatus.files.map((f: any) => f.path);
+            }
+          }
+        } catch (commitErr) {
+          console.error(`[Final Commit Check] Failed to commit task worktree changes:`, commitErr);
+          uncommittedFiles = ['Failed to commit final changes'];
+        }
+
+        if (uncommittedFiles.length > 0) {
+          await this.transitionTaskState(
+            taskId,
+            stateMachine,
+            'needs_human_review',
+            `Task verified but ${uncommittedFiles.length} change(s) remained uncommitted in worktree branch "${taskBranchName}"`,
+            review.summary
+          );
+          await this.emitOrchestratorEvent({
+            taskId,
+            type: 'TASK_NEEDS_REVIEW',
+            message: `Worktree changes could not be cleanly committed to branch ${taskBranchName}. Human review required.`,
+            data: { review, finalVerification, taskBranchName, uncommittedFiles },
+          });
+          return;
+        }
+
         await this.transitionTaskState(taskId, stateMachine, 'completed', 'All requirements verified', review.summary);
         await this.emitOrchestratorEvent({
           taskId,
@@ -1122,8 +1204,8 @@ export class OrchestrationEngine extends EventEmitter {
    * Fail-Closed Approval Waiter
    */
   private async waitForApproval(approvalId: string, abortSignal?: AbortSignal): Promise<boolean> {
-    const maxWaitMs = 10 * 60 * 1000;
-    const checkInterval = 1500;
+    const maxWaitMs = (config.approvalTimeoutSeconds || 600) * 1000;
+    const checkInterval = 1000;
     const start = Date.now();
 
     while (Date.now() - start < maxWaitMs) {
@@ -1131,7 +1213,23 @@ export class OrchestrationEngine extends EventEmitter {
         await approvalRepo.respond(approvalId, 'CANCELLED', 'user_aborted');
         return false;
       }
-      await new Promise((r) => setTimeout(r, checkInterval));
+
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(() => {
+          cleanup();
+          resolve();
+        }, checkInterval);
+        const onAbort = () => {
+          cleanup();
+          resolve();
+        };
+        const cleanup = () => {
+          clearTimeout(timer);
+          abortSignal?.removeEventListener('abort', onAbort);
+        };
+        abortSignal?.addEventListener('abort', onAbort, { once: true });
+      });
+
       if (abortSignal?.aborted) {
         await approvalRepo.respond(approvalId, 'CANCELLED', 'user_aborted');
         return false;
@@ -1140,10 +1238,15 @@ export class OrchestrationEngine extends EventEmitter {
       const record = await approvalRepo.getById(approvalId);
       if (!record) return false;
 
+      if (record.expiresAt && Date.now() > new Date(record.expiresAt).getTime()) {
+        await approvalRepo.respond(approvalId, 'EXPIRED', 'system_timeout');
+        return false;
+      }
+
       if (record.status === 'APPROVED') {
         return true;
       }
-      if (record.status === 'REJECTED' || record.status === 'CANCELLED') {
+      if (record.status === 'REJECTED' || record.status === 'CANCELLED' || record.status === 'EXPIRED') {
         return false;
       }
     }
@@ -1151,6 +1254,69 @@ export class OrchestrationEngine extends EventEmitter {
     // Fail-Closed on timeout
     await approvalRepo.respond(approvalId, 'EXPIRED', 'system_timeout');
     return false;
+  }
+
+  /**
+   * P2 FIX: Crash and Restart Recovery.
+   * Scans durable database for tasks left in non-terminal states when the orchestrator process crashed or restarted.
+   * Atomically expires/cancels pending approvals, cleans orphaned worktrees, and transitions tasks to truthful terminal status.
+   */
+  async recoverIncompleteTasks(): Promise<number> {
+    const db = getDb();
+    const nonTerminalStates = [
+      'queued',
+      'discovering',
+      'planning',
+      'ready',
+      'executing',
+      'verifying',
+      'repairing',
+      'awaiting_approval',
+      'cancelling',
+    ];
+    const placeholders = nonTerminalStates.map(() => '?').join(', ');
+    const res = await db.execute({
+      sql: `SELECT * FROM tasks WHERE status IN (${placeholders})`,
+      args: nonTerminalStates,
+    });
+
+    let recoveredCount = 0;
+    for (const row of res.rows) {
+      const taskId = String(row.id);
+      const prevStatus = String(row.status);
+      const workspacePath = String(row.workspacePath);
+
+      // 1. Cancel pending approvals
+      const pendingApprovals = await approvalRepo.getPendingForTask(taskId);
+      for (const a of pendingApprovals) {
+        await approvalRepo.respond(a.id, 'CANCELLED', 'system_restart_recovery');
+      }
+
+      // 2. Clean orphaned worktrees if present
+      try {
+        const worktreeDir = path.join(workspacePath, '.orchestrator_worktrees', taskId);
+        await fs.rm(worktreeDir, { recursive: true, force: true }).catch(() => {});
+      } catch {}
+
+      // 3. Mark task as failed with clear truthful diagnostic
+      await taskRepo.updateStatus(
+        taskId,
+        'failed',
+        `Task was interrupted from state "${prevStatus}" by orchestrator process shutdown or restart before reaching completion.`
+      );
+
+      // 4. Emit durable recovery event
+      await this.emitOrchestratorEvent({
+        taskId,
+        type: 'SYSTEM_RECOVERED',
+        toState: 'failed',
+        message: `Task recovered after process restart. Interrupted state: ${prevStatus}.`,
+      });
+
+      recoveredCount++;
+    }
+
+    return recoveredCount;
   }
 
   /**
