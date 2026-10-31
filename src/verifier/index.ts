@@ -22,6 +22,7 @@ export interface CriterionVerification {
   checkType: 'build' | 'test' | 'diff' | 'file_presence' | 'static_analysis' | 'targeted_check';
   targetCommand?: string;
   exitCode?: number;
+  assertionEvidence?: string;
 }
 
 export interface VerificationReport {
@@ -316,6 +317,7 @@ export class IndependentVerifier {
         let checkType: CriterionVerification['checkType'] = 'targeted_check';
         let targetCommand: string | undefined;
         let exitCode: number | undefined;
+        let assertionEvidence: string | undefined;
 
         const isBuildCriterion =
           lower.includes('build') ||
@@ -417,8 +419,9 @@ export class IndependentVerifier {
               exitCode = testCheck.exitCode;
               satisfied = true;
               evidence = `Explicit verification check "${targetCommand}" verified requirement (exit ${exitCode ?? 0}).`;
+              assertionEvidence = testCheck.output ? testCheck.output.slice(0, 300) : undefined;
             } else {
-              // P0 FIX: Acceptance criteria must be backed by explicit test execution proof, NOT loose diff keyword matching.
+              // P0 FIX (Issue 6): Acceptance criteria must be backed by explicit test execution and assertion proof, NOT loose diff keyword matching.
               const keywords = criterion
                 .toLowerCase()
                 .replace(/[^a-z0-9_]/g, ' ')
@@ -429,10 +432,19 @@ export class IndependentVerifier {
                     !['test', 'pass', 'passes', 'should', 'must', 'with', 'when', 'from', 'that', 'this'].includes(w)
                 );
 
+              const outputLines = (testCheck.output || '').split('\n');
               const outputLower = (testCheck.output || '').toLowerCase();
               const hasTestPassingIndicator =
                 /(\b[0-9]+\s+passed|\bpassed\b|✓|\bok\b|\bverified\b)/i.test(testCheck.output || '');
               const outputMatches = keywords.filter((kw) => outputLower.includes(kw));
+
+              // Extract exact assertion line from test output confirming this criterion
+              const matchingLine = outputLines.find((line) => {
+                const lineLower = line.toLowerCase();
+                const hasIndicator = /(\bpassed\b|✓|\bok\b|\bverified\b)/i.test(line);
+                const hasKeyword = keywords.some((kw) => lineLower.includes(kw));
+                return hasIndicator && (hasKeyword || keywords.length === 0);
+              });
 
               const hasTargetedTestExecution =
                 hasTestPassingIndicator &&
@@ -442,8 +454,9 @@ export class IndependentVerifier {
                 targetCommand = testCheck.command || meta.testCmd;
                 exitCode = testCheck.exitCode;
                 satisfied = true;
+                assertionEvidence = matchingLine ? matchingLine.trim() : `Output confirmed passing assertions (matched keywords: ${outputMatches.join(', ') || 'suite passed'})`;
                 const matchSummary = outputMatches.length > 0 ? ` [test output matched: ${outputMatches.join(', ')}]` : '';
-                evidence = `Verified via explicit passing test execution: "${targetCommand}" (exit ${exitCode ?? 0})${matchSummary}.`;
+                evidence = `Verified via explicit passing test execution: "${targetCommand}" (exit ${exitCode ?? 0})${matchSummary}. Assertion: "${assertionEvidence}"`;
               } else {
                 satisfied = false;
                 evidence = `Unverified: General test suite executed, but no criterion-specific test assertion or execution evidence confirmed "${criterion}".`;
@@ -463,6 +476,7 @@ export class IndependentVerifier {
           checkType,
           targetCommand,
           exitCode,
+          assertionEvidence,
         });
       }
     }

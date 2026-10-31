@@ -18,9 +18,14 @@ export const AcceptanceCriteriaList: React.FC<AcceptanceCriteriaListProps> = ({
   const statusLower = taskStatus.toLowerCase();
   const isTerminalFailed = ['failed', 'blocked', 'cancelled'].includes(statusLower);
 
-  // Extract latest verification report details
-  const latestVerif = verifications.length > 0 ? verifications[verifications.length - 1] : undefined;
-  let criteriaMap: Map<string, { satisfied: boolean; evidence?: string }> = new Map();
+  // Extract latest verification report details safely by createdAt descending
+  const sortedVerifications = [...verifications].sort((a, b) => {
+    const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+    const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+    return timeB - timeA;
+  });
+  const latestVerif = sortedVerifications.length > 0 ? sortedVerifications[0] : undefined;
+  let criteriaMap: Map<string, { satisfied: boolean; evidence?: string; assertionEvidence?: string }> = new Map();
 
   if (latestVerif) {
     try {
@@ -33,6 +38,7 @@ export const AcceptanceCriteriaList: React.FC<AcceptanceCriteriaListProps> = ({
             criteriaMap.set(cr.criterion.trim().toLowerCase(), {
               satisfied: Boolean(cr.satisfied),
               evidence: cr.evidence,
+              assertionEvidence: cr.assertionEvidence,
             });
           }
         }
@@ -82,6 +88,11 @@ export const AcceptanceCriteriaList: React.FC<AcceptanceCriteriaListProps> = ({
                   <span style={{ fontSize: '0.72rem', color: isIndividuallyVerified ? 'var(--status-success)' : 'var(--status-danger)', opacity: 0.85 }}>
                     {matchedResult.evidence}
                   </span>
+                )}
+                {matchedResult?.assertionEvidence && (
+                  <code style={{ fontSize: '0.68rem', fontFamily: 'monospace', color: 'var(--text-secondary)', background: 'var(--bg-secondary)', padding: '2px 4px', borderRadius: '3px', marginTop: '2px', display: 'inline-block' }}>
+                    {matchedResult.assertionEvidence}
+                  </code>
                 )}
               </div>
             </div>

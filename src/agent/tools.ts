@@ -18,6 +18,28 @@ export interface CommandResult {
 
 export type ApprovalCallback = (commandOrAction: string, risk: ActionPolicy) => Promise<boolean>;
 
+function isDependencyInstallationCommand(cmd: string): boolean {
+  const lower = cmd.toLowerCase().trim();
+  return (
+    lower.startsWith('npm install') ||
+    lower.startsWith('npm i ') ||
+    lower === 'npm i' ||
+    lower.startsWith('npm ci') ||
+    lower.startsWith('yarn add') ||
+    lower.startsWith('yarn install') ||
+    lower.startsWith('pnpm add') ||
+    lower.startsWith('pnpm install') ||
+    lower.startsWith('pnpm i') ||
+    lower.startsWith('pip install') ||
+    lower.startsWith('poetry add') ||
+    lower.startsWith('poetry install') ||
+    lower.startsWith('cargo fetch') ||
+    lower.startsWith('cargo build') ||
+    lower.startsWith('go mod download') ||
+    lower.startsWith('go get')
+  );
+}
+
 export class AgentToolbox {
   private workspacePath: string;
   private onRequestApproval?: ApprovalCallback;
@@ -277,6 +299,10 @@ export class AgentToolbox {
       }
     }
 
+    const isInstallCmd =
+      target.type === 'shell' &&
+      isDependencyInstallationCommand(target.commandStr);
+
     if (isContainerMode) {
       // P0 FIX: Mandatory fail closed if container isolation is enabled but Docker is unavailable
       await ContainerSandbox.assertSandboxAvailable();
@@ -284,7 +310,11 @@ export class AgentToolbox {
       const wrapped = ContainerSandbox.buildDockerRunArgs(this.workspacePath, target, {
         env: sanitizedEnv,
         forwardApiKeys: isExternalAgent,
-        networkMode: isExternalAgent ? (process.env.CONTAINER_SANDBOX_EXTERNAL_AGENT_NETWORK || 'bridge') : undefined,
+        networkMode: isExternalAgent
+          ? (process.env.CONTAINER_SANDBOX_EXTERNAL_AGENT_NETWORK || 'bridge')
+          : isInstallCmd
+            ? (process.env.CONTAINER_SANDBOX_INSTALL_NETWORK || 'bridge')
+            : undefined,
       });
       spawnExec = wrapped.executable;
       spawnArgs = wrapped.args;

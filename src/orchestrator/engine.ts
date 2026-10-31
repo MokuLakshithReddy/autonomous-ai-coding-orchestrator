@@ -350,38 +350,54 @@ export class OrchestrationEngine extends EventEmitter {
     checkBudgetOrAbort();
 
     // 2. Planning Phase
-    await this.transitionTaskState(taskId, stateMachine, 'planning', 'Formulating structured execution plan');
-    const plan: ExecutionPlan = await brain.generatePlan(params.prompt, repoMeta, { abortSignal: abortController.signal });
-    // P1 FIX: Topologically sequence milestones so prerequisite dependencies execute strictly prior to dependent downstream steps
-    plan.steps = topologicallySortPlanSteps(plan.steps);
-    await taskRepo.updatePlan(taskId, JSON.stringify(plan));
+    let plan: ExecutionPlan;
+    let stepRecords: StepRecord[] = await stepRepo.listForTask(taskId);
+    const existingTask = await taskRepo.getById(taskId);
 
-    await this.emitOrchestratorEvent({
-      taskId,
-      type: 'PLAN_GENERATED',
-      message: `Plan formulated with ${plan.steps.length} milestones and ${plan.acceptanceCriteria.length} acceptance criteria.`,
-      data: plan,
-    });
-
-    // Create DB records for plan steps
-    const stepRecords: StepRecord[] = [];
-    for (const step of plan.steps) {
-      const stepRecord: StepRecord = {
-        id: crypto.randomUUID(),
+    if (existingTask?.planJson && stepRecords.length > 0) {
+      // P1 FIX (Issue 1): Reuse existing plan and completed step records on resumption
+      plan = JSON.parse(existingTask.planJson);
+      await this.emitOrchestratorEvent({
         taskId,
-        stepIndex: step.index,
-        title: step.title,
-        instruction: step.instruction,
-        status: 'PENDING',
-        agent: agent.name,
-        createdAt: new Date().toISOString(),
-      };
-      await stepRepo.create(stepRecord);
-      stepRecords.push(stepRecord);
+        type: 'LOG',
+        message: `Resuming existing plan with ${plan.steps.length} milestones (${stepRecords.filter((s) => s.status === 'COMPLETED').length} already completed).`,
+      });
+    } else {
+      await this.transitionTaskState(taskId, stateMachine, 'planning', 'Formulating structured execution plan');
+      plan = await brain.generatePlan(params.prompt, repoMeta, { abortSignal: abortController.signal });
+      // P1 FIX: Topologically sequence milestones so prerequisite dependencies execute strictly prior to dependent downstream steps
+      plan.steps = topologicallySortPlanSteps(plan.steps);
+      await taskRepo.updatePlan(taskId, JSON.stringify(plan));
+
+      await this.emitOrchestratorEvent({
+        taskId,
+        type: 'PLAN_GENERATED',
+        message: `Plan formulated with ${plan.steps.length} milestones and ${plan.acceptanceCriteria.length} acceptance criteria.`,
+        data: plan,
+      });
+
+      // Create DB records for plan steps
+      stepRecords = [];
+      for (const step of plan.steps) {
+        const stepRecord: StepRecord = {
+          id: crypto.randomUUID(),
+          taskId,
+          stepIndex: step.index,
+          title: step.title,
+          instruction: step.instruction,
+          status: 'PENDING',
+          agent: agent.name,
+          createdAt: new Date().toISOString(),
+        };
+        await stepRepo.create(stepRecord);
+        stepRecords.push(stepRecord);
+      }
     }
 
-    // Transition to Ready
-    await this.transitionTaskState(taskId, stateMachine, 'ready', 'Plan approved and ready for execution');
+    // Transition to Ready if not already ready
+    if (stateMachine.getState() !== 'ready') {
+      await this.transitionTaskState(taskId, stateMachine, 'ready', 'Plan approved and ready for execution');
+    }
 
     // 3. Step Execution Loop
     for (let i = 0; i < plan.steps.length; i++) {
@@ -389,6 +405,18 @@ export class OrchestrationEngine extends EventEmitter {
 
       const step = plan.steps[i];
       const stepRec = stepRecords[i];
+      if (!stepRec) continue;
+
+      // P1 FIX (Issue 1): If step was already completed in prior run, skip execution and preserve progress
+      if (stepRec.status === 'COMPLETED') {
+        await this.emitOrchestratorEvent({
+          taskId,
+          stepId: stepRec.id,
+          type: 'STEP_COMPLETED',
+          message: `Step ${step.index} ("${step.title}") was already completed in previous run. Preserving progress.`,
+        });
+        continue;
+      }
       const targetFiles = step.targetFiles || [];
 
       // P2 FIX: Enforce Plan Step Dependencies
@@ -1132,7 +1160,8 @@ export class OrchestrationEngine extends EventEmitter {
       if (taskWorktreePath) {
         try {
           if (isWorktree) {
-            // Check for uncommitted work and commit snapshot to task branch before removing worktree directory
+            // P1 FIX (Issue 3): Check for uncommitted work and commit snapshot to task branch before removing worktree directory
+            let snapshotPreserved = true;
             try {
               const gitStatus = await (taskInspector as any).git.status();
               if (!gitStatus.isClean()) {
@@ -1141,8 +1170,19 @@ export class OrchestrationEngine extends EventEmitter {
                   `Task ${taskId} recovery snapshot: uncommitted work preserved on branch ${taskBranchName || 'task'}`
                 );
               }
-            } catch {}
-            await inspector.removeIsolatedWorktree(taskWorktreePath);
+            } catch (snapErr) {
+              snapshotPreserved = false;
+              console.error(`Failed to create safe recovery snapshot for task ${taskId}:`, snapErr);
+            }
+
+            if (snapshotPreserved) {
+              await inspector.removeIsolatedWorktree(taskWorktreePath);
+            } else {
+              // P1 FIX (Issue 3): NEVER delete dirty worktree when snapshot creation failed. Quarantine it safely.
+              console.warn(
+                `Safety Preservation [Quarantine]: Preserving uncommitted worktree at "${taskWorktreePath}" because snapshot creation failed. Work is retained safely.`
+              );
+            }
           } else {
             await inspector.removeIsolatedSandbox(taskWorktreePath);
           }
@@ -1312,11 +1352,38 @@ export class OrchestrationEngine extends EventEmitter {
         await approvalRepo.respond(a.id, 'CANCELLED', 'system_restart_recovery');
       }
 
-      // 2. Clean orphaned worktrees if present
+      // 2. Clean orphaned worktrees if present, strictly preserving any uncommitted work
       try {
         const worktreeDir = path.join(workspacePath, '.orchestrator_worktrees', taskId);
-        await fs.rm(worktreeDir, { recursive: true, force: true }).catch(() => {});
-      } catch {}
+        const exists = await fs.stat(worktreeDir).then((s) => s.isDirectory()).catch(() => false);
+        if (exists) {
+          const inspector = new RepoInspector(workspacePath);
+          const taskInspector = new RepoInspector(worktreeDir);
+          let snapshotCommitted = false;
+          try {
+            const gitStatus = await (taskInspector as any).git.status();
+            if (!gitStatus.isClean()) {
+              await (taskInspector as any).git.add(['-A']);
+              await (taskInspector as any).git.commit(
+                `Crash recovery snapshot: preserved uncommitted work for task ${taskId} on branch task/${taskId.slice(0, 8)}`
+              );
+              snapshotCommitted = true;
+            } else {
+              snapshotCommitted = true;
+            }
+          } catch (snapErr) {
+            console.error(`Crash recovery: failed to commit snapshot for task ${taskId}:`, snapErr);
+          }
+
+          if (snapshotCommitted) {
+            await inspector.removeIsolatedWorktree(worktreeDir);
+          } else {
+            console.warn(`Safety Preservation [Quarantine]: Preserving dirty worktree at "${worktreeDir}" for investigation.`);
+          }
+        }
+      } catch (recErr) {
+        console.error(`Crash recovery error for worktree of task ${taskId}:`, recErr);
+      }
 
       // 3. Mark task as failed with clear truthful diagnostic
       await taskRepo.updateStatus(
@@ -1340,7 +1407,7 @@ export class OrchestrationEngine extends EventEmitter {
   }
 
   /**
-   * P1 FIX: Durable task resumption.
+   * P1 FIX (Issue 1): Durable task resumption.
    * Rehydrates paused, blocked, human-review, or interrupted tasks from durable records
    * and continues execution safely without stranding tasks.
    */
@@ -1361,16 +1428,17 @@ export class OrchestrationEngine extends EventEmitter {
       throw new Error(`Task "${taskId}" is already executing.`);
     }
 
-    const resumableStates = ['blocked', 'needs_human_review', 'failed', 'queued', 'ready'];
+    const resumableStates = ['blocked', 'needs_human_review', 'failed', 'queued', 'ready', 'partially_completed'];
     if (!resumableStates.includes(existing.status)) {
       throw new Error(
-        `Task "${taskId}" has status "${existing.status}" which cannot be resumed. Resumption is permitted only for blocked, needs_human_review, failed, or ready tasks.`
+        `Task "${taskId}" has status "${existing.status}" which cannot be resumed. Resumption is permitted only for blocked, needs_human_review, failed, partially_completed, or ready tasks.`
       );
     }
 
     const attemptId = crypto.randomUUID();
     const abortController = new AbortController();
-    const stateMachine = new TaskStateMachine(existing.status as any);
+    // P1 FIX (Issue 1): Construct state machine in 'ready' state to avoid terminal state lock
+    const stateMachine = new TaskStateMachine('ready');
 
     const activeTaskEntry = {
       abortController,

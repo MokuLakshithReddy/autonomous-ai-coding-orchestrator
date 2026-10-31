@@ -349,6 +349,7 @@ export class RepoInspector {
 
   /**
    * P0 FIX: Creates an isolated Git worktree for executing a task without touching user working directory.
+   * P1 FIX (Issue 2): Reuses existing task branch on resumption and NEVER overwrites with -B.
    * Throws strictly on failure so the orchestrator never silently falls back to the user workspace.
    */
   async createIsolatedWorktree(taskId: string): Promise<string> {
@@ -359,17 +360,63 @@ export class RepoInspector {
     const worktreeDir = path.join(this.workspacePath, '.orchestrator_worktrees', taskId);
     await fs.mkdir(path.dirname(worktreeDir), { recursive: true });
 
+    // Clean up any stale worktree registration for this path
+    try {
+      await this.git.raw(['worktree', 'prune']);
+    } catch {}
+
     const branchName = `task/${taskId.slice(0, 8)}`;
     try {
-      await this.git.raw(['worktree', 'add', '-B', branchName, worktreeDir, 'HEAD']);
+      const branchList = await this.git.branchLocal();
+      const branchExists = branchList.all.includes(branchName);
+
+      if (branchExists) {
+        // P1 FIX (Issue 2): Re-use existing branch when resuming - NEVER reset with -B!
+        await this.git.raw(['worktree', 'add', worktreeDir, branchName]);
+      } else {
+        // Allocate new task branch from HEAD
+        await this.git.raw(['worktree', 'add', '-b', branchName, worktreeDir, 'HEAD']);
+      }
     } catch (err: any) {
       throw new Error(`Git worktree allocation failed: ${err.message || String(err)}`);
     }
 
-    // P1 FIX: Do NOT create mutable symlinks to parent node_modules or .venv.
-    // Preserves parent workspace integrity and prevents task package installations from mutating user environment.
+    // P0 FIX (Issue 5): Mask tracked/untracked credentials in the worktree filesystem so external agents cannot read them
+    await this.sanitizeWorktreeSecrets(worktreeDir);
 
     return worktreeDir;
+  }
+
+  /**
+   * P0 FIX (Issue 5): Masks sensitive secret files (.env, credentials) in the isolated worktree
+   * so untrusted commands and external coding agents cannot read or exfiltrate them.
+   */
+  async sanitizeWorktreeSecrets(worktreeDir: string): Promise<void> {
+    const sensitiveFileNames = [
+      '.env',
+      '.env.local',
+      '.env.development',
+      '.env.production',
+      '.env.test',
+      'credentials.json',
+      'id_rsa',
+      'id_ed25519',
+      'service_account.json',
+    ];
+
+    for (const sf of sensitiveFileNames) {
+      const fullPath = path.join(worktreeDir, sf);
+      try {
+        const stat = await fs.stat(fullPath).catch(() => null);
+        if (stat && stat.isFile()) {
+          await fs.writeFile(
+            fullPath,
+            '# MASKED_BY_ORCHESTRATOR_ISOLATION\n# Real host secrets are prohibited inside isolated task worktrees.\n',
+            'utf8'
+          );
+        }
+      } catch {}
+    }
   }
 
   /**

@@ -1,4 +1,6 @@
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
 import { SecurityPolicyEngine } from './policy.js';
 
 export type ContainerCommandTarget =
@@ -73,9 +75,11 @@ export class ContainerSandbox {
       const execName = normalizedTarget.executable.toLowerCase();
       if (execName.includes('aider')) {
         isExternalAgent = true;
-        defaultImage = process.env.CONTAINER_SANDBOX_AIDER_IMAGE || process.env.CONTAINER_SANDBOX_PYTHON_IMAGE || 'python:3.11-slim';
+        // P0 FIX (Issue 4.A): Prefer official pre-built image containing the Aider binary
+        defaultImage = process.env.CONTAINER_SANDBOX_AIDER_IMAGE || 'paulgauthier/aider:latest';
       } else if (execName.includes('claude')) {
         isExternalAgent = true;
+        // P0 FIX (Issue 4.A): Default to Claude image or node runtime
         defaultImage = process.env.CONTAINER_SANDBOX_CLAUDE_IMAGE || 'node:22-bookworm-slim';
       } else if (['python', 'python3', 'pytest', 'pip', 'unittest'].some((p) => execName.includes(p))) {
         defaultImage = process.env.CONTAINER_SANDBOX_PYTHON_IMAGE || 'python:3.11-slim';
@@ -88,7 +92,7 @@ export class ContainerSandbox {
       const cmd = normalizedTarget.commandStr.toLowerCase();
       if (cmd.startsWith('aider ') || cmd.includes('/aider ')) {
         isExternalAgent = true;
-        defaultImage = process.env.CONTAINER_SANDBOX_AIDER_IMAGE || process.env.CONTAINER_SANDBOX_PYTHON_IMAGE || 'python:3.11-slim';
+        defaultImage = process.env.CONTAINER_SANDBOX_AIDER_IMAGE || 'paulgauthier/aider:latest';
       } else if (cmd.startsWith('claude ') || cmd.includes('/claude ')) {
         isExternalAgent = true;
         defaultImage = process.env.CONTAINER_SANDBOX_CLAUDE_IMAGE || 'node:22-bookworm-slim';
@@ -121,6 +125,46 @@ export class ContainerSandbox {
       '-e', 'CI=true',
       '-e', 'NODE_ENV=development',
     ];
+
+    // P0 FIX (Issue 4.B): Mount Git worktree metadata so git commands inside container resolve gitdir properly
+    try {
+      const gitFilePath = path.join(canonicalWorkspace, '.git');
+      if (fs.existsSync(gitFilePath) && fs.statSync(gitFilePath).isFile()) {
+        const gitFileContent = fs.readFileSync(gitFilePath, 'utf8').trim();
+        const match = gitFileContent.match(/^gitdir:\s*(.+)$/m);
+        if (match && match[1]) {
+          const rawGitDir = match[1].trim();
+          const resolvedGitDir = path.isAbsolute(rawGitDir)
+            ? rawGitDir
+            : path.resolve(canonicalWorkspace, rawGitDir);
+
+          if (fs.existsSync(resolvedGitDir)) {
+            const parentGitDirIndex = resolvedGitDir.lastIndexOf(`${path.sep}.git`);
+            const parentGitDir = parentGitDirIndex !== -1
+              ? resolvedGitDir.slice(0, parentGitDirIndex + 5)
+              : path.dirname(resolvedGitDir);
+
+            const mountSrc = parentGitDir.replace(/\\/g, '/');
+            dockerArgs.push('-v', `${mountSrc}:${mountSrc}:rw`);
+          }
+        }
+      }
+    } catch {}
+
+    // P0 FIX (Issue 5): Kernel-level container boundary secret protection.
+    // Mount empty read-only devices over any sensitive files in the workspace so processes/agents inside container cannot exfiltrate them.
+    try {
+      const sensitiveFilesToCheck = [
+        '.env', '.env.local', '.env.development', '.env.production', '.env.test',
+        'credentials.json', 'id_rsa', 'id_ed25519', 'service_account.json'
+      ];
+      for (const sf of sensitiveFilesToCheck) {
+        const fullP = path.join(canonicalWorkspace, sf);
+        if (fs.existsSync(fullP)) {
+          dockerArgs.push('-v', `/dev/null:/workspace/${sf}:ro`);
+        }
+      }
+    } catch {}
 
     // P0 FIX: Strictly forward agent credentials ONLY when explicitly requested for external agents.
     // Secrets are forwarded by name (-e KEY) rather than (-e KEY=val) so values never appear in process arguments!

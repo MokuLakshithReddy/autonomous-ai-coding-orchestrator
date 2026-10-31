@@ -10,15 +10,16 @@
     "build": "tsc",
     "typecheck": "tsc --project tsconfig.typecheck.json",
     "cli": "tsx src/cli/index.ts",
-    "test": "tsx tests/reviewer-safety.test.ts && tsx tests/p0-truthful-completion.test.ts && tsx tests/e2e-production-readiness.test.ts && tsx tests/autonomous-repair-loop.test.ts && tsx tests/autonomous-repair-benchmarks.test.ts && tsx tests/set-secret.test.ts",
+    "test": "tsx tests/reviewer-safety.test.ts && tsx tests/p0-truthful-completion.test.ts && tsx tests/e2e-production-readiness.test.ts && tsx tests/autonomous-repair-loop.test.ts && tsx tests/autonomous-repair-benchmarks.test.ts && tsx tests/set-secret.test.ts && tsx tests/docker-container.test.ts",
     "test:e2e": "tsx tests/e2e-production-readiness.test.ts",
     "test:reviewer": "tsx tests/reviewer-safety.test.ts",
     "test:agent": "tsx tests/autonomous-repair-loop.test.ts",
+    "test:docker": "tsx tests/docker-container.test.ts",
     "test:benchmarks": "tsx tests/autonomous-repair-benchmarks.test.ts",
     "test:benchmarks:live": "tsx tests/live-llm-benchmarks.test.ts",
     "test:llm": "tsx tests/llm-autonomous-repair.test.ts",
     "benchmark": "tsx benchmarks/runner.ts",
-    "benchmark:live": "tsx benchmarks/runner.ts --live"
+    "benchmark:live": "tsx benchmarks/live-runner.ts"
   },
   "keywords": [
     "ai",

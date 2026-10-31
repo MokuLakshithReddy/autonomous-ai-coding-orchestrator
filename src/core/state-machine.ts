@@ -47,7 +47,7 @@ export class TaskStateMachine {
       'cancelling',
       'failed',
     ],
-    ready: ['executing', 'awaiting_approval', 'cancelling', 'failed'],
+    ready: ['executing', 'awaiting_approval', 'discovering', 'planning', 'cancelling', 'failed'],
     executing: ['verifying', 'awaiting_approval', 'failed', 'cancelling'],
     verifying: [
       'completed',
@@ -65,8 +65,8 @@ export class TaskStateMachine {
     repairing: ['verifying', 'executing', 'awaiting_approval', 'blocked', 'failed', 'cancelling'],
     cancelling: ['cancelled'],
     // Non-terminal escalation states can transition to resume or cancel
-    blocked: ['planning', 'ready', 'cancelling', 'failed'],
-    needs_human_review: ['planning', 'ready', 'verifying', 'cancelling', 'failed'],
+    blocked: ['planning', 'ready', 'discovering', 'cancelling', 'failed'],
+    needs_human_review: ['planning', 'ready', 'verifying', 'discovering', 'cancelling', 'failed'],
     // Terminal states have no forward transitions
     completed: [],
     partially_completed: [],
@@ -82,6 +82,14 @@ export class TaskStateMachine {
 
   getState(): TaskState {
     return this.currentState;
+  }
+
+  /**
+   * P1 FIX: Resets the state machine for a new lifecycle attempt upon resumption.
+   * Clears terminal state locks and sets current state to the resumed entry state.
+   */
+  resetForResume(targetState: TaskState = 'queued'): void {
+    this.currentState = targetState;
   }
 
   isTerminal(): boolean {

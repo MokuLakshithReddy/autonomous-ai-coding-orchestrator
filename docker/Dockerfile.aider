@@ -1,0 +1,20 @@
+FROM python:3.11-slim
+
+# Install system dependencies & Git
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends git curl ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install Aider CLI
+RUN pip install --no-cache-dir aider-chat
+
+# Create non-root unprivileged workspace user matching orchestrator container user
+RUN useradd -u 1000 -m orchestrator && \
+    mkdir -p /workspace && \
+    chown -R orchestrator:orchestrator /workspace
+
+USER orchestrator
+WORKDIR /workspace
+
+ENTRYPOINT ["aider"]
+
