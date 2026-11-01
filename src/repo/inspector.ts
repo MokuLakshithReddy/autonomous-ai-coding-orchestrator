@@ -4,6 +4,7 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import { simpleGit, type SimpleGit, type StatusResult } from 'simple-git';
 import { SecurityPolicyEngine } from '../security/policy.js';
+import { ContainerSandbox } from '../security/sandbox.js';
 
 export interface ProjectMetadata {
   isGitRepo: boolean;
@@ -350,6 +351,13 @@ export class RepoInspector {
             continue;
           }
 
+          // P1 FIX (Issue 3): Content-based secret detection - NEVER stage files containing embedded secrets!
+          const fullPath = path.isAbsolute(file) ? file : path.join(this.workspacePath, file);
+          if (ContainerSandbox.fileContainsSecrets(fullPath, relPath)) {
+            console.warn(`[Checkpoint Protection] Skipping file containing embedded secrets from staging: ${relPath}`);
+            continue;
+          }
+
           // Strict P0 Protection: Do not stage files that already had pre-existing user modifications!
           if (isIsolatedWorktree || !initialDirtySet.has(relPath)) {
             filesToStage.push(relPath);
@@ -368,6 +376,13 @@ export class RepoInspector {
             continue;
           }
 
+          // P1 FIX (Issue 3): Content-based secret detection - NEVER stage files containing embedded secrets!
+          const fullPath = path.join(this.workspacePath, file.path);
+          if (ContainerSandbox.fileContainsSecrets(fullPath, file.path)) {
+            console.warn(`[Checkpoint Protection] Skipping file containing embedded secrets from staging: ${file.path}`);
+            continue;
+          }
+
           if (isIsolatedWorktree || !initialDirtySet.has(file.path)) {
             filesToStage.push(file.path);
           }
@@ -380,13 +395,27 @@ export class RepoInspector {
         return log.latest ? log.latest.hash : null;
       }
 
+      // P1 FIX (Issue 1): Do not swallow individual staging errors. Fail closed on staging failure.
       for (const f of filesToStage) {
         try {
           await this.git.add(f);
-        } catch {}
+        } catch (addErr: any) {
+          throw new Error(`Failed to stage eligible file "${f}": ${addErr?.message || addErr}`);
+        }
       }
 
       const commitResult = await this.git.commit(message, undefined, { '--allow-empty': null });
+
+      // P1 FIX (Issue 1): Inspect post-commit status to verify that staged eligible files were committed
+      const postStatus = await this.git.status();
+      const stillUncommitted = postStatus.files.filter((f) => filesToStage.includes(f.path));
+      if (stillUncommitted.length > 0) {
+        console.warn(
+          `[Checkpoint Verification] Staged files remain uncommitted after commit: ${stillUncommitted.map((f) => f.path).join(', ')}`
+        );
+        return null;
+      }
+
       return commitResult.commit;
     } catch (err) {
       console.error('Failed to create safe git checkpoint:', err);
@@ -398,11 +427,33 @@ export class RepoInspector {
    * P1 FIX: Dedicated safe recovery snapshot function.
    * Applies the exact same sensitive-file filtering and committer identity as normal checkpoints.
    * NEVER runs unrestricted `git add -A` against sensitive files or secrets.
+   * Verifies that all eligible uncommitted files were committed; returns null if any remain so
+   * orchestrator preserves/quarantines worktree safely.
    */
   async createSafeRecoverySnapshot(message: string): Promise<string | null> {
     try {
       if (!(await this.isGitRepository())) return null;
-      return await this.createTaskCheckpoint([], message);
+      const commit = await this.createTaskCheckpoint([], message);
+      if (!commit) return null;
+
+      // P1 FIX (Issue 1): Verify that all eligible files were actually committed.
+      // If any eligible uncommitted files remain, return null so the worktree is quarantined.
+      const currentStatus = await this.git.status();
+      const uncommittedEligible = currentStatus.files.filter((file) => {
+        if (SecurityPolicyEngine.isSensitiveSecret(file.path)) return false;
+        const fullPath = path.join(this.workspacePath, file.path);
+        if (ContainerSandbox.fileContainsSecrets(fullPath, file.path)) return false;
+        return true;
+      });
+
+      if (uncommittedEligible.length > 0) {
+        console.warn(
+          `[Safe Recovery Snapshot] ${uncommittedEligible.length} eligible file(s) remain uncommitted after snapshot commit: ${uncommittedEligible.map((f) => f.path).join(', ')}. Marking snapshot incomplete to preserve worktree.`
+        );
+        return null;
+      }
+
+      return commit;
     } catch (err: any) {
       console.error(`[Safe Recovery Snapshot] Failed to create recovery snapshot: ${err?.message}`);
       return null;
@@ -605,21 +656,20 @@ export class RepoInspector {
     }
 
     const sanitizeEntry = async (fullPath: string, relPath: string) => {
+      // P1 FIX (Issue 2): NEVER delete or overwrite tracked repository files or symlinks!
+      // Tracked files and symlinks must remain intact in the clone so Git history and working tree are not corrupted.
+      // Container isolation masks sensitive paths safely via read-only bind mounts at the container boundary.
+      if (trackedFiles.has(relPath)) {
+        return;
+      }
+
       const lstat = await fs.lstat(fullPath);
       if (lstat.isSymbolicLink()) {
-        // Untrusted symlink detected (e.g. .env -> ../../../../etc/passwd)
-        // NEVER follow symlink or write through it! Safely remove the symlink itself:
+        // Untrusted untracked symlink detected (e.g. .env -> ../../../../etc/passwd)
+        // NEVER follow symlink or write through it! Safely remove the untracked symlink:
         await fs.unlink(fullPath);
-        if (!trackedFiles.has(relPath)) {
-          await fs.writeFile(fullPath, placeholder, { encoding: 'utf8', flag: 'w' });
-        }
+        await fs.writeFile(fullPath, placeholder, { encoding: 'utf8', flag: 'w' });
       } else if (lstat.isFile()) {
-        // P1 FIX (Issue 2): NEVER overwrite tracked repository files with placeholders!
-        // Tracked files must remain intact; container sandbox mounts empty masks over them.
-        if (trackedFiles.has(relPath)) {
-          return;
-        }
-
         // Verify canonical path containment before modifying untracked secret file
         const canonicalFile = SecurityPolicyEngine.resolveCanonicalPath(fullPath);
         if (canonicalFile.startsWith(canonicalWorktree + path.sep) || canonicalFile === canonicalWorktree) {

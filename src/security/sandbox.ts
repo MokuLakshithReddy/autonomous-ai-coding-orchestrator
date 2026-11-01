@@ -54,11 +54,13 @@ export class ContainerSandbox {
   ]);
 
   /**
-   * P0 FIX: Scans complete file content for sensitive secrets using bounded streaming with overlap.
+   * P0/P2 FIX (Issues 3 & 4): Scans complete file content for sensitive secrets using bounded streaming with overlap.
    * - Scans entire file length across 64 KB chunks with 512-byte overlap so tokens spanning chunk
    *   boundaries are never missed.
    * - If a non-binary file exceeds the maximum scan budget (50 MB), fails closed and flags it as sensitive
    *   so uninspected files are automatically masked at the container boundary.
+   * - P2 FIX (Issue 4): Fails closed on incomplete reads, unexpected EOF, or concurrent file modification.
+   *   Requires bytes scanned to match expected file length and validates file stat post-scan.
    * - Throws a Security Exception if an unreadable file cannot be inspected, preventing un-isolated execution.
    */
   static fileContainsSecrets(fullPath: string, relPath: string): boolean {
@@ -69,11 +71,18 @@ export class ContainerSandbox {
 
     let stat: fs.Stats;
     try {
-      stat = fs.statSync(fullPath);
+      stat = fs.lstatSync(fullPath);
     } catch (err: any) {
+      if (err.code === 'ENOENT') {
+        return false;
+      }
       throw new Error(
         `Security Exception: Failed to stat file "${fullPath}" during mandatory secret scan: ${err.message}`
       );
+    }
+
+    if (!stat.isFile()) {
+      return false;
     }
 
     // Fail-closed for enormous text files: if exceeding 50 MB, mask it automatically
@@ -95,6 +104,9 @@ export class ContainerSandbox {
     try {
       fd = fs.openSync(fullPath, 'r');
     } catch (err: any) {
+      if (err.code === 'ENOENT') {
+        return false;
+      }
       throw new Error(
         `Security Exception: Failed to open file "${fullPath}" during mandatory secret scan: ${err.message}`
       );
@@ -124,8 +136,26 @@ export class ContainerSandbox {
         offset += bytesRead;
       }
 
+      // P2 FIX (Issue 4): Fail closed if file read was incomplete or truncated mid-scan
+      if (offset < stat.size) {
+        throw new Error(
+          `Security Exception: File "${fullPath}" truncated or read incomplete during mandatory secret scan. Expected ${stat.size} bytes, read ${offset} bytes.`
+        );
+      }
+
+      // P2 FIX (Issue 4): Re-verify file metadata post-scan to fail closed against concurrent modifications
+      const postStat = fs.lstatSync(fullPath);
+      if (postStat.mtimeMs !== stat.mtimeMs || postStat.size !== stat.size) {
+        throw new Error(
+          `Security Exception: File "${fullPath}" was modified concurrently during mandatory secret scan. Initial size: ${stat.size}, current size: ${postStat.size}. Failing closed.`
+        );
+      }
+
       return false;
     } catch (readErr: any) {
+      if (readErr.message?.startsWith('Security Exception:')) {
+        throw readErr;
+      }
       throw new Error(
         `Security Exception: Failed to stream-inspect file content at "${fullPath}" during mandatory secret scan: ${readErr.message}. Cannot guarantee isolation.`
       );

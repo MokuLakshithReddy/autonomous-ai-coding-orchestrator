@@ -2,6 +2,7 @@ import assert from 'node:assert';
 import path from 'node:path';
 import os from 'node:os';
 import fs from 'node:fs/promises';
+import nodeFs from 'node:fs';
 import { ContainerSandbox } from '../src/security/sandbox.js';
 import { AgentToolbox } from '../src/agent/tools.js';
 
@@ -305,6 +306,89 @@ async function runDockerContainerTests() {
         await fs.unlink(untrustedSymlinkRoot);
       } catch {}
     }
+
+    // -------------------------------------------------------------------------
+    // Test 11: Fail-Closed Streaming Secret Scan on Incomplete Read / File Truncation (P2)
+    // -------------------------------------------------------------------------
+    console.log('11. Testing Fail-Closed Streaming Secret Scan on Incomplete Read / Truncation...');
+    const scanTestFile = path.join(testDir, 'concurrent_file.txt');
+    await fs.writeFile(scanTestFile, 'Initial content that will be inspected '.repeat(200));
+
+    // Normal scan on clean file succeeds without throwing
+    const cleanScan = ContainerSandbox.fileContainsSecrets(scanTestFile, 'concurrent_file.txt');
+    assert.strictEqual(cleanScan, false, 'Clean file without secrets must return false');
+
+    // Test that a file with embedded secret returns true
+    const secretScanFile = path.join(testDir, 'secret_file.txt');
+    await fs.writeFile(secretScanFile, 'apiKey = "sk-ant-api03-abcdefabcdefabcdefabcdef12345678"');
+    const hasSecretScan = ContainerSandbox.fileContainsSecrets(secretScanFile, 'secret_file.txt');
+    assert.strictEqual(hasSecretScan, true, 'File with embedded secret must be detected');
+
+    // Simulate mid-scan file truncation by overriding nodeFs.readSync during scan to simulate short read
+    const origReadSync = nodeFs.readSync;
+    let injectShortRead = true;
+    (nodeFs as any).readSync = function (fd: number, buffer: any, offset: number, length: number, position: number) {
+      if (injectShortRead && position > 0) {
+        return 0; // Simulate premature EOF before reaching expected size
+      }
+      return origReadSync(fd, buffer, offset, length, position);
+    };
+
+    try {
+      const largeTestFile = path.join(testDir, 'large_truncation_test.txt');
+      await fs.writeFile(largeTestFile, 'Some data chunk '.repeat(10000)); // ~160 KB
+      assert.throws(
+        () => ContainerSandbox.fileContainsSecrets(largeTestFile, 'large_truncation_test.txt'),
+        /Security Exception.*truncated or read incomplete/,
+        'Must fail closed when file read is truncated mid-scan'
+      );
+      console.log('   ✓ Incomplete read / unexpected EOF mid-scan fails closed with Security Exception.');
+    } finally {
+      injectShortRead = false;
+      (nodeFs as any).readSync = origReadSync;
+    }
+
+    // -------------------------------------------------------------------------
+    // Test 12: Recovery Snapshot Content-Based Secret Exclusion & Worktree Quarantine (P1)
+    // -------------------------------------------------------------------------
+    console.log('12. Testing Recovery Snapshot Content Secret Exclusion & Worktree Quarantine...');
+    const snapRepoDir = path.join(testDir, 'snap-repo');
+    await fs.mkdir(snapRepoDir, { recursive: true });
+    const snapGit = simpleGit(snapRepoDir);
+    await snapGit.init();
+    await snapGit.addConfig('user.name', 'Snapshot Tester', false, 'local');
+    await snapGit.addConfig('user.email', 'snapshot@local', false, 'local');
+
+    await fs.writeFile(path.join(snapRepoDir, 'main.js'), 'console.log("initial");\n');
+    await snapGit.add('.');
+    await snapGit.commit('Initial base commit');
+
+    const snapInspector = new RepoInspector(snapRepoDir);
+    await snapInspector.captureBaseline();
+
+    // Add safe file and a file with embedded credential
+    await fs.writeFile(path.join(snapRepoDir, 'safe-feature.js'), 'export const feature = "safe";\n');
+    await fs.writeFile(
+      path.join(snapRepoDir, 'credentials_in_ordinary.js'),
+      'export const key = "ghp_123456789012345678901234567890123456";\n'
+    );
+
+    // createSafeRecoverySnapshot must NOT stage credentials_in_ordinary.js!
+    // And because credentials_in_ordinary.js contains secrets and cannot be committed,
+    // wait: uncommittedEligible in createSafeRecoverySnapshot only counts non-secret files!
+    // But safe-feature.js is staged and committed!
+    const snapCommit = await snapInspector.createSafeRecoverySnapshot('Recovery snapshot test');
+    assert.ok(snapCommit, 'Recovery snapshot must commit eligible safe changes');
+
+    // Verify git log: safe-feature.js was committed, credentials_in_ordinary.js was NOT
+    const showDiff = await snapGit.show([snapCommit]);
+    assert.ok(showDiff.includes('safe-feature.js'), 'Safe file must be committed in recovery snapshot');
+    assert.ok(
+      !showDiff.includes('credentials_in_ordinary.js'),
+      'File with embedded secrets must NEVER be staged or committed in recovery snapshot!'
+    );
+
+    console.log('   ✓ Embedded secrets excluded from recovery snapshots; safe changes committed.');
 
     console.log('\n=== ALL DOCKER CONTAINER TESTS PASSED! ===\n');
   } finally {
