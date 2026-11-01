@@ -16,5 +16,6 @@ RUN useradd -u 1000 -m orchestrator && \
 USER orchestrator
 WORKDIR /workspace
 
-ENTRYPOINT ["claude"]
+# Use CMD instead of ENTRYPOINT so orchestrator can invoke claude or sub-commands without duplicate binary execution
+CMD ["claude", "--help"]
 

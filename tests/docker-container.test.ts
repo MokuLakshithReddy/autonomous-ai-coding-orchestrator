@@ -29,7 +29,7 @@ async function runDockerContainerTests() {
       executable: 'claude',
       args: ['--help'],
     });
-    assert.ok(claudeArgs.args.includes('node:22-bookworm-slim') || claudeArgs.args.some(a => a.includes('claude')), 'Must select Claude container image');
+    assert.ok(claudeArgs.args.includes('orchestrator-claude:latest') || claudeArgs.args.some(a => a.includes('claude')), 'Must select Claude container image');
 
     const pyArgs = ContainerSandbox.buildDockerRunArgs(testDir, 'pytest tests/');
     assert.ok(pyArgs.args.includes('python:3.11-slim'), 'Must select Python container image for pytest');
@@ -42,11 +42,34 @@ async function runDockerContainerTests() {
     console.log('   ✓ Image selection correctly adapts to runtime ecosystem.');
 
     // -------------------------------------------------------------------------
-    // Test 2: Network Routing (Install vs Non-Install)
+    // Test 2: External Agent Command Construction (No Duplicate Entrypoints)
     // -------------------------------------------------------------------------
-    console.log('2. Testing network containment vs dependency installation routing...');
-    const toolbox = new AgentToolbox(testDir);
+    console.log('2. Testing external agent command argument construction...');
+    const aiderExecArgs = ContainerSandbox.buildDockerRunArgs(testDir, {
+      type: 'exec',
+      executable: 'aider',
+      args: ['--version'],
+    });
+    const aiderImgIdx = aiderExecArgs.args.indexOf('paulgauthier/aider:latest');
+    const argsAfterAiderImg = aiderExecArgs.args.slice(aiderImgIdx + 1);
+    assert.strictEqual(argsAfterAiderImg[0], 'aider', 'Must pass executable once');
+    assert.notStrictEqual(argsAfterAiderImg[1], 'aider', 'Must NOT duplicate executable name after image');
 
+    const claudeExecArgs = ContainerSandbox.buildDockerRunArgs(testDir, {
+      type: 'exec',
+      executable: 'claude',
+      args: ['--help'],
+    });
+    const claudeImgIdx = claudeExecArgs.args.findIndex(a => a.includes('claude'));
+    const argsAfterClaudeImg = claudeExecArgs.args.slice(claudeImgIdx + 1);
+    assert.strictEqual(argsAfterClaudeImg[0], 'claude', 'Must pass executable once');
+    assert.notStrictEqual(argsAfterClaudeImg[1], 'claude', 'Must NOT duplicate executable name after image');
+    console.log('   ✓ External agent adapters construct clean command lines without duplicate entrypoints.');
+
+    // -------------------------------------------------------------------------
+    // Test 3: Network Routing (Install vs Non-Install)
+    // -------------------------------------------------------------------------
+    console.log('3. Testing network containment vs dependency installation routing...');
     // Regular test / run command must default to network none
     const testCmdArgs = ContainerSandbox.buildDockerRunArgs(testDir, 'npm test');
     assert.ok(testCmdArgs.args.includes('--network'), 'Must include --network');
@@ -60,55 +83,63 @@ async function runDockerContainerTests() {
     console.log('   ✓ Network mode correctly isolated to none by default, bridged for installations.');
 
     // -------------------------------------------------------------------------
-    // Test 3: Kernel-Level Boundary Secret Masking (/dev/null mounts)
+    // Test 4: Cross-Platform Kernel Boundary Secret Masking (--mount type=bind)
     // -------------------------------------------------------------------------
-    console.log('3. Testing kernel boundary secret protection via /dev/null mounts...');
+    console.log('4. Testing cross-platform secret masking via --mount type=bind...');
     await fs.writeFile(path.join(testDir, '.env'), 'SECRET_KEY=supersecret');
     await fs.writeFile(path.join(testDir, 'credentials.json'), '{"apiKey": "secret"}');
 
     const secretMaskArgs = ContainerSandbox.buildDockerRunArgs(testDir, 'node app.js');
-    const mounts = secretMaskArgs.args.filter((_, idx, arr) => arr[idx - 1] === '-v');
+    const mounts = secretMaskArgs.args.filter((_, idx, arr) => arr[idx - 1] === '--mount');
 
     assert.ok(
-      mounts.some((m) => m.includes('/dev/null:/workspace/.env:ro')),
-      'Must mount /dev/null over .env to block exfiltration inside container'
+      mounts.some((m) => m.includes('target=/workspace/.env') && m.includes('readonly')),
+      'Must mount empty placeholder over .env with readonly flag'
     );
     assert.ok(
-      mounts.some((m) => m.includes('/dev/null:/workspace/credentials.json:ro')),
-      'Must mount /dev/null over credentials.json to block exfiltration inside container'
+      mounts.some((m) => m.includes('target=/workspace/credentials.json') && m.includes('readonly')),
+      'Must mount empty placeholder over credentials.json with readonly flag'
     );
-    console.log('   ✓ Sensitive credentials masked with /dev/null:ro mounts.');
-
-    // -------------------------------------------------------------------------
-    // Test 4: Git Worktree Pointer Resolution
-    // -------------------------------------------------------------------------
-    console.log('4. Testing Git worktree metadata resolution in container mounts...');
-    const fakeParentGit = path.join(testDir, 'parent-repo', '.git');
-    const fakeWorktreeGitDir = path.join(fakeParentGit, 'worktrees', 'worktree-1');
-    const fakeWorktree = path.join(testDir, 'worktree-1');
-    await fs.mkdir(fakeWorktreeGitDir, { recursive: true });
-    await fs.mkdir(fakeWorktree, { recursive: true });
-    await fs.writeFile(path.join(fakeWorktree, '.git'), `gitdir: ${fakeWorktreeGitDir}\n`);
-
-    const gitWorktreeArgs = ContainerSandbox.buildDockerRunArgs(fakeWorktree, 'git status');
-    const worktreeMounts = gitWorktreeArgs.args.filter((_, idx, arr) => arr[idx - 1] === '-v');
+    // Ensure invalid /dev/null is NOT used as a bind mount source
     assert.ok(
-      worktreeMounts.some((m) => m.includes(fakeParentGit.replace(/\\/g, '/'))),
-      'Must mount parent .git directory so gitdir pointer resolves inside container'
+      !secretMaskArgs.args.some((a) => a.includes('/dev/null:')),
+      'Must NOT use Unix /dev/null as bind source for cross-platform Windows compatibility'
     );
-    console.log('   ✓ Git worktree metadata path correctly resolved and mounted.');
+    console.log('   ✓ Sensitive credentials masked with cross-platform readonly bind mounts.');
 
     // -------------------------------------------------------------------------
-    // Test 5: Live Docker Daemon Execution (if Docker daemon is online)
+    // Test 5: Host Git Metadata Protection (Zero Write Access to Parent .git)
     // -------------------------------------------------------------------------
-    console.log('5. Checking live Docker daemon availability...');
+    console.log('5. Testing Host Git Metadata Protection (Zero Write Access)...');
+    const gitMountArgs = ContainerSandbox.buildDockerRunArgs(testDir, 'git status');
+    // Ensure parent .git is NEVER mounted with :rw into the container
+    assert.ok(
+      !gitMountArgs.args.some((a) => a.includes('.git') && a.includes(':rw')),
+      'Untrusted container MUST NEVER receive write access to host repository .git'
+    );
+    console.log('   ✓ Container strictly denied write access to host repository Git metadata.');
+
+    // -------------------------------------------------------------------------
+    // Test 6: Live Docker Daemon Execution & Diagnostics
+    // -------------------------------------------------------------------------
+    console.log('6. Checking live Docker daemon availability...');
     const isDockerAvailable = await ContainerSandbox.isDockerAvailable();
     if (isDockerAvailable) {
       console.log('   Docker daemon is active. Running live container sandbox command...');
       const runArgs = ContainerSandbox.buildDockerRunArgs(testDir, 'echo "CONTAINER_ISOLATION_OK"');
       const { spawnSync } = await import('node:child_process');
       const res = spawnSync(runArgs.executable, runArgs.args, { encoding: 'utf8' });
-      assert.strictEqual(res.status, 0, 'Container command must exit with 0');
+
+      if (res.status !== 0) {
+        console.error('Docker command failed!');
+        console.error('Arguments:', runArgs.args.join(' '));
+        console.error('Exit code:', res.status);
+        console.error('Stderr:', res.stderr);
+        console.error('Stdout:', res.stdout);
+        console.error('Error:', res.error);
+      }
+
+      assert.strictEqual(res.status, 0, `Container command must exit with 0 (stderr: ${res.stderr || 'none'})`);
       assert.ok(res.stdout.includes('CONTAINER_ISOLATION_OK'), 'Container output must contain expected stdout');
       console.log('   ✓ Live Docker container execution verified successfully.');
     } else {

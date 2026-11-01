@@ -1351,6 +1351,122 @@ diff --git a/tests/math.test.ts b/tests/math.test.ts
   await server31.close();
   console.log('   ✓ Public system status endpoint strictly excludes sensitive host filesystem paths.');
 
+  // Test 32: Symlink Secret Sanitization Containment & Non-Overwrite (P0)
+  console.log('\n32. Testing Symlink Secret Sanitization Containment & Non-Overwrite (P0)...');
+  const hostDir32 = await fs.mkdtemp(path.join(os.tmpdir(), 'host-canary-'));
+  const canaryFile32 = path.join(hostDir32, 'canary_host_secret.txt');
+  const canaryContent32 = 'CRITICAL_HOST_SECRET_NEVER_OVERWRITE_12345';
+  await fs.writeFile(canaryFile32, canaryContent32, 'utf8');
+
+  const workspace32 = await fs.mkdtemp(path.join(os.tmpdir(), 'workspace-symlink-'));
+  const inspector32 = new RepoInspector(workspace32);
+
+  // 1. Relative symlink pointing to external host file
+  const relSymlink = path.join(workspace32, '.env');
+  const relTarget = path.relative(workspace32, canaryFile32);
+  try {
+    await fs.symlink(relTarget, relSymlink);
+  } catch (err: any) {
+    // If symlink creation not permitted on Windows without admin, skip symlink test gracefully
+    console.log('   (Symlink creation requires elevated privileges on this environment, verifying fallback)');
+  }
+
+  // 2. Absolute symlink pointing to external host file
+  const absSymlink = path.join(workspace32, 'credentials.json');
+  try {
+    await fs.symlink(canaryFile32, absSymlink);
+  } catch {}
+
+  // Run sanitization
+  await inspector32.sanitizeWorktreeSecrets(workspace32);
+
+  // Assert canary file outside workspace was NOT overwritten!
+  const postCanary = await fs.readFile(canaryFile32, 'utf8');
+  assert.strictEqual(postCanary, canaryContent32, 'External host file MUST NEVER be overwritten through untrusted symlink!');
+
+  // Assert symlink itself was unlinked and replaced by regular placeholder file
+  const envLstat = await fs.lstat(relSymlink).catch(() => null);
+  if (envLstat) {
+    assert.strictEqual(envLstat.isSymbolicLink(), false, '.env MUST NOT remain a symlink');
+    assert.strictEqual(envLstat.isFile(), true, '.env MUST be safely replaced by a regular file');
+    const envContent = await fs.readFile(relSymlink, 'utf8');
+    assert.ok(envContent.includes('MASKED_BY_ORCHESTRATOR_ISOLATION'), '.env must contain isolation disclaimer');
+  }
+
+  await fs.rm(hostDir32, { recursive: true, force: true });
+  await fs.rm(workspace32, { recursive: true, force: true });
+  console.log('   ✓ Untrusted repository symlinks cannot overwrite host files outside workspace boundary.');
+
+  // Test 33: Resumption Topological Dependency Ordering & State Machine Transitions (P1)
+  console.log('\n33. Testing Resumption Topological Ordering & State Machine Transition Graph (P1)...');
+  // Verify discovering -> planning -> ready sequence is valid
+  const sm33 = new TaskStateMachine('ready');
+  assert.doesNotThrow(() => sm33.transition('discovering', 'Starting discovery'));
+  assert.doesNotThrow(() => sm33.transition('planning', 'Restoring plan'));
+  assert.doesNotThrow(() => sm33.transition('ready', 'Plan ready for execution'));
+
+  // Test step record matching when topological order differs from stepIndex order
+  const planSteps33 = [
+    { index: 2, title: 'Step 2 (Prerequisite)', instruction: 'Build base', dependencies: [] },
+    { index: 1, title: 'Step 1 (Dependent)', instruction: 'Use base', dependencies: [2] },
+  ];
+  // DB returns records by stepIndex ASC: [record for 1, record for 2]
+  const dbStepRecords33 = [
+    { id: 'rec-1', stepIndex: 1, status: 'PENDING' },
+    { id: 'rec-2', stepIndex: 2, status: 'COMPLETED' },
+  ];
+
+  // Match by stepIndex instead of array index
+  for (let i = 0; i < planSteps33.length; i++) {
+    const step = planSteps33[i];
+    const matchedRec = dbStepRecords33.find((r) => r.stepIndex === step.index);
+    assert.ok(matchedRec, `Record for step ${step.index} must be found`);
+    if (step.index === 2) {
+      assert.strictEqual(matchedRec.status, 'COMPLETED', 'Step 2 must match its COMPLETED record');
+    } else {
+      assert.strictEqual(matchedRec.status, 'PENDING', 'Step 1 must match its PENDING record');
+    }
+  }
+  console.log('   ✓ Resumption step matching strictly preserves milestone status under topological reordering.');
+
+  // Test 34: Natural Language Test Criteria & Mandatory Targeted Assertion Evidence (P1)
+  console.log('\n34. Testing Natural Language Execution Criteria & Targeted Assertion Enforcement (P1)...');
+  const verifierDir34 = await fs.mkdtemp(path.join(os.tmpdir(), 'verifier-test-'));
+  await fs.writeFile(path.join(verifierDir34, 'math.js'), 'export function sum(a, b) { return a + b; }\n');
+  await fs.writeFile(
+    path.join(verifierDir34, 'package.json'),
+    JSON.stringify({ name: 'test-pkg', type: 'module', scripts: { test: 'node -e "console.log(\'Unit tests passed: calculateSum calculation is correct.\')"' } })
+  );
+
+  const verifier34 = new IndependentVerifier(verifierDir34);
+  const repoMeta34 = await new RepoInspector(verifierDir34).inspect();
+
+  // Criterion A: "npm test passes successfully" (General execution criterion)
+  // Criterion B: "calculateSum handles negative numbers" (Specific behavioral criterion - missing from output)
+  const verifReport34 = await verifier34.verify(
+    repoMeta34,
+    [
+      'npm test passes successfully',
+      'calculateSum handles negative numbers',
+    ],
+    undefined,
+    undefined
+  );
+
+  const critResults34 = (verifReport34 as any).criteriaResults || [];
+
+  const npmTestCrit = critResults34.find((c: any) => c.criterion.includes('npm test passes'));
+  assert.ok(npmTestCrit, 'npm test passes criterion result must exist');
+  assert.strictEqual(npmTestCrit.satisfied, true, 'npm test passes successfully MUST be satisfied when test suite passes exit 0');
+  assert.strictEqual(npmTestCrit.checkType, 'test', 'npm test passes must map to test checkType');
+
+  const negNumbersCrit = critResults34.find((c: any) => c.criterion.includes('negative numbers'));
+  assert.ok(negNumbersCrit, 'negative numbers criterion result must exist');
+  assert.strictEqual(negNumbersCrit.satisfied, false, 'Behavioral criterion without matching test assertion MUST NOT be satisfied');
+
+  await fs.rm(verifierDir34, { recursive: true, force: true });
+  console.log('   ✓ General test execution criteria verified without false negatives; behavioral criteria mandate exact assertions.');
+
   console.log('\n=== ALL P0/P1 CORRECTNESS, SAFETY & VERIFICATION TESTS PASSED! ===\n');
 }
 

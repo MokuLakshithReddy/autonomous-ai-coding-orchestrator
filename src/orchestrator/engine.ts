@@ -355,7 +355,9 @@ export class OrchestrationEngine extends EventEmitter {
     const existingTask = await taskRepo.getById(taskId);
 
     if (existingTask?.planJson && stepRecords.length > 0) {
-      // P1 FIX (Issue 1): Reuse existing plan and completed step records on resumption
+      // P1 FIX (Issue 1 & 3): Reuse existing plan and completed step records on resumption
+      // Transition through planning so state machine lifecycle transitions strictly align
+      await this.transitionTaskState(taskId, stateMachine, 'planning', 'Restoring previously approved execution plan');
       plan = JSON.parse(existingTask.planJson);
       await this.emitOrchestratorEvent({
         taskId,
@@ -404,7 +406,9 @@ export class OrchestrationEngine extends EventEmitter {
       checkBudgetOrAbort();
 
       const step = plan.steps[i];
-      const stepRec = stepRecords[i];
+      // P1 FIX (Issue 3): Match step records strictly by stepIndex (not array offset i)
+      // because topologicallySortPlanSteps() reorders execution sequence according to dependencies
+      const stepRec = stepRecords.find((r) => r.stepIndex === step.index);
       if (!stepRec) continue;
 
       // P1 FIX (Issue 1): If step was already completed in prior run, skip execution and preserve progress
@@ -942,6 +946,16 @@ export class OrchestrationEngine extends EventEmitter {
                 `Base branch "${baseline.branch}" is a configured protected branch. Auto-merge requires explicit authorization.`
               );
             }
+          }
+
+          // P0 FIX (Issue 2): Fetch verified commits from the task's isolated disposable repository into the parent branch
+          if (taskWorktreePath) {
+            try {
+              const wtStat = await fs.stat(taskWorktreePath).catch(() => null);
+              if (wtStat && wtStat.isDirectory()) {
+                await mainGit.raw(['fetch', taskWorktreePath, `${taskBranchName}:${taskBranchName}`]);
+              }
+            } catch {}
           }
 
           // Perform merge

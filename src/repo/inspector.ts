@@ -388,8 +388,10 @@ export class RepoInspector {
   }
 
   /**
-   * P0 FIX (Issue 5): Masks sensitive secret files (.env, credentials) in the isolated worktree
-   * so untrusted commands and external coding agents cannot read or exfiltrate them.
+   * P0 FIX (Issue 1 & 5): Masks sensitive secret files (.env, credentials, keys) in the isolated workspace.
+   * Uses lstat() to identify symbolic links and strictly refuses to write through untrusted symlinks!
+   * If a symlink exists (even pointing outside workspace), it unlinks the symlink itself and replaces it
+   * with a regular placeholder file, safely preserving host target files from overwrite.
    */
   async sanitizeWorktreeSecrets(worktreeDir: string): Promise<void> {
     const sensitiveFileNames = [
@@ -404,18 +406,30 @@ export class RepoInspector {
       'service_account.json',
     ];
 
+    const canonicalWorktree = SecurityPolicyEngine.resolveCanonicalPath(worktreeDir);
+    const placeholder = '# MASKED_BY_ORCHESTRATOR_ISOLATION\n# Real host secrets are prohibited inside isolated task workspaces.\n';
+
     for (const sf of sensitiveFileNames) {
       const fullPath = path.join(worktreeDir, sf);
       try {
-        const stat = await fs.stat(fullPath).catch(() => null);
-        if (stat && stat.isFile()) {
-          await fs.writeFile(
-            fullPath,
-            '# MASKED_BY_ORCHESTRATOR_ISOLATION\n# Real host secrets are prohibited inside isolated task worktrees.\n',
-            'utf8'
-          );
+        const lstat = await fs.lstat(fullPath).catch(() => null);
+        if (!lstat) continue;
+
+        if (lstat.isSymbolicLink()) {
+          // Untrusted symlink detected (potential escape attack e.g. .env -> ../../../../some-host-file)
+          // NEVER follow symlink or write through it! Safely remove the symlink itself:
+          await fs.unlink(fullPath);
+          await fs.writeFile(fullPath, placeholder, { encoding: 'utf8', flag: 'w' });
+        } else if (lstat.isFile()) {
+          // Verify canonical path containment before modifying file
+          const canonicalFile = SecurityPolicyEngine.resolveCanonicalPath(fullPath);
+          if (canonicalFile.startsWith(canonicalWorktree + path.sep) || canonicalFile === canonicalWorktree) {
+            await fs.writeFile(fullPath, placeholder, { encoding: 'utf8', flag: 'w' });
+          }
         }
-      } catch {}
+      } catch (err) {
+        console.warn(`[Secret Sanitization] Handled security boundary for ${sf}:`, err);
+      }
     }
   }
 

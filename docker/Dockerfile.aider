@@ -16,5 +16,6 @@ RUN useradd -u 1000 -m orchestrator && \
 USER orchestrator
 WORKDIR /workspace
 
-ENTRYPOINT ["aider"]
+# Use CMD instead of ENTRYPOINT so orchestrator can invoke aider or sub-commands without duplicate binary execution
+CMD ["aider", "--help"]
 

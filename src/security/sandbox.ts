@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import { SecurityPolicyEngine } from './policy.js';
 
 export type ContainerCommandTarget =
@@ -24,6 +25,25 @@ export interface ContainerSandboxOptions {
  */
 export class ContainerSandbox {
   private static dockerAvailable: boolean | null = null;
+  private static emptyMaskFile: string | null = null;
+
+  /**
+   * Cross-platform 0-byte mask file for bind-mounting over sensitive files in container.
+   * Unlike Unix /dev/null, this file-based bind mount is 100% valid across Windows, Linux, and macOS.
+   */
+  static getEmptySecretMaskFile(): string {
+    if (this.emptyMaskFile && fs.existsSync(this.emptyMaskFile)) {
+      return this.emptyMaskFile;
+    }
+    const maskDir = path.join(os.tmpdir(), 'orchestrator_masks');
+    fs.mkdirSync(maskDir, { recursive: true });
+    const maskFile = path.join(maskDir, 'empty_secret_mask.txt');
+    if (!fs.existsSync(maskFile)) {
+      fs.writeFileSync(maskFile, '# Masked by Orchestrator Isolation Boundary\n', { encoding: 'utf8', mode: 0o444 });
+    }
+    this.emptyMaskFile = maskFile;
+    return maskFile;
+  }
 
   static async isDockerAvailable(): Promise<boolean> {
     if (this.dockerAvailable !== null) return this.dockerAvailable;
@@ -75,12 +95,11 @@ export class ContainerSandbox {
       const execName = normalizedTarget.executable.toLowerCase();
       if (execName.includes('aider')) {
         isExternalAgent = true;
-        // P0 FIX (Issue 4.A): Prefer official pre-built image containing the Aider binary
         defaultImage = process.env.CONTAINER_SANDBOX_AIDER_IMAGE || 'paulgauthier/aider:latest';
       } else if (execName.includes('claude')) {
         isExternalAgent = true;
-        // P0 FIX (Issue 4.A): Default to Claude image or node runtime
-        defaultImage = process.env.CONTAINER_SANDBOX_CLAUDE_IMAGE || 'node:22-bookworm-slim';
+        // P0 FIX: Default to custom Claude Code image built from Dockerfile.claude
+        defaultImage = process.env.CONTAINER_SANDBOX_CLAUDE_IMAGE || 'orchestrator-claude:latest';
       } else if (['python', 'python3', 'pytest', 'pip', 'unittest'].some((p) => execName.includes(p))) {
         defaultImage = process.env.CONTAINER_SANDBOX_PYTHON_IMAGE || 'python:3.11-slim';
       } else if (['cargo', 'rustc'].some((p) => execName.includes(p))) {
@@ -95,7 +114,7 @@ export class ContainerSandbox {
         defaultImage = process.env.CONTAINER_SANDBOX_AIDER_IMAGE || 'paulgauthier/aider:latest';
       } else if (cmd.startsWith('claude ') || cmd.includes('/claude ')) {
         isExternalAgent = true;
-        defaultImage = process.env.CONTAINER_SANDBOX_CLAUDE_IMAGE || 'node:22-bookworm-slim';
+        defaultImage = process.env.CONTAINER_SANDBOX_CLAUDE_IMAGE || 'orchestrator-claude:latest';
       } else if (cmd.includes('pytest') || cmd.includes('python ') || cmd.includes('pip ')) {
         defaultImage = process.env.CONTAINER_SANDBOX_PYTHON_IMAGE || 'python:3.11-slim';
       } else if (cmd.includes('cargo ')) {
@@ -108,6 +127,7 @@ export class ContainerSandbox {
     const network = options.networkMode || process.env.CONTAINER_SANDBOX_NETWORK || 'none';
     const user = options.user || '1000:1000';
     const canonicalWorkspace = SecurityPolicyEngine.resolveCanonicalPath(workspacePath);
+    const normalizedWorkspace = canonicalWorkspace.replace(/\\/g, '/');
 
     // Strict containment arguments: drop capabilities, resource limits, no host credential mounts, isolated workspace
     const dockerArgs = [
@@ -120,48 +140,28 @@ export class ContainerSandbox {
       '--cpus', process.env.CONTAINER_SANDBOX_CPUS || '2',
       '--pids-limit', process.env.CONTAINER_SANDBOX_PIDS_LIMIT || '128',
       '-u', user,
-      '-v', `${canonicalWorkspace}:/workspace:rw`,
+      '--mount', `type=bind,source=${normalizedWorkspace},target=/workspace`,
       '-w', '/workspace',
       '-e', 'CI=true',
       '-e', 'NODE_ENV=development',
     ];
 
-    // P0 FIX (Issue 4.B): Mount Git worktree metadata so git commands inside container resolve gitdir properly
-    try {
-      const gitFilePath = path.join(canonicalWorkspace, '.git');
-      if (fs.existsSync(gitFilePath) && fs.statSync(gitFilePath).isFile()) {
-        const gitFileContent = fs.readFileSync(gitFilePath, 'utf8').trim();
-        const match = gitFileContent.match(/^gitdir:\s*(.+)$/m);
-        if (match && match[1]) {
-          const rawGitDir = match[1].trim();
-          const resolvedGitDir = path.isAbsolute(rawGitDir)
-            ? rawGitDir
-            : path.resolve(canonicalWorkspace, rawGitDir);
+    // P0 FIX (Issue 2): Never mount the parent repository's shared .git directory into an untrusted container with write access!
+    // Tasks execute in self-contained disposable repositories where /workspace/.git already exists as an isolated directory.
+    // If a legacy worktree file is present, an isolated disposable task git directory is provided without touching host git metadata.
 
-          if (fs.existsSync(resolvedGitDir)) {
-            const parentGitDirIndex = resolvedGitDir.lastIndexOf(`${path.sep}.git`);
-            const parentGitDir = parentGitDirIndex !== -1
-              ? resolvedGitDir.slice(0, parentGitDirIndex + 5)
-              : path.dirname(resolvedGitDir);
-
-            const mountSrc = parentGitDir.replace(/\\/g, '/');
-            dockerArgs.push('-v', `${mountSrc}:${mountSrc}:rw`);
-          }
-        }
-      }
-    } catch {}
-
-    // P0 FIX (Issue 5): Kernel-level container boundary secret protection.
-    // Mount empty read-only devices over any sensitive files in the workspace so processes/agents inside container cannot exfiltrate them.
+    // P0 FIX (Issue 5 & CI): Kernel-level container boundary secret protection using cross-platform bind mounts.
+    // Mount empty read-only placeholder over any sensitive files in the workspace so processes/agents inside container cannot exfiltrate them.
     try {
       const sensitiveFilesToCheck = [
         '.env', '.env.local', '.env.development', '.env.production', '.env.test',
         'credentials.json', 'id_rsa', 'id_ed25519', 'service_account.json'
       ];
+      const emptyMaskFile = this.getEmptySecretMaskFile().replace(/\\/g, '/');
       for (const sf of sensitiveFilesToCheck) {
         const fullP = path.join(canonicalWorkspace, sf);
         if (fs.existsSync(fullP)) {
-          dockerArgs.push('-v', `/dev/null:/workspace/${sf}:ro`);
+          dockerArgs.push('--mount', `type=bind,source=${emptyMaskFile},target=/workspace/${sf},readonly`);
         }
       }
     } catch {}

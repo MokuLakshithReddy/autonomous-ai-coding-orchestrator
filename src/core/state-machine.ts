@@ -35,7 +35,7 @@ export class IllegalStateTransitionError extends Error {
 export class TaskStateMachine {
   private static readonly VALID_TRANSITIONS: Record<TaskState, TaskState[]> = {
     queued: ['discovering', 'cancelling', 'cancelled', 'failed'],
-    discovering: ['planning', 'blocked', 'failed', 'cancelling'],
+    discovering: ['planning', 'ready', 'blocked', 'failed', 'cancelling'],
     planning: ['ready', 'awaiting_approval', 'blocked', 'failed', 'cancelling'],
     awaiting_approval: [
       'ready',

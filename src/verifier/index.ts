@@ -347,14 +347,22 @@ export class IndependentVerifier {
           lower.includes('unit test') ||
           lower.includes('test suite') ||
           lower.includes('unit tests pass') ||
-          lower.includes('all tests pass')
+          lower.includes('all tests pass') ||
+          lower.includes('tests pass') ||
+          lower.includes('test passes') ||
+          /\b(npm|pnpm|yarn|npx|pytest|cargo|go|python|node)\s+(run\s+)?test\b/i.test(criterion) ||
+          /\btest(s)?\s+(pass|passes|pass cleanly|pass successfully|succeed|succeeds)\b/i.test(criterion) ||
+          /\bpass(es)?\s+(all\s+)?(unit\s+)?test(s)?\b/i.test(criterion)
         ) {
           checkType = 'test';
           targetCommand = testCheck.command || meta.testCmd;
           exitCode = testCheck.exitCode;
-          satisfied = testCheck.status === 'PASSED';
+          satisfied = testCheck.status === 'PASSED' && (testCheck.exitCode === 0 || testCheck.exitCode === undefined);
+          const outputLines = (testCheck.output || '').split('\n');
+          const passingLine = outputLines.find((l) => /(\bpassed\b|✓|\bok\b|\bverified\b)/i.test(l));
+          assertionEvidence = passingLine ? passingLine.trim() : (testCheck.output ? testCheck.output.slice(0, 200).trim() : undefined);
           evidence = satisfied
-            ? `Test suite "${targetCommand || 'test runner'}" passed cleanly (exit ${exitCode ?? 0}).`
+            ? `Test suite "${targetCommand || 'test runner'}" passed cleanly (exit ${exitCode ?? 0}).${assertionEvidence ? ` Assertion: "${assertionEvidence}"` : ''}`
             : `Test suite failed or not configured (status: ${testCheck.status}, exit ${exitCode ?? 'N/A'}).`;
         } else if (lower.includes('file presence') || lower.includes('create file') || lower.includes('add file')) {
           checkType = 'file_presence';
@@ -421,45 +429,48 @@ export class IndependentVerifier {
               evidence = `Explicit verification check "${targetCommand}" verified requirement (exit ${exitCode ?? 0}).`;
               assertionEvidence = testCheck.output ? testCheck.output.slice(0, 300) : undefined;
             } else {
-              // P0 FIX (Issue 6): Acceptance criteria must be backed by explicit test execution and assertion proof, NOT loose diff keyword matching.
+              // P0 FIX (Issue 4 & 6): Behavioral acceptance criteria must be backed by explicit targeted assertion proof!
+              const stopWords = new Set([
+                'test', 'tests', 'pass', 'passes', 'passed', 'should', 'must', 'with', 'when',
+                'from', 'that', 'this', 'successfully', 'cleanly', 'without', 'error', 'errors',
+                'function', 'method', 'return', 'returns', 'value', 'values', 'correct', 'correctly',
+                'file', 'files', 'code', 'runs', 'verify', 'verified'
+              ]);
               const keywords = criterion
                 .toLowerCase()
                 .replace(/[^a-z0-9_]/g, ' ')
                 .split(/\s+/)
-                .filter(
-                  (w) =>
-                    w.length >= 4 &&
-                    !['test', 'pass', 'passes', 'should', 'must', 'with', 'when', 'from', 'that', 'this'].includes(w)
-                );
+                .filter((w) => w.length >= 3 && !stopWords.has(w));
 
               const outputLines = (testCheck.output || '').split('\n');
-              const outputLower = (testCheck.output || '').toLowerCase();
               const hasTestPassingIndicator =
                 /(\b[0-9]+\s+passed|\bpassed\b|✓|\bok\b|\bverified\b)/i.test(testCheck.output || '');
-              const outputMatches = keywords.filter((kw) => outputLower.includes(kw));
 
-              // Extract exact assertion line from test output confirming this criterion
+              // Find exact assertion line from test output confirming this specific criterion
               const matchingLine = outputLines.find((line) => {
                 const lineLower = line.toLowerCase();
                 const hasIndicator = /(\bpassed\b|✓|\bok\b|\bverified\b)/i.test(line);
-                const hasKeyword = keywords.some((kw) => lineLower.includes(kw));
+                const hasKeyword = keywords.length > 0 && keywords.some((kw) => lineLower.includes(kw));
                 return hasIndicator && (hasKeyword || keywords.length === 0);
               });
 
-              const hasTargetedTestExecution =
-                hasTestPassingIndicator &&
-                (outputMatches.length >= Math.min(1, keywords.length) || keywords.length === 0);
-
-              if (hasTargetedTestExecution) {
+              // P1 FIX: Exact assertion evidence is mandatory for behavior-specific criteria!
+              if (hasTestPassingIndicator && matchingLine) {
                 targetCommand = testCheck.command || meta.testCmd;
                 exitCode = testCheck.exitCode;
                 satisfied = true;
-                assertionEvidence = matchingLine ? matchingLine.trim() : `Output confirmed passing assertions (matched keywords: ${outputMatches.join(', ') || 'suite passed'})`;
-                const matchSummary = outputMatches.length > 0 ? ` [test output matched: ${outputMatches.join(', ')}]` : '';
-                evidence = `Verified via explicit passing test execution: "${targetCommand}" (exit ${exitCode ?? 0})${matchSummary}. Assertion: "${assertionEvidence}"`;
+                assertionEvidence = matchingLine.trim();
+                evidence = `Verified via targeted passing test assertion: "${assertionEvidence}" (command: "${targetCommand}", exit ${exitCode ?? 0}).`;
+              } else if (hasTestPassingIndicator && keywords.length === 0) {
+                targetCommand = testCheck.command || meta.testCmd;
+                exitCode = testCheck.exitCode;
+                satisfied = true;
+                const firstPassing = outputLines.find((l) => /(\bpassed\b|✓|\bok\b|\bverified\b)/i.test(l));
+                assertionEvidence = firstPassing ? firstPassing.trim() : 'Test suite passed cleanly';
+                evidence = `Verified via passing test execution: "${targetCommand}" (exit ${exitCode ?? 0}). Assertion: "${assertionEvidence}"`;
               } else {
                 satisfied = false;
-                evidence = `Unverified: General test suite executed, but no criterion-specific test assertion or execution evidence confirmed "${criterion}".`;
+                evidence = `Unverified: General test suite executed, but no criterion-specific assertion in test output confirmed "${criterion}".`;
               }
             }
           }
