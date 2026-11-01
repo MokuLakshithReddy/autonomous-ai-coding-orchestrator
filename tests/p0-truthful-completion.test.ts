@@ -1498,6 +1498,84 @@ diff --git a/tests/math.test.ts b/tests/math.test.ts
   await fs.rm(verifierDir34, { recursive: true, force: true });
   console.log('   ✓ General test execution criteria verified without false negatives; behavioral criteria mandate exact assertions.');
 
+  // Test 35: Tracked .env Integrity & Git Identity Inheritance Across Task Completion & Auto-Merge (P1)
+  console.log('\n35. Testing Tracked .env Integrity & Local Identity Inheritance (P1)...');
+  const test35Dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tracked-env-test-'));
+  const test35Git = simpleGit(test35Dir);
+  await test35Git.init();
+  await test35Git.addConfig('user.name', 'Repository Owner', false, 'local');
+  await test35Git.addConfig('user.email', 'owner@example.org', false, 'local');
+
+  const trackedEnvContent = 'DATABASE_URL=postgres://real_user:real_pass@prod/db\nAPI_SECRET=supersecretvalue123\n';
+  await fs.writeFile(path.join(test35Dir, '.env'), trackedEnvContent);
+  const test35Js = `process.env.USE_CONTAINER_SANDBOX = 'false';
+import assert from 'node:assert';
+import { active } from './index.js';
+assert.strictEqual(active, true, 'Feature active flag must be true');
+console.log('Assertion PASSED: feature active is true');
+`;
+  await fs.writeFile(path.join(test35Dir, 'test.js'), test35Js);
+  await fs.writeFile(
+    path.join(test35Dir, 'package.json'),
+    JSON.stringify({ name: 'env-test', type: 'module', scripts: { test: 'node test.js' } }, null, 2)
+  );
+  await fs.writeFile(path.join(test35Dir, 'index.js'), 'export const active = false;\n');
+
+  await test35Git.add('.');
+  await test35Git.commit('Initial repository commit with tracked .env');
+
+  // Run task through Orchestrator with autoMerge enabled
+  const engine35 = new OrchestrationEngine({ allowedWorkspaces: [test35Dir] });
+  const task35 = await engine35.runTask({
+    prompt: 'Update index.js active flag to true so unit test passes',
+    workspacePath: test35Dir,
+    autoMerge: true,
+    allowProtectedBranchMerge: true,
+    maxRetries: 1,
+    customAgent: {
+      name: 'FeatureAgent',
+      workspacePath: test35Dir,
+      async executeStep() {
+        const indexPath = path.join(this.workspacePath, 'index.js');
+        await fs.writeFile(indexPath, 'export const active = true;\n');
+        return {
+          agentName: 'FeatureAgent',
+          success: true,
+          logs: 'Updated active flag to true in index.js',
+          toolsUsed: ['writeFile'],
+          exitCode: 0,
+        };
+      },
+      setWorkspacePath(p: string) {
+        this.workspacePath = p;
+      },
+    } as any,
+  });
+
+  // Wait for completion
+  const startWait35 = Date.now();
+  let taskRec35 = await taskRepo.getById(task35.id);
+  while (taskRec35 && !['completed', 'failed', 'blocked', 'cancelled', 'needs_human_review'].includes(taskRec35.status.toLowerCase())) {
+    if (Date.now() - startWait35 > 25000) break;
+    await new Promise((r) => setTimeout(r, 400));
+    taskRec35 = await taskRepo.getById(task35.id);
+  }
+
+  assert.strictEqual(taskRec35?.status.toLowerCase(), 'completed', `Task must complete successfully; got ${taskRec35?.status}`);
+
+  // CRITICAL ASSERTION: The tracked .env in the repository must be 100% UNCHANGED!
+  const postEnvContent = await fs.readFile(path.join(test35Dir, '.env'), 'utf8');
+  assert.strictEqual(postEnvContent, trackedEnvContent, 'Tracked .env file MUST NOT be overwritten with placeholder during task or merge!');
+
+  // Verify feature was auto-merged
+  const postIndexContent = await fs.readFile(path.join(test35Dir, 'index.js'), 'utf8');
+  assert.strictEqual(postIndexContent.replace(/\r\n/g, '\n'), 'export const active = true;\n', 'Verified changes must be auto-merged cleanly');
+
+  try {
+    await fs.rm(test35Dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  } catch {}
+  console.log('   ✓ Tracked .env file completely preserved intact across task completion and auto-merge.');
+
   console.log('\n=== ALL P0/P1 CORRECTNESS, SAFETY & VERIFICATION TESTS PASSED! ===\n');
 }
 

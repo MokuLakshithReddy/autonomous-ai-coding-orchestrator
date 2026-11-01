@@ -73,7 +73,14 @@ export class RepoInspector {
   async getGitStatus(): Promise<StatusResult | null> {
     try {
       if (!(await this.isGitRepository())) return null;
-      return await this.git.status();
+      const status = await this.git.status();
+      // Filter out internal orchestrator directories from status results
+      status.files = status.files.filter(
+        (f) =>
+          !f.path.startsWith('.orchestrator_worktrees') &&
+          !f.path.startsWith('.orchestrator_sandboxes')
+      );
+      return status;
     } catch {
       return null;
     }
@@ -261,6 +268,32 @@ export class RepoInspector {
   }
 
   /**
+   * P1 FIX (Issue 1): Configures task-local author and committer identity for an isolated repository.
+   * Inherits identity from parent repository if configured; falls back safely to default identity
+   * so commits never fail even on systems without global Git configuration.
+   */
+  async configureTaskGitIdentity(targetDir: string): Promise<void> {
+    let userName = 'Autonomous Orchestrator';
+    let userEmail = 'orchestrator@local';
+    try {
+      const name = (await this.git.raw(['config', 'user.name'])).trim();
+      if (name) userName = name;
+    } catch {}
+    try {
+      const email = (await this.git.raw(['config', 'user.email'])).trim();
+      if (email) userEmail = email;
+    } catch {}
+
+    try {
+      const targetGit = simpleGit(targetDir);
+      await targetGit.addConfig('user.name', userName, false, 'local');
+      await targetGit.addConfig('user.email', userEmail, false, 'local');
+    } catch (err: any) {
+      console.warn(`[Git Identity] Could not configure local Git identity in "${targetDir}":`, err?.message);
+    }
+  }
+
+  /**
    * P0.5 FIX: Safe task checkpointing.
    * Stages ONLY task-owned files. NEVER uses `git add .` or `git add -u`.
    * Completely preserves unrelated user changes.
@@ -268,6 +301,18 @@ export class RepoInspector {
   async createTaskCheckpoint(taskOwnedFiles: string[] = [], message: string): Promise<string | null> {
     try {
       if (!(await this.isGitRepository())) return null;
+
+      // P1 FIX (Issue 1): Ensure local commit identity is configured prior to committing
+      try {
+        const hasName = await this.git.raw(['config', 'user.name']).catch(() => '');
+        if (!hasName.trim()) {
+          await this.git.addConfig('user.name', 'Autonomous Orchestrator', false, 'local');
+        }
+        const hasEmail = await this.git.raw(['config', 'user.email']).catch(() => '');
+        if (!hasEmail.trim()) {
+          await this.git.addConfig('user.email', 'orchestrator@local', false, 'local');
+        }
+      } catch {}
 
       const filesToStage: string[] = [];
 
@@ -283,6 +328,12 @@ export class RepoInspector {
             ? path.relative(this.workspacePath, file).replace(/\\/g, '/')
             : file.replace(/\\/g, '/');
 
+          // P1 FIX (Issue 2): NEVER stage sensitive secrets or credentials into task commits!
+          if (SecurityPolicyEngine.isSensitiveSecret(relPath)) {
+            console.warn(`[Checkpoint Protection] Skipping sensitive secret file from staging: ${relPath}`);
+            continue;
+          }
+
           // Strict P0 Protection: Do not stage files that already had pre-existing user modifications!
           if (isIsolatedWorktree || !initialDirtySet.has(relPath)) {
             filesToStage.push(relPath);
@@ -295,6 +346,12 @@ export class RepoInspector {
         const currentStatus = await this.git.status();
 
         for (const file of currentStatus.files) {
+          // P1 FIX (Issue 2): NEVER stage sensitive secrets or credentials into task commits!
+          if (SecurityPolicyEngine.isSensitiveSecret(file.path)) {
+            console.warn(`[Checkpoint Protection] Skipping sensitive secret file from staging: ${file.path}`);
+            continue;
+          }
+
           if (isIsolatedWorktree || !initialDirtySet.has(file.path)) {
             filesToStage.push(file.path);
           }
@@ -353,36 +410,89 @@ export class RepoInspector {
    * Throws strictly on failure so the orchestrator never silently falls back to the user workspace.
    */
   /**
-   * P0/P1 FIX (Issues 2 & 3): Creates an isolated task workspace or resumes an existing quarantined worktree.
-   * If the worktree already exists (quarantined after failure), resumes in-place without re-allocating.
-   * Otherwise allocates a genuinely disposable Git repository with independent metadata so containerized
-   * git commands (Aider, Claude Code) operate natively without write access to host .git metadata.
+   * P0/P1 FIX (Issues 1, 2, 4, 5): Creates an isolated task workspace or resumes an existing quarantined worktree.
+   * - Uses lstat() to verify root and directory are not untrusted symlinks.
+   * - Enforces canonical containment within authorized workspace.
+   * - Validates existing repository and expected task branch prior to in-place recovery.
+   * - Guarantees a 100% self-contained repository with independent .git directory (no broken worktree pointer files).
+   * - Inherits and configures task-local author and committer Git identity.
    */
   async createIsolatedWorktree(taskId: string): Promise<string> {
     if (!(await this.isGitRepository())) {
       throw new Error(`Cannot create Git worktree: Workspace "${this.workspacePath}" is not a Git repository.`);
     }
 
-    const worktreeDir = path.join(this.workspacePath, '.orchestrator_worktrees', taskId);
-    await fs.mkdir(path.dirname(worktreeDir), { recursive: true });
+    const canonicalWorkspace = SecurityPolicyEngine.resolveCanonicalPath(this.workspacePath);
+    const worktreeRootDir = path.join(this.workspacePath, '.orchestrator_worktrees');
+    const worktreeDir = path.join(worktreeRootDir, taskId);
+    const branchName = `task/${taskId.slice(0, 8)}`;
 
-    // P1 FIX (Issue 3): Explicit recovery-in-place path for existing/quarantined worktrees!
-    // Do not attempt to create a second worktree or re-clone if the worktree directory is already present.
+    // P1 FIX (Issue 4): Safely validate worktree root directory against untrusted symlinks
+    const rootLstat = await fs.lstat(worktreeRootDir).catch(() => null);
+    if (rootLstat) {
+      if (rootLstat.isSymbolicLink()) {
+        throw new Error(
+          `Security Exception: Worktree root directory "${worktreeRootDir}" is an untrusted symbolic link.`
+        );
+      }
+    } else {
+      await fs.mkdir(worktreeRootDir, { recursive: true });
+    }
+
+    // Ensure parent repo git excludes internal orchestrator worktree directories
     try {
-      const stat = await fs.stat(worktreeDir).catch(() => null);
-      if (stat && stat.isDirectory()) {
-        console.log(`[Worktree Resumption] Reusing quarantined/existing worktree in-place at "${worktreeDir}".`);
-        await this.sanitizeWorktreeSecrets(worktreeDir);
-        return worktreeDir;
+      const gitDir = path.join(this.workspacePath, '.git');
+      const excludeFile = path.join(gitDir, 'info', 'exclude');
+      const infoStat = await fs.stat(path.dirname(excludeFile)).catch(() => null);
+      if (infoStat) {
+        let content = '';
+        try { content = await fs.readFile(excludeFile, 'utf8'); } catch {}
+        if (!content.includes('.orchestrator_worktrees')) {
+          await fs.appendFile(excludeFile, '\n.orchestrator_worktrees\n.orchestrator_sandboxes\n', 'utf8');
+        }
       }
     } catch {}
 
-    // Clean up any stale worktree registration for this path
+    // P1 FIX (Issue 4): Safely validate task worktree directory if it already exists
+    const dirLstat = await fs.lstat(worktreeDir).catch(() => null);
+    if (dirLstat) {
+      if (dirLstat.isSymbolicLink()) {
+        throw new Error(
+          `Security Exception: Worktree directory "${worktreeDir}" is an untrusted symbolic link.`
+        );
+      }
+
+      // Enforce canonical containment inside authorized workspace
+      const canonicalWorktree = SecurityPolicyEngine.resolveCanonicalPath(worktreeDir);
+      if (!canonicalWorktree.startsWith(canonicalWorkspace + path.sep)) {
+        throw new Error(
+          `Security Exception: Worktree directory "${worktreeDir}" resolves to "${canonicalWorktree}", outside authorized workspace "${canonicalWorkspace}".`
+        );
+      }
+
+      // Validate that existing directory is a real, healthy Git repository on the expected branch
+      const candidateGit = simpleGit(worktreeDir);
+      const isRepo = await candidateGit.checkIsRepo().catch(() => false);
+      if (isRepo) {
+        const status = await candidateGit.status().catch(() => null);
+        if (status && status.current === branchName) {
+          console.log(`[Worktree Resumption] Reusing quarantined/existing worktree in-place on branch "${branchName}" at "${worktreeDir}".`);
+          await this.configureTaskGitIdentity(worktreeDir);
+          await this.sanitizeWorktreeSecrets(worktreeDir);
+          return worktreeDir;
+        }
+      }
+
+      // Directory exists but is not a valid Git repo or is on an unexpected branch; safely re-allocate
+      console.warn(`[Worktree Recovery] Existing directory at "${worktreeDir}" is not a valid repository on branch "${branchName}". Removing and re-allocating...`);
+      await fs.rm(worktreeDir, { recursive: true, force: true });
+    }
+
+    // Clean up any stale worktree registration in git
     try {
       await this.git.raw(['worktree', 'prune']);
     } catch {}
 
-    const branchName = `task/${taskId.slice(0, 8)}`;
     try {
       const branchList = await this.git.branchLocal();
       const branchExists = branchList.all.includes(branchName);
@@ -391,8 +501,9 @@ export class RepoInspector {
         await this.git.branch([branchName, 'HEAD']);
       }
 
-      // P0/P1 FIX (Issue 2): Prefer genuinely disposable clone with independent Git metadata
-      // so container processes receive a self-contained .git directory without host metadata mounts
+      // P1 FIX (Issue 5): Guarantee a 100% self-contained clone for container isolation.
+      // Never fall back to git worktree add, which creates .git pointer files referencing
+      // host parent metadata that is deliberately unmounted in container execution.
       try {
         await this.git.clone(this.workspacePath, worktreeDir, [
           '--local',
@@ -400,65 +511,105 @@ export class RepoInspector {
           '--single-branch',
           '--no-tags',
         ]);
-      } catch (cloneErr) {
-        // Fallback to worktree add if clone fails
-        if (branchExists) {
-          await this.git.raw(['worktree', 'add', worktreeDir, branchName]);
-        } else {
-          await this.git.raw(['worktree', 'add', '-b', branchName, worktreeDir, 'HEAD']);
+      } catch (cloneErr: any) {
+        // Fallback: Manually initialize an independent repository and fetch the branch
+        try {
+          await fs.rm(worktreeDir, { recursive: true, force: true }).catch(() => {});
+          await fs.mkdir(worktreeDir, { recursive: true });
+          const isolatedGit = simpleGit(worktreeDir);
+          await isolatedGit.init();
+          await isolatedGit.addRemote('origin', this.workspacePath);
+          await isolatedGit.raw(['fetch', 'origin', `+refs/heads/${branchName}:refs/heads/${branchName}`]);
+          await isolatedGit.checkout(branchName);
+        } catch (initErr: any) {
+          throw new Error(
+            `Failed to allocate independent isolated repository for container execution: ${cloneErr?.message || cloneErr}. Init fallback also failed: ${initErr?.message || initErr}`
+          );
         }
       }
     } catch (err: any) {
       throw new Error(`Git worktree allocation failed: ${err.message || String(err)}`);
     }
 
-    // P0 FIX (Issue 1): Recursively mask all tracked/untracked credentials in the worktree filesystem
+    // P1 FIX (Issue 1): Configure task-local Git identity on the cloned repository
+    await this.configureTaskGitIdentity(worktreeDir);
+
+    // P1 FIX (Issue 2): Sanitize worktree secrets without corrupting tracked files
     await this.sanitizeWorktreeSecrets(worktreeDir);
 
     return worktreeDir;
   }
 
   /**
-   * P0 FIX (Issue 1): Comprehensively masks sensitive secret files (.env, credentials, keys, .aws, .ssh, .kube, .gcloud, etc.)
-   * across the entire worktree hierarchy using SecurityPolicyEngine.isSensitiveSecret().
-   * Uses lstat() to identify symbolic links and strictly refuses to write through untrusted symlinks!
-   * If a symlink exists (even pointing outside workspace), it unlinks the symlink itself and replaces it
-   * with a regular placeholder file, safely preserving host target files from overwrite.
+   * P0/P1 FIX (Issues 2 & 3): Comprehensively sanitizes untracked secret files and untrusted symlinks.
+   * - P1 FIX (Issue 2): NEVER overwrites tracked Git files to hide their contents. Tracked source files
+   *   remain untouched so git working tree and task branch commits are never corrupted.
+   *   Container isolation masks them safely via read-only bind mounts at the container boundary.
+   * - P0 FIX (Issue 3): Traverses entire directory structure without arbitrary depth cutoff.
+   *   Detects traversal loops via visited canonical paths; fails closed on excessive depth (> 40)
+   *   or filesystem errors rather than silently suppressing them.
    */
   async sanitizeWorktreeSecrets(worktreeDir: string): Promise<void> {
     const canonicalWorktree = SecurityPolicyEngine.resolveCanonicalPath(worktreeDir);
     const placeholder = '# MASKED_BY_ORCHESTRATOR_ISOLATION\n# Real host secrets are prohibited inside isolated task workspaces.\n';
 
-    const sanitizeEntry = async (fullPath: string, relPath: string) => {
-      try {
-        const lstat = await fs.lstat(fullPath).catch(() => null);
-        if (!lstat) return;
+    // P1 FIX (Issue 2): Discover all files tracked by Git in the worktree
+    let trackedFiles = new Set<string>();
+    try {
+      const wtGit = simpleGit(canonicalWorktree);
+      const lsOutput = await wtGit.raw(['ls-files']);
+      trackedFiles = new Set(
+        lsOutput
+          .split(/\r?\n/)
+          .filter(Boolean)
+          .map((f) => f.replace(/\\/g, '/'))
+      );
+    } catch {}
 
-        if (lstat.isSymbolicLink()) {
-          // Untrusted symlink detected (e.g. .env -> ../../../../etc/passwd)
-          // NEVER follow symlink or write through it! Safely remove the symlink itself:
-          await fs.unlink(fullPath);
+    const sanitizeEntry = async (fullPath: string, relPath: string) => {
+      const lstat = await fs.lstat(fullPath);
+      if (lstat.isSymbolicLink()) {
+        // Untrusted symlink detected (e.g. .env -> ../../../../etc/passwd)
+        // NEVER follow symlink or write through it! Safely remove the symlink itself:
+        await fs.unlink(fullPath);
+        if (!trackedFiles.has(relPath)) {
           await fs.writeFile(fullPath, placeholder, { encoding: 'utf8', flag: 'w' });
-        } else if (lstat.isFile()) {
-          // Verify canonical path containment before modifying file
-          const canonicalFile = SecurityPolicyEngine.resolveCanonicalPath(fullPath);
-          if (canonicalFile.startsWith(canonicalWorktree + path.sep) || canonicalFile === canonicalWorktree) {
-            await fs.writeFile(fullPath, placeholder, { encoding: 'utf8', flag: 'w' });
-          }
         }
-      } catch (err) {
-        console.warn(`[Secret Sanitization] Handled security boundary for ${relPath}:`, err);
+      } else if (lstat.isFile()) {
+        // P1 FIX (Issue 2): NEVER overwrite tracked repository files with placeholders!
+        // Tracked files must remain intact; container sandbox mounts empty masks over them.
+        if (trackedFiles.has(relPath)) {
+          return;
+        }
+
+        // Verify canonical path containment before modifying untracked secret file
+        const canonicalFile = SecurityPolicyEngine.resolveCanonicalPath(fullPath);
+        if (canonicalFile.startsWith(canonicalWorktree + path.sep) || canonicalFile === canonicalWorktree) {
+          await fs.writeFile(fullPath, placeholder, { encoding: 'utf8', flag: 'w' });
+        }
       }
     };
 
     // Recursive directory walk matching SecurityPolicyEngine.isSensitiveSecret
+    // P0 FIX (Issue 3): No arbitrary depth cutoff; throw on excessive depth or traversal errors (fail-closed)
+    const visitedDirs = new Set<string>();
     const scanDir = async (currentDir: string, depth = 0) => {
-      if (depth > 6) return;
+      if (depth > 40) {
+        throw new Error(
+          `Security Exception: Maximum directory traversal depth (40) exceeded at "${currentDir}". Directory structure may be recursive or adversarial.`
+        );
+      }
+      const canonicalDir = SecurityPolicyEngine.resolveCanonicalPath(currentDir);
+      if (visitedDirs.has(canonicalDir)) return;
+      visitedDirs.add(canonicalDir);
+
       let entries: any[] = [];
       try {
         entries = await fs.readdir(currentDir, { withFileTypes: true });
-      } catch {
-        return;
+      } catch (err: any) {
+        throw new Error(
+          `Security Exception: Failed to read directory "${currentDir}" during mandatory secret sanitization: ${err.message}`
+        );
       }
 
       for (const entry of entries) {
@@ -494,7 +645,14 @@ export class RepoInspector {
     ];
     for (const f of rootCommon) {
       const p = path.join(canonicalWorktree, f);
-      await sanitizeEntry(p, f);
+      try {
+        const stat = await fs.lstat(p).catch(() => null);
+        if (stat) {
+          await sanitizeEntry(p, f);
+        }
+      } catch (err: any) {
+        throw new Error(`Security Exception: Failed to sanitize secret path "${p}": ${err.message}`);
+      }
     }
 
     // 2. Full recursive scan across all nested files and sensitive directories

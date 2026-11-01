@@ -45,22 +45,46 @@ export class ContainerSandbox {
     return maskFile;
   }
 
+  private static readonly BINARY_EXTENSIONS = new Set([
+    '.png', '.jpg', '.jpeg', '.gif', '.ico', '.webp', '.svg',
+    '.woff', '.woff2', '.ttf', '.eot', '.otf',
+    '.zip', '.tar', '.gz', '.tgz', '.7z', '.rar',
+    '.pdf', '.wasm', '.bin', '.exe', '.dll', '.so', '.dylib',
+    '.jar', '.class', '.pyc', '.pyo'
+  ]);
+
   /**
-   * P0 FIX (Issue 1): Recursively discovers all sensitive secret paths in the workspace
-   * matching SecurityPolicyEngine.isSensitiveSecret() so they can be mounted with
-   * read-only empty masks, preventing external agents from reading credentials.
+   * P0/P1 FIX (Issues 3 & 7): Recursively discovers all sensitive secret paths in the workspace
+   * using both path-based criteria (SecurityPolicyEngine.isSensitiveSecret) AND content-based
+   * secret scanning (SecurityPolicyEngine.containsSensitiveSecret) for ordinary files (< 2MB).
+   * - P0 FIX (Issue 3): No arbitrary depth cutoff. Tracks visited directories to prevent loops,
+   *   and fails closed on excessive depth (> 40) or filesystem inspection errors.
+   * - P1 FIX (Issue 7): Content-based secret inspection masks ordinary files containing credentials
+   *   (e.g., config.json with embedded API keys or tokens) so external agents cannot access them.
    */
   static findSensitiveFilesToMask(workspacePath: string): string[] {
     const sensitivePaths: string[] = [];
     const canonicalWorkspace = SecurityPolicyEngine.resolveCanonicalPath(workspacePath);
+    const visitedDirs = new Set<string>();
 
     const scan = (dir: string, depth = 0) => {
-      if (depth > 6) return;
+      if (depth > 40) {
+        throw new Error(
+          `Security Exception: Maximum directory traversal depth (40) exceeded at "${dir}". Cannot guarantee complete secret isolation.`
+        );
+      }
+
+      const canonicalDir = SecurityPolicyEngine.resolveCanonicalPath(dir);
+      if (visitedDirs.has(canonicalDir)) return;
+      visitedDirs.add(canonicalDir);
+
       let entries: fs.Dirent[] = [];
       try {
         entries = fs.readdirSync(dir, { withFileTypes: true });
-      } catch {
-        return;
+      } catch (err: any) {
+        throw new Error(
+          `Security Exception: Failed to inspect directory "${dir}" during mandatory secret scan: ${err.message}. Aborting container launch.`
+        );
       }
 
       for (const entry of entries) {
@@ -79,6 +103,32 @@ export class ContainerSandbox {
           }
         } else if (entry.isDirectory()) {
           scan(fullPath, depth + 1);
+        } else if (entry.isFile()) {
+          // P1 FIX (Issue 7): Content-based secret inspection on ordinary files
+          const ext = path.extname(entry.name).toLowerCase();
+          if (!this.BINARY_EXTENSIONS.has(ext)) {
+            try {
+              const stat = fs.statSync(fullPath);
+              if (stat.size <= 2 * 1024 * 1024) {
+                const fd = fs.openSync(fullPath, 'r');
+                const buf = Buffer.alloc(Math.min(stat.size, 128 * 1024));
+                fs.readSync(fd, buf, 0, buf.length, 0);
+                fs.closeSync(fd);
+                const content = buf.toString('utf8');
+                const scanResult = SecurityPolicyEngine.containsSensitiveSecret(content);
+                if (scanResult.hasSecret) {
+                  console.warn(
+                    `[Container Secret Masking] Detected embedded secret (${scanResult.reason}) in "${relPath}". Adding to container mount masks.`
+                  );
+                  sensitivePaths.push(relPath);
+                }
+              }
+            } catch (readErr: any) {
+              throw new Error(
+                `Security Exception: Failed to inspect file content at "${fullPath}" during mandatory secret scan: ${readErr.message}. Cannot guarantee isolation.`
+              );
+            }
+          }
         }
       }
     };
@@ -239,15 +289,14 @@ export class ContainerSandbox {
     // Tasks execute in self-contained disposable repositories where /workspace/.git already exists as an isolated directory.
     // If a legacy worktree file is present, an isolated disposable task git directory is provided without touching host git metadata.
 
-    // P0 FIX (Issue 1 & 5 & CI): Kernel-level container boundary secret protection using cross-platform bind mounts.
+    // P0 FIX (Issue 1, 3 & 7): Kernel-level container boundary secret protection using cross-platform bind mounts.
     // Mount empty read-only placeholder over ALL sensitive files across the entire workspace hierarchy (.aws, .ssh, .env, etc.)
-    try {
-      const sensitiveFilesToMask = this.findSensitiveFilesToMask(canonicalWorkspace);
-      const emptyMaskFile = this.getEmptySecretMaskFile().replace(/\\/g, '/');
-      for (const sf of sensitiveFilesToMask) {
-        dockerArgs.push('--mount', `type=bind,source=${emptyMaskFile},target=/workspace/${sf},readonly`);
-      }
-    } catch {}
+    // Fail-closed: any failure to discover or mask secrets throws immediately, preventing container execution with exposed credentials.
+    const sensitiveFilesToMask = this.findSensitiveFilesToMask(canonicalWorkspace);
+    const emptyMaskFile = this.getEmptySecretMaskFile().replace(/\\/g, '/');
+    for (const sf of sensitiveFilesToMask) {
+      dockerArgs.push('--mount', `type=bind,source=${emptyMaskFile},target=/workspace/${sf},readonly`);
+    }
 
     // P0 FIX: Strictly forward agent credentials ONLY when explicitly requested for external agents.
     // Secrets are forwarded by name (-e KEY) rather than (-e KEY=val) so values never appear in process arguments!

@@ -898,8 +898,9 @@ export class OrchestrationEngine extends EventEmitter {
 
     // Truthful Completion Gate: Distinguish completed vs partially_completed vs needs_human_review vs failed
     if (finalVerification.isVerified && review.isComplete) {
-      // P0/P1 FIX (Issue 2): Commit any remaining verified changes in the worktree and sync commits
+      // P0/P1 FIX (Issues 2 & 6): Commit any remaining verified changes in the worktree and sync commits
       // from the isolated disposable repository back to the parent repository's task branch.
+      // Branch synchronization is a required condition; failure transitions task to needs_human_review.
       if (taskWorktreePath && isWorktree && taskBranchName) {
         try {
           const statusCheck = await (taskInspector as any).git.status();
@@ -915,7 +916,22 @@ export class OrchestrationEngine extends EventEmitter {
             ]);
           }
         } catch (syncErr: any) {
-          console.warn(`[Worktree Sync] Failed to sync branch ${taskBranchName} into parent repository: ${syncErr.message || syncErr}`);
+          const syncErrMsg = `Safety Exception: Failed to synchronize task branch "${taskBranchName}" into parent repository: ${syncErr.message || syncErr}`;
+          console.error(`[Worktree Sync Failure] ${syncErrMsg}`);
+          await this.transitionTaskState(
+            taskId,
+            stateMachine,
+            'needs_human_review',
+            syncErrMsg,
+            review.summary
+          );
+          await this.emitOrchestratorEvent({
+            taskId,
+            type: 'TASK_NEEDS_REVIEW',
+            message: syncErrMsg,
+            data: { review, finalVerification, taskBranchName, error: syncErrMsg },
+          });
+          return;
         }
       }
 
@@ -931,9 +947,14 @@ export class OrchestrationEngine extends EventEmitter {
           }
 
           // P0/P1 FIX: Establish that destination working tree is 100% clean before attempting merge
-          if (currentStatus.files.length > 0) {
+          const realDirtyFiles = currentStatus.files.filter(
+            (f) =>
+              !f.path.startsWith('.orchestrator_worktrees') &&
+              !f.path.startsWith('.orchestrator_sandboxes')
+          );
+          if (realDirtyFiles.length > 0) {
             throw new Error(
-              `Cannot auto-merge: destination working tree has uncommitted or dirty changes (${currentStatus.files
+              `Cannot auto-merge: destination working tree has uncommitted or dirty changes (${realDirtyFiles
                 .map((f) => f.path)
                 .join(', ')}). Aborting auto-merge to protect user uncommitted work.`
             );
@@ -1101,6 +1122,7 @@ export class OrchestrationEngine extends EventEmitter {
           return;
         }
 
+        // P1 FIX (Issue 6): Branch synchronization into parent repository is a required completion condition
         if (taskWorktreePath && isWorktree && taskBranchName) {
           try {
             const wtStat = await fs.stat(taskWorktreePath).catch(() => null);
@@ -1111,7 +1133,24 @@ export class OrchestrationEngine extends EventEmitter {
                 `+refs/heads/${taskBranchName}:refs/heads/${taskBranchName}`,
               ]);
             }
-          } catch {}
+          } catch (syncErr: any) {
+            const syncErrMsg = `Safety Exception: Final synchronization of task branch "${taskBranchName}" failed: ${syncErr.message || syncErr}`;
+            console.error(`[Worktree Final Sync Failure] ${syncErrMsg}`);
+            await this.transitionTaskState(
+              taskId,
+              stateMachine,
+              'needs_human_review',
+              syncErrMsg,
+              review.summary
+            );
+            await this.emitOrchestratorEvent({
+              taskId,
+              type: 'TASK_NEEDS_REVIEW',
+              message: syncErrMsg,
+              data: { review, finalVerification, taskBranchName, error: syncErrMsg },
+            });
+            return;
+          }
         }
 
         await this.transitionTaskState(taskId, stateMachine, 'completed', 'All requirements verified', review.summary);
@@ -1223,13 +1262,13 @@ export class OrchestrationEngine extends EventEmitter {
               console.error(`Failed to create safe recovery snapshot for task ${taskId}:`, snapErr);
             }
 
-            if (snapshotPreserved) {
-              await inspector.removeIsolatedWorktree(taskWorktreePath);
-            } else {
-              // P1 FIX (Issue 3): NEVER delete dirty worktree when snapshot creation failed. Quarantine it safely.
+            const finalState = stateMachine.getState();
+            if (finalState === 'needs_human_review' || !snapshotPreserved) {
               console.warn(
-                `Safety Preservation [Quarantine]: Preserving uncommitted worktree at "${taskWorktreePath}" because snapshot creation failed. Work is retained safely.`
+                `Safety Preservation [Quarantine]: Preserving worktree at "${taskWorktreePath}" for state "${finalState}". Work is retained safely.`
               );
+            } else {
+              await inspector.removeIsolatedWorktree(taskWorktreePath);
             }
           } else {
             await inspector.removeIsolatedSandbox(taskWorktreePath);
