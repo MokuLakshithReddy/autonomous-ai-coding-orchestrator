@@ -207,7 +207,28 @@ export class ContainerSandbox {
         const fullPath = path.join(dir, entry.name);
         const relPath = path.relative(canonicalWorkspace, fullPath).replace(/\\/g, '/');
 
-        if (SecurityPolicyEngine.isSensitiveSecret(relPath)) {
+        let isSymlink = false;
+        try {
+          isSymlink = entry.isSymbolicLink() || fs.lstatSync(fullPath).isSymbolicLink();
+        } catch {}
+
+        if (isSymlink) {
+          // P2 FIX: Symlink isolation - check symlink path and target content
+          if (SecurityPolicyEngine.isSensitiveSecret(relPath)) {
+            sensitivePaths.push(relPath);
+          } else {
+            try {
+              const realTarget = fs.realpathSync(fullPath);
+              const relTarget = path.relative(canonicalWorkspace, realTarget).replace(/\\/g, '/');
+              if (SecurityPolicyEngine.isSensitiveSecret(relTarget) || this.fileContainsSecrets(realTarget, relTarget)) {
+                sensitivePaths.push(relPath);
+              }
+            } catch {
+              // Unresolvable or broken symlink: mask to fail safe
+              sensitivePaths.push(relPath);
+            }
+          }
+        } else if (SecurityPolicyEngine.isSensitiveSecret(relPath)) {
           if (entry.isDirectory()) {
             scan(fullPath, depth + 1);
           } else {

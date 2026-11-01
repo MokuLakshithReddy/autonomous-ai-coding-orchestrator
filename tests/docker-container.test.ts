@@ -428,6 +428,60 @@ async function runDockerContainerTests() {
     assert.strictEqual(cleanCheck.hasSecret, false, 'Clean code and UUIDs must NOT be falsely flagged');
     console.log('   ✓ SVG text content and database connection strings accurately scanned without false positives.');
 
+    // -------------------------------------------------------------------------
+    // Test 14: Tracked Symlink Secret Inaccessibility Inside Container (P2)
+    // -------------------------------------------------------------------------
+    console.log('14. Testing Tracked Symlink Secret Inaccessibility Inside Container Sandbox (P2)...');
+    const symlinkWsDir = path.join(testDir, 'symlink-mask-ws');
+    await fs.mkdir(symlinkWsDir, { recursive: true });
+
+    const secretDbConfig = path.join(symlinkWsDir, 'app_config.json');
+    await fs.writeFile(
+      secretDbConfig,
+      JSON.stringify({ databaseUrl: 'postgres://root:supersecretpassword123@db:5432/main' }, null, 2)
+    );
+
+    const symlinkEnv = path.join(symlinkWsDir, '.env');
+    let liveSymlinkOk = false;
+    try {
+      await fs.symlink('app_config.json', symlinkEnv);
+      liveSymlinkOk = true;
+    } catch {}
+
+    if (liveSymlinkOk) {
+      const maskedPaths = ContainerSandbox.findSensitiveFilesToMask(symlinkWsDir);
+      assert.ok(maskedPaths.includes('.env'), 'Tracked symlink .env must be included in masked paths');
+      assert.ok(maskedPaths.includes('app_config.json'), 'Target file containing secret must be included in masked paths');
+
+      const catEnvArgs = ContainerSandbox.buildDockerRunArgs(symlinkWsDir, 'cat /workspace/.env');
+      const hasEnvMount = catEnvArgs.args.some((a) => a.includes('target=/workspace/.env,readonly'));
+      const hasSymlinkConfigMount = catEnvArgs.args.some((a) => a.includes('target=/workspace/app_config.json,readonly'));
+      assert.strictEqual(hasEnvMount, true, 'Container args must mount readonly mask over /workspace/.env');
+      assert.strictEqual(hasSymlinkConfigMount, true, 'Container args must mount readonly mask over /workspace/app_config.json');
+
+      if (isDockerAvailable && canRunLinuxDocker) {
+        console.log('   Executing live container command to verify symlink secret inaccessibility...');
+        const { spawnSync } = await import('node:child_process');
+        const catRes = spawnSync(catEnvArgs.executable, catEnvArgs.args, { encoding: 'utf8' });
+        assert.strictEqual(catRes.status, 0, `Container read must exit with 0 (stderr: ${catRes.stderr})`);
+        assert.ok(
+          !catRes.stdout.includes('supersecretpassword123'),
+          'Sensitive target credentials must NEVER be visible when reading through .env symlink inside container!'
+        );
+        assert.ok(
+          catRes.stdout.includes('Masked by Orchestrator Isolation Boundary'),
+          'Reading through .env symlink inside container must return empty mask file content'
+        );
+        console.log('   ✓ Live container verified: reading through .env symlink returns empty mask; secret is 100% inaccessible.');
+      } else {
+        console.log('   ✓ Tracked symlink kernel masking boundaries verified via Docker bind-mount configuration.');
+      }
+    } else {
+      console.log('   (Symlink creation requires elevated privileges on this OS; verified target masking & bind-mount logic)');
+      const maskedPaths = ContainerSandbox.findSensitiveFilesToMask(symlinkWsDir);
+      assert.ok(maskedPaths.includes('app_config.json'), 'Target file containing secret must be masked');
+    }
+
     console.log('\n=== ALL DOCKER CONTAINER TESTS PASSED! ===\n');
   } finally {
     await fs.rm(testDir, { recursive: true, force: true });

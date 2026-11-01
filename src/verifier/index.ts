@@ -95,15 +95,25 @@ export class IndependentVerifier {
     const testCmdToRun = customVerificationCmd || meta.testCmd;
     if (testCmdToRun) {
       const res = await this.toolbox.executeCommand(testCmdToRun, 180000, {}, options?.abortSignal);
-      const passed = res.exitCode === 0;
+      const outputStr = `${res.stdout}\n${res.stderr}`.trim();
+      // P2 FIX: Detect zero-discovery test runs (e.g. pytest exit code 5 or "Ran 0 tests")
+      const hasZeroDiscovery =
+        res.exitCode === 5 ||
+        /\b(?:Ran 0 tests|collected 0 items|no tests ran|no tests were found)\b/i.test(outputStr);
+
+      const passed = res.exitCode === 0 && !hasZeroDiscovery;
       testCheck = {
         status: passed ? 'PASSED' : 'FAILED',
         command: testCmdToRun,
-        output: `${res.stdout}\n${res.stderr}`.trim(),
+        output: outputStr,
         exitCode: res.exitCode,
         durationMs: res.durationMs,
+        reason: hasZeroDiscovery ? 'Zero tests discovered or executed by test runner.' : undefined,
       };
-      if (!passed) {
+      if (hasZeroDiscovery) {
+        blockingReasons.push('Test discovery failure: Zero tests were discovered or collected by test suite.');
+        diagnosticsList.push(`[ZERO TESTS DISCOVERED]: "${testCmdToRun}" finished with zero tests collected or executed.\n${outputStr}`);
+      } else if (!passed) {
         blockingReasons.push(`Automated test suite failed with exit code ${res.exitCode}`);
         diagnosticsList.push(`[TEST FAILURE]: ${testCmdToRun} failed (exit ${res.exitCode}).\n${res.stderr || res.stdout}`);
       }

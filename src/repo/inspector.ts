@@ -942,14 +942,84 @@ export class RepoInspector {
         else if (hasRequirements) packageManager = 'pip';
 
         if (!testCmd && (hasTestPy || hasTestsDir || hasPyproject || hasRequirements)) {
+          let prefersPytest = false;
+
+          // 1. Check explicit pytest configuration files
           const hasPytestConfig =
             (await fs.access(path.join(this.workspacePath, 'pytest.ini')).then(() => true).catch(() => false)) ||
             (await fs.access(path.join(this.workspacePath, 'conftest.py')).then(() => true).catch(() => false)) ||
-            (await fs.access(path.join(this.workspacePath, 'tox.ini')).then(() => true).catch(() => false));
+            (await fs.access(path.join(this.workspacePath, 'tox.ini')).then(() => true).catch(() => false)) ||
+            (await fs.access(path.join(this.workspacePath, 'setup.cfg')).then(async () => {
+              const cfg = await fs.readFile(path.join(this.workspacePath, 'setup.cfg'), 'utf8').catch(() => '');
+              return /\[tool:pytest\]|\[pytest\]/i.test(cfg);
+            }).catch(() => false));
+
+          if (hasPytestConfig) {
+            prefersPytest = true;
+          }
+
+          // 2. Check pyproject.toml for pytest tool section or dependencies
+          if (!prefersPytest && hasPyproject) {
+            try {
+              const pyprojectContent = await fs.readFile(path.join(this.workspacePath, 'pyproject.toml'), 'utf8');
+              if (
+                /\[tool\.pytest/i.test(pyprojectContent) ||
+                /["']pytest["']/i.test(pyprojectContent) ||
+                /\bpytest\s*(?:>=|==|~=|<|>|\^|$)/im.test(pyprojectContent)
+              ) {
+                prefersPytest = true;
+              }
+            } catch {}
+          }
+
+          // 3. Check requirements.txt or test-requirements.txt
+          if (!prefersPytest) {
+            for (const reqFile of ['requirements.txt', 'requirements-dev.txt', 'test-requirements.txt', 'dev-requirements.txt']) {
+              try {
+                const reqContent = await fs.readFile(path.join(this.workspacePath, reqFile), 'utf8');
+                if (/\bpytest\b/i.test(reqContent)) {
+                  prefersPytest = true;
+                  break;
+                }
+              } catch {}
+            }
+          }
+
+          // 4. Inspect test files for pytest-style standalone test functions vs unittest.TestCase
+          if (!prefersPytest) {
+            try {
+              const testFileCandidates: string[] = [];
+              const scanFiles = async (dir: string, depth = 0) => {
+                if (depth > 2) return;
+                const dirEntries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
+                for (const de of dirEntries) {
+                  if (de.isDirectory() && (de.name === 'tests' || de.name === 'test')) {
+                    await scanFiles(path.join(dir, de.name), depth + 1);
+                  } else if (de.isFile() && (/test_.*\.py$|.*_test\.py$/i.test(de.name))) {
+                    testFileCandidates.push(path.join(dir, de.name));
+                  }
+                }
+              };
+              await scanFiles(this.workspacePath);
+
+              for (const tf of testFileCandidates.slice(0, 3)) {
+                const content = await fs.readFile(tf, 'utf8').catch(() => '');
+                if (/\bimport\s+pytest\b|\bfrom\s+pytest\s+import\b/i.test(content)) {
+                  prefersPytest = true;
+                  break;
+                }
+                // If it defines def test_...() and does NOT import unittest or inherit TestCase
+                if (/\bdef\s+test_[a-zA-Z0-9_]+\s*\(/i.test(content) && !/\bunittest\.TestCase\b|\bimport\s+unittest\b/i.test(content)) {
+                  prefersPytest = true;
+                  break;
+                }
+              }
+            } catch {}
+          }
 
           if (hasPoetry) {
-            testCmd = 'poetry run pytest';
-          } else if (hasPytestConfig) {
+            testCmd = prefersPytest ? 'poetry run pytest' : 'poetry run python -m unittest discover -s . -p "*test*.py"';
+          } else if (prefersPytest) {
             testCmd = 'python -m pytest';
           } else {
             testCmd = 'python -m unittest discover -s . -p "*test*.py"';

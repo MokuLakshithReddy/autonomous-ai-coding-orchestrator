@@ -8,6 +8,7 @@ import { TaskStateMachine, IllegalStateTransitionError } from '../src/core/state
 import { SecurityPolicyEngine } from '../src/security/policy.js';
 import { ContainerSandbox } from '../src/security/sandbox.js';
 import { IndependentVerifier } from '../src/verifier/index.js';
+import { RepoInspector, type ProjectMetadata } from '../src/repo/inspector.js';
 import { AgentToolbox } from '../src/agent/tools.js';
 import { BuiltInAutonomousAgent, createAgent } from '../src/agent/index.js';
 import { taskRepo, verificationRepo, eventRepo, initDatabase } from '../src/db/index.js';
@@ -1661,6 +1662,112 @@ console.log('Assertion PASSED: feature active is true');
 
   try {
     await fs.rm(test37Dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  } catch {}
+
+  // Test 38: End-to-End Recovery Quarantine for Failed Tasks with Secret-Bearing Changes (P2)
+  console.log('\n38. Testing End-to-End Recovery Quarantine on Task Failure with Sensitive Changes (P2)...');
+  const test38Dir = await fs.mkdtemp(path.join(os.tmpdir(), 'quarantine-e2e-test-'));
+  const test38Git = simpleGit(test38Dir);
+  await test38Git.init();
+  await test38Git.addConfig('user.name', 'Quarantine Tester', false, 'local');
+  await test38Git.addConfig('user.email', 'quarantine@example.org', false, 'local');
+
+  await fs.writeFile(path.join(test38Dir, 'index.js'), 'console.log("base");\n');
+  await fs.writeFile(
+    path.join(test38Dir, 'package.json'),
+    JSON.stringify({ name: 'quarantine-test', type: 'module', scripts: { test: 'node -e "process.exit(1)"' } }, null, 2)
+  );
+  await test38Git.add('.');
+  await test38Git.commit('Initial base commit');
+
+  const engine38 = new OrchestrationEngine({ allowedWorkspaces: [test38Dir] });
+  let allocatedWorktreePath = '';
+
+  const task38 = await engine38.runTask({
+    prompt: 'Implement database connection feature with config',
+    workspacePath: test38Dir,
+    maxRetries: 0,
+    customAgent: {
+      name: 'FailingAgentWithSecrets',
+      workspacePath: test38Dir,
+      async executeStep() {
+        allocatedWorktreePath = this.workspacePath;
+        // Write a sensitive uncommitted credential into the task workspace
+        await fs.writeFile(
+          path.join(this.workspacePath, 'db_connection.js'),
+          'export const db = "postgres://dbuser:supersecretpass999@internal.db:5432/main";\n'
+        );
+        throw new Error('Simulated agent execution error: database driver failed to connect');
+      },
+      setWorkspacePath(p: string) {
+        this.workspacePath = p;
+        allocatedWorktreePath = p;
+      },
+    } as any,
+  });
+
+  // Await task terminal state
+  const startWait38 = Date.now();
+  let taskRec38 = await taskRepo.getById(task38.id);
+  while (taskRec38 && !['completed', 'failed', 'blocked', 'cancelled', 'needs_human_review'].includes(taskRec38.status.toLowerCase())) {
+    if (Date.now() - startWait38 > 30000) break;
+    await new Promise((r) => setTimeout(r, 400));
+    taskRec38 = await taskRepo.getById(task38.id);
+  }
+
+  assert.strictEqual(taskRec38?.status.toLowerCase(), 'failed', `Task must fail; got ${taskRec38?.status}`);
+  assert.ok(allocatedWorktreePath, 'Allocated worktree path must have been assigned to customAgent');
+
+  // CRITICAL E2E ASSERTION: The worktree directory MUST STILL EXIST on disk (quarantined) and NOT deleted!
+  const wtStat = await fs.stat(allocatedWorktreePath).catch(() => null);
+  assert.ok(wtStat && wtStat.isDirectory(), `Worktree directory "${allocatedWorktreePath}" MUST NOT be deleted! Must be retained for human review.`);
+
+  // Verify the uncommitted sensitive changes are intact inside the quarantined directory
+  const preservedSecretContent = await fs.readFile(path.join(allocatedWorktreePath, 'db_connection.js'), 'utf8');
+  assert.ok(
+    preservedSecretContent.includes('supersecretpass999'),
+    'Uncommitted secret-bearing changes must be preserved inside quarantined worktree!'
+  );
+  console.log('   ✓ Failed task with sensitive uncommitted changes cleanly quarantined on disk; worktree preserved for review.');
+
+  try {
+    await fs.rm(test38Dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  } catch {}
+
+  // Test 39: Zero-Discovery Test Suite Rejection (P2)
+  console.log('\n39. Testing Zero-Discovery Test Runner Rejection (P2)...');
+  const test39Dir = await fs.mkdtemp(path.join(os.tmpdir(), 'zero-discovery-test-'));
+  const test39Git = simpleGit(test39Dir);
+  await test39Git.init();
+  await test39Git.addConfig('user.name', 'Zero Test', false, 'local');
+  await test39Git.addConfig('user.email', 'zero@local', false, 'local');
+  await fs.writeFile(path.join(test39Dir, 'app.py'), 'def add(a, b): return a + b\n');
+  await fs.writeFile(path.join(test39Dir, 'zero_test.js'), 'console.log("Ran 0 tests in 0.000s"); process.exit(0);\n');
+  await test39Git.add('.');
+  await test39Git.commit('Initial base commit');
+
+  const inspector39 = new RepoInspector(test39Dir);
+  const verifier39 = new IndependentVerifier(test39Dir);
+  const fakeMeta: ProjectMetadata = {
+    isGitRepo: true,
+    hasUncommittedChanges: false,
+    uncommittedFiles: [],
+    ecosystems: ['python'],
+    testCmd: 'node zero_test.js',
+    fileTreeSummary: ['app.py', 'zero_test.js'],
+  };
+
+  const zeroReport = await verifier39.verify(fakeMeta, ['Unit tests pass cleanly']);
+  assert.strictEqual(zeroReport.isVerified, false, 'Zero tests discovered must NOT be treated as verified');
+  assert.strictEqual(zeroReport.status, 'FAILED', 'Zero tests discovered must report status FAILED');
+  assert.ok(
+    zeroReport.blockingReasons.some((r) => r.includes('Zero tests were discovered')),
+    'Must record zero-discovery blocking reason'
+  );
+  console.log('   ✓ Test runner completing with zero discovered tests strictly rejected with FAILED verdict.');
+
+  try {
+    await fs.rm(test39Dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   } catch {}
 
   console.log('\n=== ALL P0/P1 CORRECTNESS, SAFETY & VERIFICATION TESTS PASSED! ===\n');
