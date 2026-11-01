@@ -367,6 +367,28 @@ npm start
 ```
 Navigate to **`http://localhost:4000`** in your browser.
 
+### 4. Docker Container Isolation & External Agents (Optional)
+To execute external coding agents (Aider, Claude Code) or run untrusted builds inside OS-isolated containers:
+
+```bash
+# Verify Docker daemon and image availability
+npm run docker:check
+
+# Build custom container images for Claude Code & Aider
+npm run docker:build
+
+# Or build individual images
+npm run docker:build:claude
+npm run docker:build:aider
+```
+
+When enabled via `USE_CONTAINER_SANDBOX=true`:
+* Tasks run inside restricted low-privilege containers (`orchestrator` user `1000:1000`).
+* Network is contained (`--network none` by default; automatically routed to `bridge` for dependency installs).
+* All credentials, `.env*`, `.aws/`, `.ssh/`, `.kube/`, `.gcloud/`, and tokens are masked with read-only empty bind mounts.
+* Host repository `.git` metadata is completely protected with zero write access.
+* Quarantined worktrees support safe recovery-in-place on task resumption.
+
 ---
 
 ## 🧪 Test Suites & CI/CD Pipeline

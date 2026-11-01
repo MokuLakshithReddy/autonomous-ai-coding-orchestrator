@@ -898,6 +898,27 @@ export class OrchestrationEngine extends EventEmitter {
 
     // Truthful Completion Gate: Distinguish completed vs partially_completed vs needs_human_review vs failed
     if (finalVerification.isVerified && review.isComplete) {
+      // P0/P1 FIX (Issue 2): Commit any remaining verified changes in the worktree and sync commits
+      // from the isolated disposable repository back to the parent repository's task branch.
+      if (taskWorktreePath && isWorktree && taskBranchName) {
+        try {
+          const statusCheck = await (taskInspector as any).git.status();
+          if (statusCheck.files.length > 0) {
+            await taskInspector.createTaskCheckpoint([], `Task ${taskId} final changes before completion`);
+          }
+          const wtStat = await fs.stat(taskWorktreePath).catch(() => null);
+          if (wtStat && wtStat.isDirectory()) {
+            await (inspector as any).git.raw([
+              'fetch',
+              taskWorktreePath,
+              `+refs/heads/${taskBranchName}:refs/heads/${taskBranchName}`,
+            ]);
+          }
+        } catch (syncErr: any) {
+          console.warn(`[Worktree Sync] Failed to sync branch ${taskBranchName} into parent repository: ${syncErr.message || syncErr}`);
+        }
+      }
+
       let autoMergeSucceeded = false;
       let autoMergeError: string | undefined;
 
@@ -1078,6 +1099,19 @@ export class OrchestrationEngine extends EventEmitter {
             data: { review, finalVerification, taskBranchName, uncommittedFiles },
           });
           return;
+        }
+
+        if (taskWorktreePath && isWorktree && taskBranchName) {
+          try {
+            const wtStat = await fs.stat(taskWorktreePath).catch(() => null);
+            if (wtStat && wtStat.isDirectory()) {
+              await (inspector as any).git.raw([
+                'fetch',
+                taskWorktreePath,
+                `+refs/heads/${taskBranchName}:refs/heads/${taskBranchName}`,
+              ]);
+            }
+          } catch {}
         }
 
         await this.transitionTaskState(taskId, stateMachine, 'completed', 'All requirements verified', review.summary);

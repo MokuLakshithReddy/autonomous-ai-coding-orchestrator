@@ -1377,6 +1377,24 @@ diff --git a/tests/math.test.ts b/tests/math.test.ts
     await fs.symlink(canaryFile32, absSymlink);
   } catch {}
 
+  // 3. Nested sensitive credentials (.aws/credentials, .ssh/id_ed25519, apps/backend/.env)
+  const nestedAwsDir = path.join(workspace32, '.aws');
+  const nestedSshDir = path.join(workspace32, '.ssh');
+  const nestedAppDir = path.join(workspace32, 'apps', 'backend');
+  await fs.mkdir(nestedAwsDir, { recursive: true });
+  await fs.mkdir(nestedSshDir, { recursive: true });
+  await fs.mkdir(nestedAppDir, { recursive: true });
+
+  const nestedAwsCreds = path.join(nestedAwsDir, 'credentials');
+  const nestedSshKey = path.join(nestedSshDir, 'id_ed25519');
+  const nestedAppEnv = path.join(nestedAppDir, '.env');
+  const rootNpmrc = path.join(workspace32, '.npmrc');
+
+  await fs.writeFile(nestedAwsCreds, '[default]\naws_access_key_id = AKIA12345678\naws_secret_access_key = secret');
+  await fs.writeFile(nestedSshKey, '-----BEGIN OPENSSH PRIVATE KEY-----\nreal_private_key\n-----END OPENSSH PRIVATE KEY-----');
+  await fs.writeFile(nestedAppEnv, 'NESTED_DB_PASS=production_secret_pass');
+  await fs.writeFile(rootNpmrc, '//registry.npmjs.org/:_authToken=npm_secret_auth_token');
+
   // Run sanitization
   await inspector32.sanitizeWorktreeSecrets(workspace32);
 
@@ -1392,6 +1410,19 @@ diff --git a/tests/math.test.ts b/tests/math.test.ts
     const envContent = await fs.readFile(relSymlink, 'utf8');
     assert.ok(envContent.includes('MASKED_BY_ORCHESTRATOR_ISOLATION'), '.env must contain isolation disclaimer');
   }
+
+  // Assert nested secret files were all comprehensively sanitized!
+  const postAws = await fs.readFile(nestedAwsCreds, 'utf8');
+  assert.ok(postAws.includes('MASKED_BY_ORCHESTRATOR_ISOLATION'), '.aws/credentials must be sanitized');
+
+  const postSsh = await fs.readFile(nestedSshKey, 'utf8');
+  assert.ok(postSsh.includes('MASKED_BY_ORCHESTRATOR_ISOLATION'), '.ssh/id_ed25519 must be sanitized');
+
+  const postAppEnv = await fs.readFile(nestedAppEnv, 'utf8');
+  assert.ok(postAppEnv.includes('MASKED_BY_ORCHESTRATOR_ISOLATION'), 'apps/backend/.env must be sanitized');
+
+  const postNpmrc = await fs.readFile(rootNpmrc, 'utf8');
+  assert.ok(postNpmrc.includes('MASKED_BY_ORCHESTRATOR_ISOLATION'), '.npmrc must be sanitized');
 
   await fs.rm(hostDir32, { recursive: true, force: true });
   await fs.rm(workspace32, { recursive: true, force: true });

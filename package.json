@@ -19,7 +19,11 @@
     "test:benchmarks:live": "tsx tests/live-llm-benchmarks.test.ts",
     "test:llm": "tsx tests/llm-autonomous-repair.test.ts",
     "benchmark": "tsx benchmarks/runner.ts",
-    "benchmark:live": "tsx benchmarks/live-runner.ts"
+    "benchmark:live": "tsx benchmarks/live-runner.ts",
+    "docker:build": "docker build -f docker/Dockerfile.claude -t orchestrator-claude:latest . && docker build -f docker/Dockerfile.aider -t orchestrator-aider:latest .",
+    "docker:build:claude": "docker build -f docker/Dockerfile.claude -t orchestrator-claude:latest .",
+    "docker:build:aider": "docker build -f docker/Dockerfile.aider -t orchestrator-aider:latest .",
+    "docker:check": "tsx -e \"import { ContainerSandbox } from './src/security/sandbox.js'; ContainerSandbox.checkImageAvailability().then(r => console.log('Docker Images Status:', r));\""
   },
   "keywords": [
     "ai",

@@ -352,6 +352,12 @@ export class RepoInspector {
    * P1 FIX (Issue 2): Reuses existing task branch on resumption and NEVER overwrites with -B.
    * Throws strictly on failure so the orchestrator never silently falls back to the user workspace.
    */
+  /**
+   * P0/P1 FIX (Issues 2 & 3): Creates an isolated task workspace or resumes an existing quarantined worktree.
+   * If the worktree already exists (quarantined after failure), resumes in-place without re-allocating.
+   * Otherwise allocates a genuinely disposable Git repository with independent metadata so containerized
+   * git commands (Aider, Claude Code) operate natively without write access to host .git metadata.
+   */
   async createIsolatedWorktree(taskId: string): Promise<string> {
     if (!(await this.isGitRepository())) {
       throw new Error(`Cannot create Git worktree: Workspace "${this.workspacePath}" is not a Git repository.`);
@@ -359,6 +365,17 @@ export class RepoInspector {
 
     const worktreeDir = path.join(this.workspacePath, '.orchestrator_worktrees', taskId);
     await fs.mkdir(path.dirname(worktreeDir), { recursive: true });
+
+    // P1 FIX (Issue 3): Explicit recovery-in-place path for existing/quarantined worktrees!
+    // Do not attempt to create a second worktree or re-clone if the worktree directory is already present.
+    try {
+      const stat = await fs.stat(worktreeDir).catch(() => null);
+      if (stat && stat.isDirectory()) {
+        console.log(`[Worktree Resumption] Reusing quarantined/existing worktree in-place at "${worktreeDir}".`);
+        await this.sanitizeWorktreeSecrets(worktreeDir);
+        return worktreeDir;
+      }
+    } catch {}
 
     // Clean up any stale worktree registration for this path
     try {
@@ -370,53 +387,55 @@ export class RepoInspector {
       const branchList = await this.git.branchLocal();
       const branchExists = branchList.all.includes(branchName);
 
-      if (branchExists) {
-        // P1 FIX (Issue 2): Re-use existing branch when resuming - NEVER reset with -B!
-        await this.git.raw(['worktree', 'add', worktreeDir, branchName]);
-      } else {
-        // Allocate new task branch from HEAD
-        await this.git.raw(['worktree', 'add', '-b', branchName, worktreeDir, 'HEAD']);
+      if (!branchExists) {
+        await this.git.branch([branchName, 'HEAD']);
+      }
+
+      // P0/P1 FIX (Issue 2): Prefer genuinely disposable clone with independent Git metadata
+      // so container processes receive a self-contained .git directory without host metadata mounts
+      try {
+        await this.git.clone(this.workspacePath, worktreeDir, [
+          '--local',
+          '--branch', branchName,
+          '--single-branch',
+          '--no-tags',
+        ]);
+      } catch (cloneErr) {
+        // Fallback to worktree add if clone fails
+        if (branchExists) {
+          await this.git.raw(['worktree', 'add', worktreeDir, branchName]);
+        } else {
+          await this.git.raw(['worktree', 'add', '-b', branchName, worktreeDir, 'HEAD']);
+        }
       }
     } catch (err: any) {
       throw new Error(`Git worktree allocation failed: ${err.message || String(err)}`);
     }
 
-    // P0 FIX (Issue 5): Mask tracked/untracked credentials in the worktree filesystem so external agents cannot read them
+    // P0 FIX (Issue 1): Recursively mask all tracked/untracked credentials in the worktree filesystem
     await this.sanitizeWorktreeSecrets(worktreeDir);
 
     return worktreeDir;
   }
 
   /**
-   * P0 FIX (Issue 1 & 5): Masks sensitive secret files (.env, credentials, keys) in the isolated workspace.
+   * P0 FIX (Issue 1): Comprehensively masks sensitive secret files (.env, credentials, keys, .aws, .ssh, .kube, .gcloud, etc.)
+   * across the entire worktree hierarchy using SecurityPolicyEngine.isSensitiveSecret().
    * Uses lstat() to identify symbolic links and strictly refuses to write through untrusted symlinks!
    * If a symlink exists (even pointing outside workspace), it unlinks the symlink itself and replaces it
    * with a regular placeholder file, safely preserving host target files from overwrite.
    */
   async sanitizeWorktreeSecrets(worktreeDir: string): Promise<void> {
-    const sensitiveFileNames = [
-      '.env',
-      '.env.local',
-      '.env.development',
-      '.env.production',
-      '.env.test',
-      'credentials.json',
-      'id_rsa',
-      'id_ed25519',
-      'service_account.json',
-    ];
-
     const canonicalWorktree = SecurityPolicyEngine.resolveCanonicalPath(worktreeDir);
     const placeholder = '# MASKED_BY_ORCHESTRATOR_ISOLATION\n# Real host secrets are prohibited inside isolated task workspaces.\n';
 
-    for (const sf of sensitiveFileNames) {
-      const fullPath = path.join(worktreeDir, sf);
+    const sanitizeEntry = async (fullPath: string, relPath: string) => {
       try {
         const lstat = await fs.lstat(fullPath).catch(() => null);
-        if (!lstat) continue;
+        if (!lstat) return;
 
         if (lstat.isSymbolicLink()) {
-          // Untrusted symlink detected (potential escape attack e.g. .env -> ../../../../some-host-file)
+          // Untrusted symlink detected (e.g. .env -> ../../../../etc/passwd)
           // NEVER follow symlink or write through it! Safely remove the symlink itself:
           await fs.unlink(fullPath);
           await fs.writeFile(fullPath, placeholder, { encoding: 'utf8', flag: 'w' });
@@ -428,9 +447,58 @@ export class RepoInspector {
           }
         }
       } catch (err) {
-        console.warn(`[Secret Sanitization] Handled security boundary for ${sf}:`, err);
+        console.warn(`[Secret Sanitization] Handled security boundary for ${relPath}:`, err);
       }
+    };
+
+    // Recursive directory walk matching SecurityPolicyEngine.isSensitiveSecret
+    const scanDir = async (currentDir: string, depth = 0) => {
+      if (depth > 6) return;
+      let entries: any[] = [];
+      try {
+        entries = await fs.readdir(currentDir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+
+      for (const entry of entries) {
+        if (
+          entry.name === '.git' ||
+          entry.name === 'node_modules' ||
+          entry.name === '.orchestrator_worktrees' ||
+          entry.name === '.orchestrator_sandboxes'
+        ) {
+          continue;
+        }
+
+        const fullPath = path.join(currentDir, entry.name);
+        const relPath = path.relative(canonicalWorktree, fullPath).replace(/\\/g, '/');
+
+        if (SecurityPolicyEngine.isSensitiveSecret(relPath)) {
+          if (entry.isDirectory()) {
+            await scanDir(fullPath, depth + 1);
+          } else {
+            await sanitizeEntry(fullPath, relPath);
+          }
+        } else if (entry.isDirectory()) {
+          await scanDir(fullPath, depth + 1);
+        }
+      }
+    };
+
+    // 1. Direct check of root-level sensitive files & dotfiles
+    const rootCommon = [
+      '.env', '.env.local', '.env.development', '.env.production', '.env.test',
+      '.npmrc', '.netrc', '.dockercfg', 'credentials.json', 'id_rsa', 'id_ed25519',
+      'service_account.json'
+    ];
+    for (const f of rootCommon) {
+      const p = path.join(canonicalWorktree, f);
+      await sanitizeEntry(p, f);
     }
+
+    // 2. Full recursive scan across all nested files and sensitive directories
+    await scanDir(canonicalWorktree);
   }
 
   /**

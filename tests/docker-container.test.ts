@@ -50,7 +50,7 @@ async function runDockerContainerTests() {
       executable: 'aider',
       args: ['--version'],
     });
-    const aiderImgIdx = aiderExecArgs.args.indexOf('paulgauthier/aider:latest');
+    const aiderImgIdx = aiderExecArgs.args.findIndex(a => a.includes('aider'));
     const argsAfterAiderImg = aiderExecArgs.args.slice(aiderImgIdx + 1);
     assert.strictEqual(argsAfterAiderImg[0], 'aider', 'Must pass executable once');
     assert.notStrictEqual(argsAfterAiderImg[1], 'aider', 'Must NOT duplicate executable name after image');
@@ -85,27 +85,47 @@ async function runDockerContainerTests() {
     // -------------------------------------------------------------------------
     // Test 4: Cross-Platform Kernel Boundary Secret Masking (--mount type=bind)
     // -------------------------------------------------------------------------
-    console.log('4. Testing cross-platform secret masking via --mount type=bind...');
+    console.log('4. Testing cross-platform recursive secret masking via --mount type=bind...');
+    // Create nested sensitive secret paths
+    await fs.mkdir(path.join(testDir, '.aws'), { recursive: true });
+    await fs.mkdir(path.join(testDir, '.ssh'), { recursive: true });
+    await fs.mkdir(path.join(testDir, 'backend', 'config'), { recursive: true });
+
     await fs.writeFile(path.join(testDir, '.env'), 'SECRET_KEY=supersecret');
-    await fs.writeFile(path.join(testDir, 'credentials.json'), '{"apiKey": "secret"}');
+    await fs.writeFile(path.join(testDir, '.npmrc'), '//registry.npmjs.org/:_authToken=npm_secret_token');
+    await fs.writeFile(path.join(testDir, '.aws', 'credentials'), '[default]\naws_access_key_id = AKIASECRET\naws_secret_access_key = secret');
+    await fs.writeFile(path.join(testDir, '.ssh', 'id_ed25519'), '-----BEGIN OPENSSH PRIVATE KEY-----\nsecret_key\n-----END OPENSSH PRIVATE KEY-----');
+    await fs.writeFile(path.join(testDir, 'backend', 'config', '.env.local'), 'DB_PASSWORD=nested_secret');
 
     const secretMaskArgs = ContainerSandbox.buildDockerRunArgs(testDir, 'node app.js');
     const mounts = secretMaskArgs.args.filter((_, idx, arr) => arr[idx - 1] === '--mount');
 
     assert.ok(
       mounts.some((m) => m.includes('target=/workspace/.env') && m.includes('readonly')),
-      'Must mount empty placeholder over .env with readonly flag'
+      'Must mount empty placeholder over root .env'
     );
     assert.ok(
-      mounts.some((m) => m.includes('target=/workspace/credentials.json') && m.includes('readonly')),
-      'Must mount empty placeholder over credentials.json with readonly flag'
+      mounts.some((m) => m.includes('target=/workspace/.npmrc') && m.includes('readonly')),
+      'Must mount empty placeholder over .npmrc'
+    );
+    assert.ok(
+      mounts.some((m) => m.includes('target=/workspace/.aws/credentials') && m.includes('readonly')),
+      'Must recursively mount empty placeholder over nested .aws/credentials'
+    );
+    assert.ok(
+      mounts.some((m) => m.includes('target=/workspace/.ssh/id_ed25519') && m.includes('readonly')),
+      'Must recursively mount empty placeholder over nested .ssh/id_ed25519'
+    );
+    assert.ok(
+      mounts.some((m) => m.includes('target=/workspace/backend/config/.env.local') && m.includes('readonly')),
+      'Must recursively mount empty placeholder over deeply nested .env.local'
     );
     // Ensure invalid /dev/null is NOT used as a bind mount source
     assert.ok(
       !secretMaskArgs.args.some((a) => a.includes('/dev/null:')),
       'Must NOT use Unix /dev/null as bind source for cross-platform Windows compatibility'
     );
-    console.log('   ✓ Sensitive credentials masked with cross-platform readonly bind mounts.');
+    console.log('   ✓ Sensitive credentials recursively masked across root and nested directories with readonly bind mounts.');
 
     // -------------------------------------------------------------------------
     // Test 5: Host Git Metadata Protection (Zero Write Access to Parent .git)
@@ -120,9 +140,51 @@ async function runDockerContainerTests() {
     console.log('   ✓ Container strictly denied write access to host repository Git metadata.');
 
     // -------------------------------------------------------------------------
-    // Test 6: Live Docker Daemon Execution & Diagnostics
+    // Test 6: Quarantined Worktree In-Place Resumption (P1)
     // -------------------------------------------------------------------------
-    console.log('6. Checking live Docker daemon availability...');
+    console.log('6. Testing Quarantined Worktree In-Place Resumption (Recovery-in-Place)...');
+    const { RepoInspector } = await import('../src/repo/inspector.js');
+    const { simpleGit } = await import('simple-git');
+    const dummyGitRepo = path.join(testDir, 'dummy-git-repo');
+    await fs.mkdir(dummyGitRepo, { recursive: true });
+    const dummyGit = simpleGit(dummyGitRepo);
+    await dummyGit.init();
+    await dummyGit.addConfig('user.name', 'TestRunner');
+    await dummyGit.addConfig('user.email', 'test@example.com');
+    await fs.writeFile(path.join(dummyGitRepo, 'file.txt'), 'hello');
+    await dummyGit.add('.');
+    await dummyGit.commit('init');
+
+    const inspector = new RepoInspector(dummyGitRepo);
+    // 1. First allocation
+    const wtDir = await inspector.createIsolatedWorktree('task-quarantined-test');
+    assert.ok(wtDir.includes('task-quarantined-test'));
+
+    // 2. Simulate dirty quarantined state
+    const draftFile = path.join(wtDir, 'draft_work.txt');
+    await fs.writeFile(draftFile, 'UNCOMMITTED_PRESERVED_CONTENT');
+
+    // 3. Second allocation on resume: must reuse existing quarantined directory in-place
+    const resumedWtDir = await inspector.createIsolatedWorktree('task-quarantined-test');
+    assert.strictEqual(resumedWtDir, wtDir, 'Must resume same worktree directory in-place');
+    const preservedDraft = await fs.readFile(draftFile, 'utf8');
+    assert.strictEqual(preservedDraft, 'UNCOMMITTED_PRESERVED_CONTENT', 'Uncommitted quarantined work must be preserved in-place');
+    console.log('   ✓ Quarantined worktrees safely resumed in-place without re-creation errors.');
+
+    // -------------------------------------------------------------------------
+    // Test 7: Image Availability Diagnostics Check (P1)
+    // -------------------------------------------------------------------------
+    console.log('7. Testing Docker Image Availability Check...');
+    const imgStatus = await ContainerSandbox.checkImageAvailability();
+    assert.ok(typeof imgStatus.claude === 'boolean');
+    assert.ok(typeof imgStatus.aider === 'boolean');
+    assert.ok(Array.isArray(imgStatus.missing));
+    console.log(`   ✓ Image availability diagnostics check succeeded (missing: ${imgStatus.missing.join(', ') || 'none'}).`);
+
+    // -------------------------------------------------------------------------
+    // Test 8: Live Docker Daemon Execution & Diagnostics
+    // -------------------------------------------------------------------------
+    console.log('8. Checking live Docker daemon availability...');
     const isDockerAvailable = await ContainerSandbox.isDockerAvailable();
     if (isDockerAvailable) {
       console.log('   Docker daemon is active. Running live container sandbox command...');
