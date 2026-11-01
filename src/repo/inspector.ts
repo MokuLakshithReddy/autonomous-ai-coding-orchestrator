@@ -6,6 +6,14 @@ import { simpleGit, type SimpleGit, type StatusResult } from 'simple-git';
 import { SecurityPolicyEngine } from '../security/policy.js';
 import { ContainerSandbox } from '../security/sandbox.js';
 
+export interface SafeRecoverySnapshotResult {
+  commit: string | null;
+  safeChangesCommitted: boolean;
+  allWorkPreserved: boolean;
+  uncommittedFilesRemaining: string[];
+  sensitiveFilesRemaining: string[];
+}
+
 export interface ProjectMetadata {
   isGitRepo: boolean;
   branch?: string;
@@ -427,36 +435,87 @@ export class RepoInspector {
    * P1 FIX: Dedicated safe recovery snapshot function.
    * Applies the exact same sensitive-file filtering and committer identity as normal checkpoints.
    * NEVER runs unrestricted `git add -A` against sensitive files or secrets.
-   * Verifies that all eligible uncommitted files were committed; returns null if any remain so
-   * orchestrator preserves/quarantines worktree safely.
+   * Distinguishes "all safe changes were committed" from "all task changes were preserved".
+   * If any sensitive or ordinary modifications remain uncommitted, allWorkPreserved is false,
+   * instructing the orchestrator to retain the worktree in quarantine for human review.
    */
-  async createSafeRecoverySnapshot(message: string): Promise<string | null> {
+  async createSafeRecoverySnapshot(message: string): Promise<SafeRecoverySnapshotResult> {
     try {
-      if (!(await this.isGitRepository())) return null;
-      const commit = await this.createTaskCheckpoint([], message);
-      if (!commit) return null;
+      if (!(await this.isGitRepository())) {
+        return {
+          commit: null,
+          safeChangesCommitted: false,
+          allWorkPreserved: false,
+          uncommittedFilesRemaining: [],
+          sensitiveFilesRemaining: [],
+        };
+      }
 
-      // P1 FIX (Issue 1): Verify that all eligible files were actually committed.
-      // If any eligible uncommitted files remain, return null so the worktree is quarantined.
+      const commit = await this.createTaskCheckpoint([], message);
+
+      // Inspect full Git status post-snapshot
       const currentStatus = await this.git.status();
-      const uncommittedEligible = currentStatus.files.filter((file) => {
-        if (SecurityPolicyEngine.isSensitiveSecret(file.path)) return false;
+      const uncommittedFilesRemaining: string[] = [];
+      const sensitiveFilesRemaining: string[] = [];
+      const uncommittedEligible: string[] = [];
+
+      for (const file of currentStatus.files) {
+        uncommittedFilesRemaining.push(file.path);
+        const isPathSecret = SecurityPolicyEngine.isSensitiveSecret(file.path);
         const fullPath = path.join(this.workspacePath, file.path);
-        if (ContainerSandbox.fileContainsSecrets(fullPath, file.path)) return false;
-        return true;
-      });
+        const hasContentSecret = ContainerSandbox.fileContainsSecrets(fullPath, file.path);
+
+        if (isPathSecret || hasContentSecret) {
+          sensitiveFilesRemaining.push(file.path);
+        } else {
+          uncommittedEligible.push(file.path);
+        }
+      }
+
+      const safeChangesCommitted = Boolean(commit) && uncommittedEligible.length === 0;
+      // All task work is preserved ONLY if zero uncommitted files remain in the worktree.
+      // If any sensitive or ordinary modifications remain uncommitted, allWorkPreserved is false!
+      const allWorkPreserved = safeChangesCommitted && sensitiveFilesRemaining.length === 0 && uncommittedFilesRemaining.length === 0;
 
       if (uncommittedEligible.length > 0) {
         console.warn(
-          `[Safe Recovery Snapshot] ${uncommittedEligible.length} eligible file(s) remain uncommitted after snapshot commit: ${uncommittedEligible.map((f) => f.path).join(', ')}. Marking snapshot incomplete to preserve worktree.`
+          `[Safe Recovery Snapshot] ${uncommittedEligible.length} eligible file(s) remain uncommitted after snapshot commit: ${uncommittedEligible.join(', ')}.`
         );
-        return null;
+      }
+      if (sensitiveFilesRemaining.length > 0) {
+        console.warn(
+          `[Safe Recovery Snapshot] ${sensitiveFilesRemaining.length} sensitive secret-bearing file(s) remain uncommitted in worktree: ${sensitiveFilesRemaining.join(', ')}. Worktree must be preserved for review.`
+        );
       }
 
-      return commit;
+      const result: SafeRecoverySnapshotResult = {
+        commit,
+        safeChangesCommitted,
+        allWorkPreserved,
+        uncommittedFilesRemaining,
+        sensitiveFilesRemaining,
+      };
+
+      // Compatibility helpers for string coercion
+      Object.defineProperty(result, Symbol.toPrimitive, {
+        value: () => commit || '',
+        enumerable: false,
+      });
+      Object.defineProperty(result, 'toString', {
+        value: () => commit || '',
+        enumerable: false,
+      });
+
+      return result;
     } catch (err: any) {
       console.error(`[Safe Recovery Snapshot] Failed to create recovery snapshot: ${err?.message}`);
-      return null;
+      return {
+        commit: null,
+        safeChangesCommitted: false,
+        allWorkPreserved: false,
+        uncommittedFilesRemaining: [],
+        sensitiveFilesRemaining: [],
+      };
     }
   }
 
@@ -883,7 +942,18 @@ export class RepoInspector {
         else if (hasRequirements) packageManager = 'pip';
 
         if (!testCmd && (hasTestPy || hasTestsDir || hasPyproject || hasRequirements)) {
-          testCmd = hasPoetry ? 'poetry run pytest' : 'python -m pytest';
+          const hasPytestConfig =
+            (await fs.access(path.join(this.workspacePath, 'pytest.ini')).then(() => true).catch(() => false)) ||
+            (await fs.access(path.join(this.workspacePath, 'conftest.py')).then(() => true).catch(() => false)) ||
+            (await fs.access(path.join(this.workspacePath, 'tox.ini')).then(() => true).catch(() => false));
+
+          if (hasPoetry) {
+            testCmd = 'poetry run pytest';
+          } else if (hasPytestConfig) {
+            testCmd = 'python -m pytest';
+          } else {
+            testCmd = 'python -m unittest discover -s . -p "*test*.py"';
+          }
         }
         const hasRuff =
           (await fs.access(path.join(this.workspacePath, 'ruff.toml')).then(() => true).catch(() => false)) ||

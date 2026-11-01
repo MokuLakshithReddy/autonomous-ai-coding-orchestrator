@@ -125,6 +125,8 @@ export class OrchestrationEngine extends EventEmitter {
     allowProtectedBranchMerge?: boolean;
     allowedWorkspaces?: string[];
     allowUnrestricted?: boolean;
+    customVerificationCmd?: string;
+    testCommand?: string;
   }): Promise<TaskRecord> {
     await initDatabase();
 
@@ -248,6 +250,8 @@ export class OrchestrationEngine extends EventEmitter {
       agentType?: 'builtin' | 'aider' | 'claude';
       autoMerge?: boolean;
       allowProtectedBranchMerge?: boolean;
+      customVerificationCmd?: string;
+      testCommand?: string;
     }
   ): Promise<void> {
     const active = this.activeTasks.get(taskId);
@@ -575,7 +579,8 @@ export class OrchestrationEngine extends EventEmitter {
       // P1.1: Verify against baseline commit so committed changes are tracked!
       const preStepVerifFingerprint = await taskInspector.getWorkspaceFingerprint();
       const isLastStep = i === plan.steps.length - 1;
-      const stepVerificationCmd = step.verificationCommand || (isLastStep ? undefined : repoMeta.buildCmd || undefined);
+      const taskCustomVerificationCmd = params.customVerificationCmd || params.testCommand;
+      const stepVerificationCmd = step.verificationCommand || (isLastStep ? taskCustomVerificationCmd : repoMeta.buildCmd || undefined);
       let verification = await verifier.verify(
         repoMeta,
         plan.acceptanceCriteria,
@@ -819,10 +824,11 @@ export class OrchestrationEngine extends EventEmitter {
     // P0 FIX: Capture pre-verification workspace fingerprint (HEAD commit + working tree + staged + untracked files)
     const preVerificationFingerprint = await taskInspector.getWorkspaceFingerprint();
     
+    const taskCustomVerificationCmd = params.customVerificationCmd || params.testCommand;
     const finalVerification = await verifier.verify(
       repoMeta,
       plan.acceptanceCriteria,
-      undefined,
+      taskCustomVerificationCmd,
       baseline?.baseCommit,
       { abortSignal: active?.abortController.signal }
     );
@@ -1278,11 +1284,18 @@ export class OrchestrationEngine extends EventEmitter {
             try {
               const gitStatus = await (taskInspector as any).git.status();
               if (!gitStatus.isClean()) {
-                const snapCommit = await taskInspector.createSafeRecoverySnapshot(
+                const snapResult = await taskInspector.createSafeRecoverySnapshot(
                   `Task ${taskId} recovery snapshot: uncommitted work preserved on branch ${taskBranchName || 'task'}`
                 );
-                if (!snapCommit) {
+                // P1 FIX: Distinguish "all safe changes committed" from "all task changes preserved".
+                // If any sensitive secret files or uncommitted modifications remain, retain the worktree in quarantine.
+                if (!snapResult || !snapResult.allWorkPreserved) {
                   snapshotPreserved = false;
+                  if (snapResult && snapResult.sensitiveFilesRemaining?.length > 0) {
+                    console.warn(
+                      `[Safe Recovery Quarantine] Secret-bearing changes remain uncommitted in worktree: ${snapResult.sensitiveFilesRemaining.join(', ')}. Preserving worktree for review.`
+                    );
+                  }
                 }
               }
             } catch (snapErr) {

@@ -46,7 +46,7 @@ export class ContainerSandbox {
   }
 
   private static readonly BINARY_EXTENSIONS = new Set([
-    '.png', '.jpg', '.jpeg', '.gif', '.ico', '.webp', '.svg',
+    '.png', '.jpg', '.jpeg', '.gif', '.ico', '.webp',
     '.woff', '.woff2', '.ttf', '.eot', '.otf',
     '.zip', '.tar', '.gz', '.tgz', '.7z', '.rar',
     '.pdf', '.wasm', '.bin', '.exe', '.dll', '.so', '.dylib',

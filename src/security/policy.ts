@@ -329,8 +329,27 @@ export class SecurityPolicyEngine {
   }
 
   /**
-   * P1 FIX: Content-based secret scanner.
-   * Scans strings/files for credentials, private keys, high-entropy tokens, and cloud API keys.
+   * Calculates Shannon entropy for a string (in bits per character).
+   */
+  static calculateShannonEntropy(str: string): number {
+    if (!str || str.length === 0) return 0;
+    const frequencies = new Map<string, number>();
+    for (const char of str) {
+      frequencies.set(char, (frequencies.get(char) || 0) + 1);
+    }
+    let entropy = 0;
+    const len = str.length;
+    for (const count of frequencies.values()) {
+      const p = count / len;
+      entropy -= p * Math.log2(p);
+    }
+    return entropy;
+  }
+
+  /**
+   * P1 FIX: Comprehensive content-based secret scanner.
+   * Scans strings/files for cryptographic private keys, database connection strings,
+   * cloud provider credentials, API secret keys, and high-entropy credential assignments.
    */
   static containsSensitiveSecret(content: string): { hasSecret: boolean; reason?: string } {
     if (!content || typeof content !== 'string') {
@@ -342,33 +361,80 @@ export class SecurityPolicyEngine {
       return { hasSecret: true, reason: 'Private cryptographic key header detected' };
     }
 
-    // 2. Cloud provider credentials & access tokens
+    // 2. Database connection strings with embedded credentials (e.g. postgres://user:password@host/db)
+    if (/\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis(?:s)?|amqp(?:s)?|mssql):\/\/[^\s:@\/]+:[^\s:@\/]+@[^\s\/]+/i.test(content)) {
+      return { hasSecret: true, reason: 'Database connection string with embedded credentials detected' };
+    }
+
+    // 3. Cloud provider credentials & access tokens
     if (/\bAKIA[0-9A-Z]{16}\b/.test(content)) {
       return { hasSecret: true, reason: 'AWS Access Key ID detected' };
     }
+    if (/(?:aws_secret_access_key|aws_session_token)\s*[:=]\s*['"]?[A-Za-z0-9\/+=]{40}['"]?/i.test(content)) {
+      return { hasSecret: true, reason: 'AWS Secret Access Key detected' };
+    }
     if (
-      /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{36,}\b/.test(content) ||
-      /\bgithub_pat_[A-Za-z0-9_]{50,}\b/.test(content)
+      /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{30,}\b/.test(content) ||
+      /\bgithub_pat_[A-Za-z0-9_]{22,}\b/.test(content)
     ) {
       return { hasSecret: true, reason: 'GitHub Personal Access Token detected' };
     }
     if (/\bAIza[0-9A-Za-z\-_]{35}\b/.test(content)) {
       return { hasSecret: true, reason: 'Google API key detected' };
     }
-    if (/\bsk-[a-zA-Z0-9_\-]{32,}\b/.test(content)) {
+    if (/\bya29\.[0-9A-Za-z\-_]{50,}\b/.test(content)) {
+      return { hasSecret: true, reason: 'Google OAuth access token detected' };
+    }
+    if (/\bsk-(?:ant-api03-|proj-|live-)?[a-zA-Z0-9_\-]{20,}\b/.test(content)) {
       return { hasSecret: true, reason: 'API Secret Key detected' };
+    }
+    if (/\b(?:sk|rk)_(?:live|test)_[0-9a-zA-Z]{24,}\b/.test(content)) {
+      return { hasSecret: true, reason: 'Stripe Secret Key detected' };
     }
     if (/\bxox[baprs]-[0-9a-zA-Z-]{10,}\b/.test(content)) {
       return { hasSecret: true, reason: 'Slack Token detected' };
     }
+    if (/\bSG\.[0-9A-Za-z\-_]{22}\.[0-9A-Za-z\-_]{43}\b/.test(content)) {
+      return { hasSecret: true, reason: 'SendGrid API key detected' };
+    }
+    if (/\bhf_[a-zA-Z0-9]{34,}\b/.test(content)) {
+      return { hasSecret: true, reason: 'HuggingFace access token detected' };
+    }
+    if (/\/\/[^\/]+\/:_authToken\s*=\s*['"]?[a-zA-Z0-9_\-]+['"]?/.test(content)) {
+      return { hasSecret: true, reason: 'NPM registry authentication token detected' };
+    }
 
-    // 3. Embedded secret assignments
-    if (
-      /(?:api[_-]?key|secret[_-]?key|private[_-]?key|auth[_-]?token|access[_-]?token|password)\s*[:=]\s*['"][a-zA-Z0-9_\-\.\/+=]{20,}['"]/i.test(
-        content
-      )
-    ) {
-      return { hasSecret: true, reason: 'High-entropy credential assignment detected' };
+    // 4. Database URL / DSN config assignments
+    if (/(?:database_url|db_uri|connection_string|conn_str|dsn)\s*[:=]\s*['"][^'"]+@[^'"]+['"]/i.test(content)) {
+      return { hasSecret: true, reason: 'Database connection configuration with credentials detected' };
+    }
+
+    // 5. Embedded credential & password assignments
+    const assignmentMatch = content.match(
+      /(?:api[_-]?key|secret[_-]?key|private[_-]?key|auth[_-]?token|access[_-]?token|client[_-]?secret|password|passwd|db_pass)\s*[:=]\s*['"]([^\s'"]{8,})['"]/i
+    );
+    if (assignmentMatch) {
+      const val = assignmentMatch[1];
+      const isPlaceholder = /^(?:change_me|your_api_key|placeholder|redacted|dummy_password|my_password|example_key|xxx+)$/i.test(val);
+      if (!isPlaceholder) {
+        return { hasSecret: true, reason: 'Credential assignment detected' };
+      }
+    }
+
+    // 6. High-entropy token detector for candidate assignments
+    const tokenCandidates = content.matchAll(
+      /(?:key|token|secret|auth|credential)\s*[:=]\s*['"]([a-zA-Z0-9_\-\.\/+=]{20,})['"]/gi
+    );
+    for (const match of tokenCandidates) {
+      const token = match[1];
+      // Skip UUIDs and repetitive strings
+      if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(token)) {
+        continue;
+      }
+      const entropy = this.calculateShannonEntropy(token);
+      if (entropy >= 3.6) {
+        return { hasSecret: true, reason: `High-entropy secret token detected (entropy: ${entropy.toFixed(2)})` };
+      }
     }
 
     return { hasSecret: false };

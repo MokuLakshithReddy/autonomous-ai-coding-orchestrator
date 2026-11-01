@@ -4,6 +4,7 @@ import os from 'node:os';
 import fs from 'node:fs/promises';
 import nodeFs from 'node:fs';
 import { ContainerSandbox } from '../src/security/sandbox.js';
+import { SecurityPolicyEngine } from '../src/security/policy.js';
 import { AgentToolbox } from '../src/agent/tools.js';
 
 async function runDockerContainerTests() {
@@ -377,18 +378,55 @@ async function runDockerContainerTests() {
     // And because credentials_in_ordinary.js contains secrets and cannot be committed,
     // wait: uncommittedEligible in createSafeRecoverySnapshot only counts non-secret files!
     // But safe-feature.js is staged and committed!
-    const snapCommit = await snapInspector.createSafeRecoverySnapshot('Recovery snapshot test');
-    assert.ok(snapCommit, 'Recovery snapshot must commit eligible safe changes');
+    const snapResult = await snapInspector.createSafeRecoverySnapshot('Recovery snapshot test');
+    assert.ok(snapResult.commit, 'Recovery snapshot must commit eligible safe changes');
+    assert.strictEqual(snapResult.safeChangesCommitted, true, 'Safe changes must be committed');
+    assert.strictEqual(
+      snapResult.allWorkPreserved,
+      false,
+      'allWorkPreserved must be false when uncommitted secret-bearing files remain'
+    );
+    assert.ok(
+      snapResult.sensitiveFilesRemaining.includes('credentials_in_ordinary.js'),
+      'Uncommitted sensitive files must be reported in sensitiveFilesRemaining'
+    );
 
     // Verify git log: safe-feature.js was committed, credentials_in_ordinary.js was NOT
-    const showDiff = await snapGit.show([snapCommit]);
+    const showDiff = await snapGit.show([snapResult.commit]);
     assert.ok(showDiff.includes('safe-feature.js'), 'Safe file must be committed in recovery snapshot');
     assert.ok(
       !showDiff.includes('credentials_in_ordinary.js'),
       'File with embedded secrets must NEVER be staged or committed in recovery snapshot!'
     );
 
-    console.log('   ✓ Embedded secrets excluded from recovery snapshots; safe changes committed.');
+    console.log('   ✓ Embedded secrets excluded from recovery snapshots; worktree retained for review.');
+
+    // -------------------------------------------------------------------------
+    // Test 13: SVG Files Text Secret Scanning & Database URL Detection (P1)
+    // -------------------------------------------------------------------------
+    console.log('13. Testing SVG Secret Scanning & Database Connection String Detection...');
+    const svgFile = path.join(testDir, 'logo.svg');
+    const svgContent = `<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">
+      <!-- apiKey = "sk-ant-api03-abcdefabcdefabcdefabcdef12345678" -->
+      <circle cx="50" cy="50" r="40" stroke="green" stroke-width="4" fill="yellow" />
+    </svg>`;
+    await fs.writeFile(svgFile, svgContent);
+
+    const svgContainsSecret = ContainerSandbox.fileContainsSecrets(svgFile, 'logo.svg');
+    assert.strictEqual(svgContainsSecret, true, 'SVG containing secret must be detected by content scanner');
+
+    // Test database connection string with password in ordinary settings.json
+    const dbUrlCheck = SecurityPolicyEngine.containsSensitiveSecret(
+      JSON.stringify({ databaseUrl: 'postgres://user:shortpassword@host.internal:5432/production_db' })
+    );
+    assert.strictEqual(dbUrlCheck.hasSecret, true, 'Database URL with embedded password must be detected');
+
+    // Test false-positive resistance: clean code, URLs without passwords, and UUIDs
+    const cleanCheck = SecurityPolicyEngine.containsSensitiveSecret(
+      JSON.stringify({ apiUrl: 'https://api.github.com/users', userId: '123e4567-e89b-12d3-a456-426614174000' })
+    );
+    assert.strictEqual(cleanCheck.hasSecret, false, 'Clean code and UUIDs must NOT be falsely flagged');
+    console.log('   ✓ SVG text content and database connection strings accurately scanned without false positives.');
 
     console.log('\n=== ALL DOCKER CONTAINER TESTS PASSED! ===\n');
   } finally {

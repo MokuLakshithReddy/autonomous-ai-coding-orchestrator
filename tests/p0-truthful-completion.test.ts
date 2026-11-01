@@ -1652,8 +1652,9 @@ console.log('Assertion PASSED: feature active is true');
 
   try {
     const failedSnapshot = await inspector37.createSafeRecoverySnapshot('Test recovery snapshot failure');
-    assert.strictEqual(failedSnapshot, null, 'createSafeRecoverySnapshot must return null on staging error');
-    console.log('   ✓ Snapshot returns null when staging fails, preventing silent deletion of uncommitted changes.');
+    assert.strictEqual(failedSnapshot.commit, null, 'createSafeRecoverySnapshot must return null commit on staging error');
+    assert.strictEqual(failedSnapshot.allWorkPreserved, false, 'allWorkPreserved must be false on staging failure');
+    console.log('   ✓ Snapshot returns null commit and false preservation when staging fails.');
   } finally {
     (inspector37 as any).git.add = origGitAdd;
   }

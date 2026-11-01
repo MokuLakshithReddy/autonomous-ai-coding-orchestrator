@@ -81,6 +81,7 @@ export async function runBenchmarkTask(
   task: BenchmarkTaskDefinition,
   options: { isLive: boolean; baseDir: string }
 ): Promise<TaskBenchmarkReport> {
+  await initDatabase();
   // 1. Setup workspace
   const { repoDir, initialCommit } = await setupTaskWorkspace(task, options.baseDir);
 
@@ -206,6 +207,7 @@ export async function runBenchmarkTask(
     workspacePath: orchRepoDir,
     maxRetries: 2,
     customAgent: customAgentForTask,
+    customVerificationCmd: task.testCommand,
   });
 
   // Await task completion
