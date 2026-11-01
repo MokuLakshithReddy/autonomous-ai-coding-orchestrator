@@ -54,13 +54,95 @@ export class ContainerSandbox {
   ]);
 
   /**
+   * P0 FIX: Scans complete file content for sensitive secrets using bounded streaming with overlap.
+   * - Scans entire file length across 64 KB chunks with 512-byte overlap so tokens spanning chunk
+   *   boundaries are never missed.
+   * - If a non-binary file exceeds the maximum scan budget (50 MB), fails closed and flags it as sensitive
+   *   so uninspected files are automatically masked at the container boundary.
+   * - Throws a Security Exception if an unreadable file cannot be inspected, preventing un-isolated execution.
+   */
+  static fileContainsSecrets(fullPath: string, relPath: string): boolean {
+    const ext = path.extname(fullPath).toLowerCase();
+    if (this.BINARY_EXTENSIONS.has(ext)) {
+      return false;
+    }
+
+    let stat: fs.Stats;
+    try {
+      stat = fs.statSync(fullPath);
+    } catch (err: any) {
+      throw new Error(
+        `Security Exception: Failed to stat file "${fullPath}" during mandatory secret scan: ${err.message}`
+      );
+    }
+
+    // Fail-closed for enormous text files: if exceeding 50 MB, mask it automatically
+    const MAX_STREAM_SCAN_BYTES = 50 * 1024 * 1024;
+    if (stat.size > MAX_STREAM_SCAN_BYTES) {
+      console.warn(
+        `[Container Secret Masking] File "${relPath}" (${(stat.size / (1024 * 1024)).toFixed(1)} MB) exceeds scan limit. Masking automatically to fail closed.`
+      );
+      return true;
+    }
+
+    if (stat.size === 0) {
+      return false;
+    }
+
+    const CHUNK_SIZE = 64 * 1024;
+    const OVERLAP_SIZE = 512;
+    let fd: number;
+    try {
+      fd = fs.openSync(fullPath, 'r');
+    } catch (err: any) {
+      throw new Error(
+        `Security Exception: Failed to open file "${fullPath}" during mandatory secret scan: ${err.message}`
+      );
+    }
+
+    try {
+      let offset = 0;
+      let prevOverlap = '';
+
+      while (offset < stat.size) {
+        const bytesToRead = Math.min(CHUNK_SIZE, stat.size - offset);
+        const buf = Buffer.alloc(bytesToRead);
+        const bytesRead = fs.readSync(fd, buf, 0, bytesToRead, offset);
+        if (bytesRead <= 0) break;
+
+        const currentChunk = buf.toString('utf8', 0, bytesRead);
+        const textToScan = prevOverlap + currentChunk;
+        const scanResult = SecurityPolicyEngine.containsSensitiveSecret(textToScan);
+        if (scanResult.hasSecret) {
+          console.warn(
+            `[Container Secret Masking] Detected embedded secret (${scanResult.reason}) in "${relPath}" at byte offset ${offset}. Adding to container mount masks.`
+          );
+          return true;
+        }
+
+        prevOverlap = currentChunk.slice(-OVERLAP_SIZE);
+        offset += bytesRead;
+      }
+
+      return false;
+    } catch (readErr: any) {
+      throw new Error(
+        `Security Exception: Failed to stream-inspect file content at "${fullPath}" during mandatory secret scan: ${readErr.message}. Cannot guarantee isolation.`
+      );
+    } finally {
+      try {
+        fs.closeSync(fd);
+      } catch {}
+    }
+  }
+
+  /**
    * P0/P1 FIX (Issues 3 & 7): Recursively discovers all sensitive secret paths in the workspace
-   * using both path-based criteria (SecurityPolicyEngine.isSensitiveSecret) AND content-based
-   * secret scanning (SecurityPolicyEngine.containsSensitiveSecret) for ordinary files (< 2MB).
+   * using both path-based criteria (SecurityPolicyEngine.isSensitiveSecret) AND complete streaming
+   * content-based secret scanning for ordinary non-binary files.
+   * - P0 FIX: Complete streaming inspection covers full file sizes beyond 128 KB and 2 MB without cutoff.
    * - P0 FIX (Issue 3): No arbitrary depth cutoff. Tracks visited directories to prevent loops,
    *   and fails closed on excessive depth (> 40) or filesystem inspection errors.
-   * - P1 FIX (Issue 7): Content-based secret inspection masks ordinary files containing credentials
-   *   (e.g., config.json with embedded API keys or tokens) so external agents cannot access them.
    */
   static findSensitiveFilesToMask(workspacePath: string): string[] {
     const sensitivePaths: string[] = [];
@@ -104,30 +186,9 @@ export class ContainerSandbox {
         } else if (entry.isDirectory()) {
           scan(fullPath, depth + 1);
         } else if (entry.isFile()) {
-          // P1 FIX (Issue 7): Content-based secret inspection on ordinary files
-          const ext = path.extname(entry.name).toLowerCase();
-          if (!this.BINARY_EXTENSIONS.has(ext)) {
-            try {
-              const stat = fs.statSync(fullPath);
-              if (stat.size <= 2 * 1024 * 1024) {
-                const fd = fs.openSync(fullPath, 'r');
-                const buf = Buffer.alloc(Math.min(stat.size, 128 * 1024));
-                fs.readSync(fd, buf, 0, buf.length, 0);
-                fs.closeSync(fd);
-                const content = buf.toString('utf8');
-                const scanResult = SecurityPolicyEngine.containsSensitiveSecret(content);
-                if (scanResult.hasSecret) {
-                  console.warn(
-                    `[Container Secret Masking] Detected embedded secret (${scanResult.reason}) in "${relPath}". Adding to container mount masks.`
-                  );
-                  sensitivePaths.push(relPath);
-                }
-              }
-            } catch (readErr: any) {
-              throw new Error(
-                `Security Exception: Failed to inspect file content at "${fullPath}" during mandatory secret scan: ${readErr.message}. Cannot guarantee isolation.`
-              );
-            }
+          // P0 FIX: Complete bounded streaming content scan on ordinary files
+          if (this.fileContainsSecrets(fullPath, relPath)) {
+            sensitivePaths.push(relPath);
           }
         }
       }

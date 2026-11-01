@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events';
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { RepoInspector, type ProjectMetadata } from '../repo/inspector.js';
+import { RepoInspector, isInternalOrchestratorPath, type ProjectMetadata } from '../repo/inspector.js';
 import { LLMBrain, type ExecutionPlan, type PlanStep, topologicallySortPlanSteps } from '../llm/index.js';
 import { BuiltInAutonomousAgent, createAgent, type CodingAgent } from '../agent/index.js';
 import { IndependentVerifier, type VerificationReport } from '../verifier/index.js';
@@ -898,25 +898,62 @@ export class OrchestrationEngine extends EventEmitter {
 
     // Truthful Completion Gate: Distinguish completed vs partially_completed vs needs_human_review vs failed
     if (finalVerification.isVerified && review.isComplete) {
-      // P0/P1 FIX (Issues 2 & 6): Commit any remaining verified changes in the worktree and sync commits
-      // from the isolated disposable repository back to the parent repository's task branch.
-      // Branch synchronization is a required condition; failure transitions task to needs_human_review.
+      // P1 FIX: Dedicated branch synchronization and verification function
+      const synchronizeTaskBranch = async (): Promise<void> => {
+        if (!taskWorktreePath || !isWorktree || !taskBranchName) return;
+
+        const wtLstat = await fs.lstat(taskWorktreePath).catch(() => null);
+        if (!wtLstat || !wtLstat.isDirectory()) {
+          throw new Error(
+            `Cannot synchronize branch: Isolated worktree directory "${taskWorktreePath}" is missing or inaccessible.`
+          );
+        }
+
+        // 1. Commit any remaining uncommitted verified changes safely
+        const statusCheck = await (taskInspector as any).git.status();
+        if (statusCheck.files.length > 0) {
+          await taskInspector.createTaskCheckpoint([], `Task ${taskId} final changes before completion`);
+        }
+
+        // 2. Verify expected branch exists in isolated repository
+        const wtBranches = await (taskInspector as any).git.branchLocal();
+        if (!wtBranches.all.includes(taskBranchName)) {
+          throw new Error(
+            `Cannot synchronize branch: Task branch "${taskBranchName}" not found in isolated repository.`
+          );
+        }
+        const wtLog = await (taskInspector as any).git.log({ maxCount: 1 });
+        const expectedCommit = wtLog.latest ? wtLog.latest.hash : null;
+        if (!expectedCommit) {
+          throw new Error(
+            `Cannot synchronize branch: No commit history found in isolated repository on branch "${taskBranchName}".`
+          );
+        }
+
+        // 3. Fetch from isolated repository into parent repository's task branch
+        const mainGit = (inspector as any).git;
+        await mainGit.raw([
+          'fetch',
+          taskWorktreePath,
+          `+refs/heads/${taskBranchName}:refs/heads/${taskBranchName}`,
+        ]);
+
+        // 4. Verify parent repository actually received the expected commit
+        const parentLog = await mainGit.raw(['rev-parse', taskBranchName]).catch(() => '');
+        const receivedCommit = parentLog.trim();
+        if (receivedCommit !== expectedCommit) {
+          throw new Error(
+            `Branch synchronization verification failed: Expected commit "${expectedCommit}" on parent branch "${taskBranchName}", but found "${receivedCommit}".`
+          );
+        }
+      };
+
+      // Synchronize task branch into parent repository before auto-merge
       if (taskWorktreePath && isWorktree && taskBranchName) {
         try {
-          const statusCheck = await (taskInspector as any).git.status();
-          if (statusCheck.files.length > 0) {
-            await taskInspector.createTaskCheckpoint([], `Task ${taskId} final changes before completion`);
-          }
-          const wtStat = await fs.stat(taskWorktreePath).catch(() => null);
-          if (wtStat && wtStat.isDirectory()) {
-            await (inspector as any).git.raw([
-              'fetch',
-              taskWorktreePath,
-              `+refs/heads/${taskBranchName}:refs/heads/${taskBranchName}`,
-            ]);
-          }
+          await synchronizeTaskBranch();
         } catch (syncErr: any) {
-          const syncErrMsg = `Safety Exception: Failed to synchronize task branch "${taskBranchName}" into parent repository: ${syncErr.message || syncErr}`;
+          const syncErrMsg = `Safety Exception: ${syncErr.message || syncErr}`;
           console.error(`[Worktree Sync Failure] ${syncErrMsg}`);
           await this.transitionTaskState(
             taskId,
@@ -947,11 +984,7 @@ export class OrchestrationEngine extends EventEmitter {
           }
 
           // P0/P1 FIX: Establish that destination working tree is 100% clean before attempting merge
-          const realDirtyFiles = currentStatus.files.filter(
-            (f) =>
-              !f.path.startsWith('.orchestrator_worktrees') &&
-              !f.path.startsWith('.orchestrator_sandboxes')
-          );
+          const realDirtyFiles = currentStatus.files.filter((f) => !isInternalOrchestratorPath(f.path));
           if (realDirtyFiles.length > 0) {
             throw new Error(
               `Cannot auto-merge: destination working tree has uncommitted or dirty changes (${realDirtyFiles
@@ -1122,17 +1155,10 @@ export class OrchestrationEngine extends EventEmitter {
           return;
         }
 
-        // P1 FIX (Issue 6): Branch synchronization into parent repository is a required completion condition
+        // P1 FIX: Final branch synchronization into parent repository is a required completion condition
         if (taskWorktreePath && isWorktree && taskBranchName) {
           try {
-            const wtStat = await fs.stat(taskWorktreePath).catch(() => null);
-            if (wtStat && wtStat.isDirectory()) {
-              await (inspector as any).git.raw([
-                'fetch',
-                taskWorktreePath,
-                `+refs/heads/${taskBranchName}:refs/heads/${taskBranchName}`,
-              ]);
-            }
+            await synchronizeTaskBranch();
           } catch (syncErr: any) {
             const syncErrMsg = `Safety Exception: Final synchronization of task branch "${taskBranchName}" failed: ${syncErr.message || syncErr}`;
             console.error(`[Worktree Final Sync Failure] ${syncErrMsg}`);
@@ -1247,15 +1273,17 @@ export class OrchestrationEngine extends EventEmitter {
       if (taskWorktreePath) {
         try {
           if (isWorktree) {
-            // P1 FIX (Issue 3): Check for uncommitted work and commit snapshot to task branch before removing worktree directory
+            // P1 FIX: Check for uncommitted work and commit safe snapshot without unrestricted git add -A
             let snapshotPreserved = true;
             try {
               const gitStatus = await (taskInspector as any).git.status();
               if (!gitStatus.isClean()) {
-                await (taskInspector as any).git.add(['-A']);
-                await (taskInspector as any).git.commit(
+                const snapCommit = await taskInspector.createSafeRecoverySnapshot(
                   `Task ${taskId} recovery snapshot: uncommitted work preserved on branch ${taskBranchName || 'task'}`
                 );
+                if (!snapCommit) {
+                  snapshotPreserved = false;
+                }
               }
             } catch (snapErr) {
               snapshotPreserved = false;

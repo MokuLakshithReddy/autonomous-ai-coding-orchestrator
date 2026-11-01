@@ -26,6 +26,21 @@ export interface GitBaseline {
   isClean: boolean;
 }
 
+/**
+ * P1 FIX: Matches exact internal orchestrator directories or subpaths under them.
+ * Does NOT match user-owned paths such as .orchestrator_worktrees_backup or .orchestrator_sandboxes_notes.
+ */
+export function isInternalOrchestratorPath(filePath: string): boolean {
+  if (!filePath) return false;
+  const norm = filePath.replace(/\\/g, '/').replace(/^\/+/, '');
+  return (
+    norm === '.orchestrator_worktrees' ||
+    norm.startsWith('.orchestrator_worktrees/') ||
+    norm === '.orchestrator_sandboxes' ||
+    norm.startsWith('.orchestrator_sandboxes/')
+  );
+}
+
 export class RepoInspector {
   private workspacePath: string;
   private git: SimpleGit;
@@ -74,12 +89,8 @@ export class RepoInspector {
     try {
       if (!(await this.isGitRepository())) return null;
       const status = await this.git.status();
-      // Filter out internal orchestrator directories from status results
-      status.files = status.files.filter(
-        (f) =>
-          !f.path.startsWith('.orchestrator_worktrees') &&
-          !f.path.startsWith('.orchestrator_sandboxes')
-      );
+      // P1 FIX: Filter out exact internal orchestrator directories without catching user paths
+      status.files = status.files.filter((f) => !isInternalOrchestratorPath(f.path));
       return status;
     } catch {
       return null;
@@ -316,7 +327,12 @@ export class RepoInspector {
 
       const filesToStage: string[] = [];
 
-      const isIsolatedWorktree = this.workspacePath.includes('.orchestrator_worktrees');
+      const normalizedWorkspace = this.workspacePath.replace(/\\/g, '/');
+      const isIsolatedWorktree =
+        normalizedWorkspace.includes('/.orchestrator_worktrees/') ||
+        normalizedWorkspace.endsWith('/.orchestrator_worktrees') ||
+        normalizedWorkspace.includes('/.orchestrator_sandboxes/') ||
+        normalizedWorkspace.endsWith('/.orchestrator_sandboxes');
       const initialDirtySet = isIsolatedWorktree
         ? new Set<string>()
         : new Set(this.baseline?.dirtyFilesAtStart || []);
@@ -374,6 +390,21 @@ export class RepoInspector {
       return commitResult.commit;
     } catch (err) {
       console.error('Failed to create safe git checkpoint:', err);
+      return null;
+    }
+  }
+
+  /**
+   * P1 FIX: Dedicated safe recovery snapshot function.
+   * Applies the exact same sensitive-file filtering and committer identity as normal checkpoints.
+   * NEVER runs unrestricted `git add -A` against sensitive files or secrets.
+   */
+  async createSafeRecoverySnapshot(message: string): Promise<string | null> {
+    try {
+      if (!(await this.isGitRepository())) return null;
+      return await this.createTaskCheckpoint([], message);
+    } catch (err: any) {
+      console.error(`[Safe Recovery Snapshot] Failed to create recovery snapshot: ${err?.message}`);
       return null;
     }
   }
@@ -462,9 +493,9 @@ export class RepoInspector {
         );
       }
 
-      // Enforce canonical containment inside authorized workspace
+      // Enforce canonical containment inside authorized workspace using platform-aware helper
       const canonicalWorktree = SecurityPolicyEngine.resolveCanonicalPath(worktreeDir);
-      if (!canonicalWorktree.startsWith(canonicalWorkspace + path.sep)) {
+      if (!SecurityPolicyEngine.isPathInside(canonicalWorktree, canonicalWorkspace)) {
         throw new Error(
           `Security Exception: Worktree directory "${worktreeDir}" resolves to "${canonicalWorktree}", outside authorized workspace "${canonicalWorkspace}".`
         );
@@ -553,18 +584,25 @@ export class RepoInspector {
     const canonicalWorktree = SecurityPolicyEngine.resolveCanonicalPath(worktreeDir);
     const placeholder = '# MASKED_BY_ORCHESTRATOR_ISOLATION\n# Real host secrets are prohibited inside isolated task workspaces.\n';
 
-    // P1 FIX (Issue 2): Discover all files tracked by Git in the worktree
+    // P1 FIX (Issue 2): Discover all files tracked by Git in the worktree. Fail closed on error.
     let trackedFiles = new Set<string>();
-    try {
-      const wtGit = simpleGit(canonicalWorktree);
-      const lsOutput = await wtGit.raw(['ls-files']);
-      trackedFiles = new Set(
-        lsOutput
-          .split(/\r?\n/)
-          .filter(Boolean)
-          .map((f) => f.replace(/\\/g, '/'))
-      );
-    } catch {}
+    const isGit = await simpleGit(canonicalWorktree).checkIsRepo().catch(() => false);
+    if (isGit) {
+      try {
+        const wtGit = simpleGit(canonicalWorktree);
+        const lsOutput = await wtGit.raw(['ls-files']);
+        trackedFiles = new Set(
+          lsOutput
+            .split(/\r?\n/)
+            .filter(Boolean)
+            .map((f) => f.replace(/\\/g, '/'))
+        );
+      } catch (err: any) {
+        throw new Error(
+          `Security Exception: Failed to retrieve tracked files from Git in "${canonicalWorktree}": ${err.message}. Aborting sanitization to prevent corrupting tracked source files.`
+        );
+      }
+    }
 
     const sanitizeEntry = async (fullPath: string, relPath: string) => {
       const lstat = await fs.lstat(fullPath);

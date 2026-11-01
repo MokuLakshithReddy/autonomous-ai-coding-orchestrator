@@ -36,7 +36,9 @@ jobs:
         run: npm ci
 
       - name: Typecheck & Build Backend
-        run: npm run build
+        run: |
+          npm run typecheck
+          npm run build
 
       - name: Run Critical P0/P1 Correctness & Security Tests
         run: npm test
