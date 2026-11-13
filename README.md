@@ -1,5 +1,8 @@
 # Autonomous AI Coding Orchestrator
 
+[![Stars](https://img.shields.io/github/stars/MokuLakshithReddy/autonomous-ai-coding-orchestrator?style=flat-square)](https://github.com/MokuLakshithReddy/autonomous-ai-coding-orchestrator/stargazers) [![Forks](https://img.shields.io/github/forks/MokuLakshithReddy/autonomous-ai-coding-orchestrator?style=flat-square)](https://github.com/MokuLakshithReddy/autonomous-ai-coding-orchestrator/forks) [![Open Issues](https://img.shields.io/github/issues/MokuLakshithReddy/autonomous-ai-coding-orchestrator?style=flat-square)](https://github.com/MokuLakshithReddy/autonomous-ai-coding-orchestrator/issues) [![Last Commit](https://img.shields.io/github/last-commit/MokuLakshithReddy/autonomous-ai-coding-orchestrator?style=flat-square)](https://github.com/MokuLakshithReddy/autonomous-ai-coding-orchestrator/commits/main)
+
+
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D22.12.0-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![Fastify](https://img.shields.io/badge/Fastify-v5.x-000000?logo=fastify&logoColor=white)](https://fastify.dev/)
