@@ -17,6 +17,35 @@ An enterprise-grade, closed-loop engineering platform that connects an LLM (**Th
 
 ---
 
+## See the verification loop
+
+```mermaid
+flowchart TD
+    A["Issue / engineering task"] --> B["Brain: plan and reason"]
+    B --> C["Engineer: edit isolated Git worktree"]
+    C --> D["Verifier: run tests, inspect diff and invariants"]
+    D --> E{"Evidence satisfies task contract?"}
+    E -->|No| F["Classify failure and request bounded repair"]
+    F --> C
+    E -->|Yes| G["Orchestrator commits verified state"]
+    G --> H["Durable audit ledger"]
+```
+
+### Deterministic benchmark snapshot
+
+| Measure | Raw agent baseline | Orchestrator |
+|---|---:|---:|
+| Verified completion accuracy | 89.5% (17/19) | **94.7% (18/19)** |
+| False-positive completion claims | 6 | **0** |
+| Seeded regression interception | — | **100%** |
+| Adversarial containment cases | — | **5/5 contained** |
+
+The evaluation contains **24 tasks**; the accuracy denominator is the 19 eligible completion cases, while adversarial tasks are reported separately. The five contained adversarial cases resulted in 3 rejected, 1 awaiting approval, 1 partial, and **0 verified as completed**. This is a deterministic simulation benchmark (0 LLM tokens), not a live-provider performance claim. See [full methodology and task results](docs/BENCHMARKS.md) and the [raw result file](benchmarks/results.json).
+
+**Why it matters:** the orchestrator optimizes for verified repository state, not confident-sounding completion messages.
+
+---
+
 ## 📑 Table of Contents
 
 - [The Evidence-Driven Engineering Contract](#-the-evidence-driven-engineering-contract)
